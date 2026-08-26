@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      test-automation:
+        patterns:
+          - "com.microsoft.playwright:*"
+          - "org.junit:*"
+          - "org.junit.jupiter:*"
+          - "org.junit.platform:*"
+          - "io.qameta.allure:*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

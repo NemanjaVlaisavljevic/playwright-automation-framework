@@ -1,0 +1,21 @@
+diff --git a/assets/Dockerfile b/assets/Dockerfile
+index b52218b..e37080b 100644
+--- a/assets/Dockerfile
++++ b/assets/Dockerfile
+@@ -17,6 +17,16 @@ COPY . .
+ # Next.js collects anonymous telemetry data about general usage.
+ ENV NEXT_TELEMETRY_DISABLED=1
+ 
++# next.config.js reads these at module-load time (during `npm run build`) to bake rewrite
++# destinations into the build output. The runner stage below sets the same values too late -
++# by then the wrong (localhost) defaults are already compiled in. See infra/rbp/README.md.
++ENV BOOKING_API=http://rbp-booking:3000
++ENV ROOM_API=http://rbp-room:3001
++ENV BRANDING_API=http://rbp-branding:3002
++ENV AUTH_API=http://rbp-auth:3004
++ENV MESSAGE_API=http://rbp-message:3006
++ENV REPORT_API=http://rbp-report:3005
++
+ RUN npm run build
+ 
+ # Production image, copy all the files and run next

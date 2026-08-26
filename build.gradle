@@ -1,0 +1,520 @@
+import java.time.Duration
+import org.gradle.internal.os.OperatingSystem
+
+plugins {
+    id 'java'
+    id 'com.diffplug.spotless' version '8.10.0'
+    id 'io.qameta.allure' version '4.1.0'
+}
+
+group = 'dev.vlaisanem.automation'
+version = '1.0.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:6.0.1')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    testImplementation 'com.microsoft.playwright:playwright:1.62.0'
+    testImplementation 'org.assertj:assertj-core:3.27.6'
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
+    testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.2'
+    testImplementation 'com.networknt:json-schema-validator:2.0.4'
+    testImplementation 'io.qameta.allure:allure-jupiter:2.35.4'
+    testImplementation 'org.slf4j:slf4j-api:2.0.18'
+    testRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+}
+
+def configureAutomationTest = { Test task ->
+    task.testClassesDirs = sourceSets.test.output.classesDirs
+    task.classpath = sourceSets.test.runtimeClasspath
+    task.useJUnitPlatform {
+        excludeTags 'mutation'
+    }
+    task.systemProperty 'file.encoding', 'UTF-8'
+    task.testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = false
+    }
+    task.reports.junitXml.required = true
+    task.reports.html.required = true
+}
+
+tasks.named('test', Test) {
+    configureAutomationTest(delegate)
+}
+
+tasks.register('smokeTest', Test) {
+    description = 'Runs fast read-only smoke checks.'
+    group = 'verification'
+    configureAutomationTest(delegate)
+    useJUnitPlatform {
+        includeTags 'smoke'
+        excludeTags 'mutation'
+    }
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('apiTest', Test) {
+    description = 'Runs read-only API checks.'
+    group = 'verification'
+    configureAutomationTest(delegate)
+    useJUnitPlatform {
+        includeTags 'api'
+        excludeTags 'mutation'
+    }
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('uiTest', Test) {
+    description = 'Runs read-only UI checks.'
+    group = 'verification'
+    configureAutomationTest(delegate)
+    useJUnitPlatform {
+        includeTags 'ui'
+        excludeTags 'mutation'
+    }
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('journeyTest', Test) {
+    description = 'Runs read-only API-and-UI journey checks.'
+    group = 'verification'
+    configureAutomationTest(delegate)
+    useJUnitPlatform {
+        includeTags 'journey'
+        excludeTags 'mutation'
+    }
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('regressionTest', Test) {
+    description = 'Runs the complete read-only regression suite.'
+    group = 'verification'
+    configureAutomationTest(delegate)
+    useJUnitPlatform {
+        includeTags 'regression'
+        excludeTags 'mutation'
+    }
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('mutationTest', Test) {
+    description = 'Runs opt-in tests that mutate the shared sandbox.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+        includeTags 'mutation'
+    }
+    systemProperty 'file.encoding', 'UTF-8'
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+    }
+    shouldRunAfter tasks.named('test')
+}
+
+// --- Local Restful Booker Platform stack (Docker Compose) ---------------------------------
+// See infra/rbp/README.md. None of this is wired into the default `test` task: bringing up
+// Docker / fetching upstream source is always an explicit, separate step the developer opts into.
+
+def rbpUpstreamProps = new Properties()
+file('infra/rbp/upstream.properties').withInputStream { rbpUpstreamProps.load(it) }
+def rbpRepo = rbpUpstreamProps.getProperty('repository')
+def rbpCommit = rbpUpstreamProps.getProperty('commit')
+if (rbpCommit == null || !(rbpCommit ==~ /[0-9a-f]{40}/)) {
+    throw new GradleException(
+        "infra/rbp/upstream.properties: commit must be exactly 40 lowercase hex characters, was '${rbpCommit}'")
+}
+def rbpSutRoot = file('build/rbp-sut')
+def rbpSutDir = new File(rbpSutRoot, rbpCommit)
+if (!rbpSutDir.toPath().normalize().startsWith(rbpSutRoot.toPath().normalize())) {
+    throw new GradleException("localSutPrepare: resolved rbpSutDir escapes build/rbp-sut/: ${rbpSutDir}")
+}
+def rbpComposeFile = file("${rbpSutDir}/docker-compose.yml")
+def rbpOverrideFile = file('infra/rbp/compose.override.yml')
+def rbpComposeProject = 'rbp-local-sut'
+def rbpJavaModules = ['auth', 'booking', 'room', 'report', 'branding', 'message']
+def rbpLocalBaseUrl = 'http://localhost'
+def rbpHealthEndpoints = [
+    auth    : 'http://localhost:3004/auth/actuator/health',
+    booking : 'http://localhost:3000/booking/actuator/health',
+    room    : 'http://localhost:3001/room/actuator/health',
+    report  : 'http://localhost:3005/report/actuator/health',
+    branding: 'http://localhost:3002/branding/actuator/health',
+    message : 'http://localhost:3006/message/actuator/health',
+]
+// GET-only checks against the assets front door itself - the 6 endpoints above only prove each
+// Java service is up, not that assets' rewrite proxy actually reaches them (see the compatibility
+// patch below: a build-time env bug there previously made by-id routes 500 while list routes and
+// the actuator endpoints stayed green).
+def rbpFrontDoorEndpoints = [
+    'http://localhost/',
+    'http://localhost/api/room/',
+    'http://localhost/api/room/1',
+]
+def rbpPatchFile = file('infra/rbp/patches/assets-build-env.patch')
+def rbpPatchMarkerFor = { ->
+    def digest = java.security.MessageDigest.getInstance('SHA-256')
+    def hash = digest.digest(rbpPatchFile.bytes).encodeHex().toString()
+    "local: apply build-env compatibility patch (infra/rbp/patches/assets-build-env.patch, sha256:${hash})"
+}
+
+def rbpComposeCommand = { composeArgs ->
+    ['docker', 'compose', '-p', rbpComposeProject, '-f', rbpComposeFile.absolutePath, '-f', rbpOverrideFile.absolutePath] + composeArgs
+}
+
+// Project.exec()/copy() (the `exec { ... }` closure sugar used inside a task action) was removed
+// in this Gradle version, so shell out via plain ProcessBuilder instead - no Gradle service needed.
+// Elements are coerced with toString() because GStrings (from string interpolation) are not
+// java.lang.String and ProcessBuilder requires real Strings. inheritIO() is deliberately NOT used:
+// the Gradle daemon has no real console, and letting a child try to inherit its console handles on
+// Windows hangs indefinitely after the command has otherwise finished (observed with `docker compose
+// up`, which built every image successfully and then never returned) - piping and relaying line by
+// line avoids that.
+def rbpRun = { command, File workDir = null ->
+    def builder = new ProcessBuilder(command.collect { it.toString() })
+    if (workDir != null) {
+        builder.directory(workDir)
+    }
+    builder.redirectErrorStream(true)
+    Process process = builder.start()
+    process.inputStream.newReader('UTF-8').eachLine { line -> logger.lifecycle(line) }
+    int exitCode = process.waitFor()
+    if (exitCode != 0) {
+        throw new GradleException("Command failed (exit ${exitCode}): ${command.join(' ')}")
+    }
+}
+
+def rbpCapture = { command, File workDir = null ->
+    def builder = new ProcessBuilder(command.collect { it.toString() })
+    if (workDir != null) {
+        builder.directory(workDir)
+    }
+    builder.redirectErrorStream(true)
+    Process process = builder.start()
+    String output = process.inputStream.getText('UTF-8')
+    int exitCode = process.waitFor()
+    if (exitCode != 0) {
+        throw new GradleException("Command failed (exit ${exitCode}): ${command.join(' ')}\n${output}")
+    }
+    return output.trim()
+}
+
+tasks.register('localSutPrepare') {
+    description = 'Fetches the pinned upstream Restful Booker Platform commit into build/rbp-sut/<commit> ' +
+        'and applies our local build-env compatibility patch on top (see infra/rbp/patches/).'
+    group = 'local sut'
+    inputs.file(rbpPatchFile)
+    outputs.dir(rbpSutDir)
+    doLast {
+        def patchMarker = rbpPatchMarkerFor()
+        if (rbpSutDir.exists() && new File(rbpSutDir, '.git').exists()) {
+            def headMessage = rbpCapture(['git', 'log', '-1', '--format=%s'], rbpSutDir)
+            def parentSha = null
+            try {
+                parentSha = rbpCapture(['git', 'rev-parse', 'HEAD~1'], rbpSutDir)
+            } catch (ignored) {
+                // No parent commit means the patch was never applied - fall through to re-prepare.
+            }
+            if (headMessage == patchMarker && parentSha == rbpCommit) {
+                logger.lifecycle("localSutPrepare: ${rbpCommit} already fetched and patched at ${rbpSutDir}")
+                return
+            }
+        }
+        rbpSutDir.deleteDir()
+        rbpSutDir.mkdirs()
+        rbpRun(['git', 'init', '-q'], rbpSutDir)
+        rbpRun(['git', 'remote', 'add', 'origin', rbpRepo], rbpSutDir)
+        rbpRun(['git', 'fetch', '--depth', '1', 'origin', rbpCommit], rbpSutDir)
+        rbpRun(['git', 'checkout', '-q', '--detach', 'FETCH_HEAD'], rbpSutDir)
+        rbpRun(['git', 'config', 'user.email', 'automation@local'], rbpSutDir)
+        rbpRun(['git', 'config', 'user.name', 'automation'], rbpSutDir)
+        // Fails loudly (non-zero exit -> GradleException) if a future re-pin of `commit` no longer
+        // matches this patch's context lines, instead of silently applying it somewhere wrong.
+        rbpRun(['git', 'apply', '--check', rbpPatchFile.absolutePath], rbpSutDir)
+        rbpRun(['git', 'apply', rbpPatchFile.absolutePath], rbpSutDir)
+        rbpRun(['git', 'commit', '-q', '-am', patchMarker], rbpSutDir)
+        logger.lifecycle("localSutPrepare: fetched ${rbpCommit} into ${rbpSutDir} and applied the local compatibility patch")
+    }
+}
+
+tasks.register('localSutBuild') {
+    description = 'Builds the 6 Java RBP service jars in a throwaway Maven container (upstream\'s ' +
+        'own Dockerfiles expect target/*.jar to already exist; they do not build it themselves).'
+    group = 'local sut'
+    dependsOn 'localSutPrepare'
+    doLast {
+        def mountPath = rbpSutDir.absolutePath.replace('\\', '/')
+        rbpRun([
+            'docker', 'run', '--rm',
+            '-v', "${mountPath}:/workspace",
+            '-v', 'rbp-m2-cache:/root/.m2',
+            '-w', '/workspace',
+            'maven:3.9-eclipse-temurin-26',
+            'mvn', '-q', '-pl', rbpJavaModules.join(','), '-am', 'clean', 'install', '-DskipTests',
+        ])
+        rbpJavaModules.each { module ->
+            def jars = fileTree("${rbpSutDir}/${module}/target") { include '*-exec.jar' }
+            if (jars.isEmpty()) {
+                throw new GradleException("localSutBuild: no exec jar produced for module '${module}'")
+            }
+        }
+        logger.lifecycle("localSutBuild: built jars for ${rbpJavaModules}")
+    }
+}
+
+tasks.register('localSutUp') {
+    description = 'Builds and starts all 7 RBP services via Docker Compose.'
+    group = 'local sut'
+    dependsOn 'localSutBuild'
+    doLast {
+        rbpRun(rbpComposeCommand(['up', '-d', '--build']))
+    }
+}
+
+def rbpDumpDiagnostics = {
+    logger.lifecycle('localSutHealth: dumping compose state and logs for diagnosis...')
+    try {
+        logger.lifecycle(rbpCapture(rbpComposeCommand(['ps'])))
+    } catch (GradleException exception) {
+        logger.lifecycle("localSutHealth: 'compose ps' failed: ${exception.message}")
+    }
+    try {
+        logger.lifecycle(rbpCapture(rbpComposeCommand(['logs', '--tail', '100'])))
+    } catch (GradleException exception) {
+        logger.lifecycle("localSutHealth: 'compose logs' failed: ${exception.message}")
+    }
+}
+
+tasks.register('localSutHealth') {
+    description = 'Polls each RBP Java service actuator endpoint plus the assets front door ' +
+        '(list AND by-id, to catch proxy-only failures the actuator endpoints miss) until healthy, ' +
+        'or fails. No fixed blind startup delay - polls on a short interval against a deadline instead.'
+    group = 'local sut'
+    dependsOn 'localSutUp'
+    doLast {
+        def timeout = Duration.ofMinutes(5)
+        def deadline = System.currentTimeMillis() + timeout.toMillis()
+        def pending = new LinkedHashMap<>(rbpHealthEndpoints)
+        while (!pending.isEmpty() && System.currentTimeMillis() < deadline) {
+            def stillPending = new LinkedHashMap<>()
+            pending.each { name, url ->
+                boolean up = false
+                try {
+                    def connection = new URL(url).openConnection()
+                    connection.connectTimeout = 2000
+                    connection.readTimeout = 2000
+                    up = connection.responseCode == 200 && connection.inputStream.text.contains('"UP"')
+                } catch (ignored) {
+                    up = false
+                }
+                if (!up) {
+                    stillPending[name] = url
+                }
+            }
+            pending = stillPending
+            if (!pending.isEmpty()) {
+                Thread.sleep(2000)
+            }
+        }
+        if (!pending.isEmpty()) {
+            rbpDumpDiagnostics()
+            throw new GradleException(
+                "localSutHealth: services not healthy after ${timeout}: ${pending.keySet()}")
+        }
+        logger.lifecycle("localSutHealth: all services UP (${rbpHealthEndpoints.keySet()})")
+
+        // HttpURLConnection does not auto-follow 307/308 (unlike Playwright's APIRequestContext,
+        // which the real tests use) - Next.js issues a 308 for its own trailing-slash normalization,
+        // which is not a failure. Follow redirects manually so we assert on the final status.
+        def httpStatusFollowingRedirects = { String startUrl ->
+            String currentUrl = startUrl
+            int code = -1
+            for (int hop = 0; hop <= 5; hop++) {
+                def connection = new URL(currentUrl).openConnection()
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                connection.instanceFollowRedirects = false
+                code = connection.responseCode
+                if (!(code in [301, 302, 303, 307, 308])) {
+                    break
+                }
+                def location = connection.getHeaderField('Location')
+                if (!location) {
+                    break
+                }
+                currentUrl = new URL(new URL(currentUrl), location).toString()
+            }
+            return code
+        }
+        def frontDoorDeadline = System.currentTimeMillis() + Duration.ofMinutes(2).toMillis()
+        def frontDoorFailures = []
+        while (true) {
+            frontDoorFailures = []
+            rbpFrontDoorEndpoints.each { url ->
+                try {
+                    int code = httpStatusFollowingRedirects(url)
+                    if (code != 200) {
+                        frontDoorFailures << "${url} -> ${code}"
+                    }
+                } catch (Exception exception) {
+                    frontDoorFailures << "${url} -> ${exception.message}"
+                }
+            }
+            if (frontDoorFailures.isEmpty() || System.currentTimeMillis() >= frontDoorDeadline) {
+                break
+            }
+            Thread.sleep(2000)
+        }
+        if (!frontDoorFailures.isEmpty()) {
+            rbpDumpDiagnostics()
+            throw new GradleException(
+                "localSutHealth: assets front door not healthy: ${frontDoorFailures}")
+        }
+        logger.lifecycle("localSutHealth: assets front door OK (${rbpFrontDoorEndpoints})")
+    }
+}
+
+tasks.register('localSutDown') {
+    description = 'Stops the local RBP stack.'
+    group = 'local sut'
+    doLast {
+        rbpRun(rbpComposeCommand(['down']))
+    }
+}
+
+tasks.register('localSutReset') {
+    description = 'Stops the local RBP stack and removes its containers and volumes.'
+    group = 'local sut'
+    doLast {
+        rbpRun(rbpComposeCommand(['down', '-v']))
+    }
+}
+
+tasks.register('localTest', Test) {
+    description = 'Runs the full regression suite (read-only + mutation) against the local RBP stack.'
+    group = 'verification'
+    dependsOn 'localSutHealth'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    // Every mutation test also carries the mandatory 'regression' tag (see AutomationExtension),
+    // so including 'regression' with no exclusion already pulls in both read-only and mutation tests.
+    useJUnitPlatform {
+        includeTags 'regression'
+    }
+    systemProperty 'file.encoding', 'UTF-8'
+    systemProperty 'baseUrl', rbpLocalBaseUrl
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = false
+    }
+    reports.junitXml.required = true
+    reports.html.required = true
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('stabilityTest') {
+    description = 'Reruns localTest repeatedly to build confidence in local-stack determinism. ' +
+        'Configure the count with -PstabilityRuns=N (default 10). Brings the stack up once (not ' +
+        'once per iteration), then reruns just the test execution. Runs every iteration regardless ' +
+        'of earlier failures, then reports a pass/fail summary; fails overall if any run failed.'
+    group = 'verification'
+    dependsOn 'localSutHealth'
+    doLast {
+        int runs = (project.findProperty('stabilityRuns') ?: '10') as int
+        if (runs < 1) {
+            throw new GradleException("stabilityTest: -PstabilityRuns must be a positive integer, was ${runs}")
+        }
+        def resultsRoot = file('build/stability-results')
+        resultsRoot.deleteDir()
+        resultsRoot.mkdirs()
+        def wrapperName = OperatingSystem.current().isWindows() ? 'gradlew.bat' : 'gradlew'
+        def wrapper = new File(project.projectDir, wrapperName).absolutePath
+        def outcomes = [:]
+        for (int i = 1; i <= runs; i++) {
+            logger.lifecycle("stabilityTest: run ${i}/${runs}")
+            // The stack is already up (see dependsOn above) - exclude the infra tasks so each
+            // iteration only reruns the JUnit execution itself against the already-running stack,
+            // instead of re-fetching/re-building/re-verifying it 10 times over.
+            def stabilityProcessBuilder = new ProcessBuilder([
+                wrapper, 'localTest', '--rerun',
+                '-x', 'localSutPrepare', '-x', 'localSutBuild', '-x', 'localSutUp', '-x', 'localSutHealth',
+            ]).directory(project.projectDir)
+            stabilityProcessBuilder.redirectErrorStream(true)
+            Process stabilityProcess = stabilityProcessBuilder.start()
+            stabilityProcess.inputStream.newReader('UTF-8').eachLine { line -> logger.lifecycle(line) }
+            int exitCode = stabilityProcess.waitFor()
+            def runDir = new File(resultsRoot, "run-${i}")
+            runDir.mkdirs()
+            copy {
+                from 'build/test-results/localTest'
+                into new File(runDir, 'test-results')
+            }
+            copy {
+                from 'build/reports/tests/localTest'
+                into new File(runDir, 'reports')
+            }
+            outcomes[i] = exitCode == 0
+            logger.lifecycle("stabilityTest: run ${i}/${runs} ${exitCode == 0 ? 'PASSED' : 'FAILED'}")
+        }
+        int passed = outcomes.values().count { it }
+        logger.lifecycle("stabilityTest: ${passed}/${runs} runs passed. Reports retained under ${resultsRoot}")
+        if (passed != runs) {
+            def failedRuns = outcomes.findAll { !it.value }.keySet()
+            throw new GradleException(
+                "stabilityTest: ${runs - passed}/${runs} runs failed (runs ${failedRuns}); " +
+                    "see per-run reports under ${resultsRoot}")
+        }
+    }
+}
+
+tasks.register('playwrightInstall', JavaExec) {
+    description = 'Installs the Playwright browser selected with -Pbrowser (chromium by default).'
+    group = 'playwright'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.microsoft.playwright.CLI'
+    if (providers.gradleProperty('withDeps').getOrElse('false').toBoolean()) {
+        args 'install', '--with-deps', providers.gradleProperty('browser').getOrElse('chromium')
+    } else {
+        args 'install', providers.gradleProperty('browser').getOrElse('chromium')
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ['-Xlint:all,-processing']
+}
+
+spotless {
+    java {
+        target 'src/**/*.java'
+        googleJavaFormat()
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+    format 'misc', {
+        target '*.gradle', '*.md', '.gitignore', '.github/**/*.yml', 'src/**/*.json', 'src/**/*.properties', 'src/**/*.xml'
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}

@@ -1,0 +1,17 @@
+# Layered on top of upstream's own docker-compose.yml (see upstream.properties for the pinned
+# commit). The Dockerfiles already default these inter-service hostnames to match the upstream
+# compose service names, so this override does not fix anything broken; it makes that wiring
+# explicit and visible in our own repo instead of relying on an implicit Dockerfile default we
+# don't control.
+services:
+  rbp-booking:
+    environment:
+      authDomain: rbp-auth
+      messageDomain: rbp-message
+  rbp-room:
+    environment:
+      authDomain: rbp-auth
+      bookingDomain: rbp-booking
+  rbp-message:
+    environment:
+      authDomain: rbp-auth
