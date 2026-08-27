@@ -18,6 +18,7 @@ public final class RoomReservationPage {
   private final Locator email;
   private final Locator phone;
   private final Locator confirmedHeading;
+  private final Locator validationAlert;
 
   /**
    * Navigates straight to a room's reservation page with an explicit date range, bypassing the
@@ -41,6 +42,12 @@ public final class RoomReservationPage {
     phone = page.getByLabel("Phone");
     confirmedHeading =
         page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Booking Confirmed"));
+    // Rendered from the server's rejection response (bookingErrors.map(...) -> <li>), confirmed
+    // against the running app's source (assets/src/components/reservation/BookingForm.tsx).
+    // getByRole(ALERT) alone is ambiguous - it also matches Next.js's own hidden
+    // "__next-route-announcer__" live region (role="alert", confirmed live) - so this is scoped to
+    // the specific alert-danger class the form actually renders.
+    validationAlert = page.locator("div.alert-danger[role='alert']");
   }
 
   public RoomReservationPage startReservation() {
@@ -67,8 +74,26 @@ public final class RoomReservationPage {
     return new ApiResult(response.status(), response.headers(), response.text());
   }
 
+  /**
+   * Asserts the validation-error alert is showing exactly the given messages - confirms the
+   * rejection actually reached the UI's error-rendering path, not just that a confirmation is
+   * absent (which would also be true if the click itself never fired a request).
+   */
+  public RoomReservationPage assertValidationErrors(String... expectedErrors) {
+    assertThat(validationAlert).isVisible();
+    for (String expected : expectedErrors) {
+      assertThat(validationAlert).containsText(expected);
+    }
+    return this;
+  }
+
   public RoomReservationPage assertBookingConfirmed() {
     assertThat(confirmedHeading).isVisible();
+    return this;
+  }
+
+  public RoomReservationPage assertBookingNotConfirmed() {
+    assertThat(confirmedHeading).not().isVisible();
     return this;
   }
 }

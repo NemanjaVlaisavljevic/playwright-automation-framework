@@ -25,4 +25,8 @@ public final class MessageClient extends BaseApiClient {
   public ApiResult getMessageCount() {
     return get(MESSAGES_PATH + "/count");
   }
+
+  public ApiResult deleteMessage(int messageId) {
+    return delete(MESSAGES_PATH + "/" + messageId);
+  }
 }

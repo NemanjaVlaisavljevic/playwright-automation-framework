@@ -53,12 +53,61 @@ public final class ManagedRoom implements AutoCloseable {
         .orElse(null);
   }
 
+  /** Adopts an already-created room (e.g. created via the UI) for safety-net cleanup. */
+  public static ManagedRoom track(RoomClient rooms, int roomId, CreateRoomRequest request) {
+    if (roomId <= 0) {
+      throw new IllegalArgumentException("roomId must be positive");
+    }
+    return new ManagedRoom(rooms, roomId, request);
+  }
+
+  /**
+   * Runs a caller-provided creation action (e.g. submitting the admin UI's create-room form) and
+   * looks the resulting room up by name, with the same protective cleanup as {@link #create} - if
+   * either the action or the lookup fails, this still attempts to find and delete the room by name
+   * before rethrowing, so a room the action actually created server-side is never left behind just
+   * because the lookup (or something else) failed before a {@code ManagedRoom} could be returned.
+   * The original failure is preserved; any cleanup failure is attached as a suppressed exception.
+   */
+  public static ManagedRoom createVia(
+      RoomClient rooms, CreateRoomRequest request, Runnable creationAction) {
+    Integer createdRoomId = null;
+    try {
+      creationAction.run();
+      createdRoomId = findRoomId(rooms, request.roomName());
+      if (createdRoomId == null) {
+        throw new AssertionError("Room created via the UI was not returned by the API");
+      }
+      return new ManagedRoom(rooms, createdRoomId, request);
+    } catch (RuntimeException | AssertionError failure) {
+      if (createdRoomId == null) {
+        try {
+          createdRoomId = findRoomId(rooms, request.roomName());
+        } catch (RuntimeException lookupFailure) {
+          failure.addSuppressed(lookupFailure);
+        }
+      }
+      if (createdRoomId != null) {
+        cleanupAfterSetupFailure(rooms, createdRoomId, failure);
+      }
+      throw failure;
+    }
+  }
+
   public int roomId() {
     return roomId;
   }
 
   public CreateRoomRequest request() {
     return request;
+  }
+
+  /**
+   * Marks this room as already handled (e.g. the test itself deleted it via the UI as its main
+   * action), so {@link #close()} does not also try to delete an already-deleted room.
+   */
+  public void release() {
+    closed = true;
   }
 
   @Override

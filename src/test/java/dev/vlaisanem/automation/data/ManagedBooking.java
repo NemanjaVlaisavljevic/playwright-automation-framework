@@ -63,6 +63,14 @@ public final class ManagedBooking implements AutoCloseable {
     return bookingId;
   }
 
+  /**
+   * Marks this booking as already handled (e.g. the test itself deleted it via the UI as its main
+   * action), so {@link #close()} does not also try to delete an already-deleted booking.
+   */
+  public void release() {
+    closed = true;
+  }
+
   public BookingResponse created() {
     if (created == null) {
       throw new IllegalStateException("This managed booking tracks an existing response only");
