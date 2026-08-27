@@ -285,44 +285,17 @@ tasks.register('localSutUp') {
     }
 }
 
-def rbpDiagnosticsDir = file('build/diagnostics/rbp')
-
-// Shared by the standalone localSutDiagnostics task and localSutHealth's own on-failure dump below -
-// writes files (for CI artifact upload) as well as logging to the console (for local dev visibility).
-def rbpWriteDiagnostics = {
-    logger.lifecycle('localSutDiagnostics: dumping compose state and logs for diagnosis...')
-    rbpDiagnosticsDir.mkdirs()
+def rbpDumpDiagnostics = {
+    logger.lifecycle('localSutHealth: dumping compose state and logs for diagnosis...')
     try {
-        def psOutput = rbpCapture(rbpComposeCommand(['ps', '--all']))
-        logger.lifecycle(psOutput)
-        new File(rbpDiagnosticsDir, 'compose-ps.txt').setText(psOutput, 'UTF-8')
+        logger.lifecycle(rbpCapture(rbpComposeCommand(['ps'])))
     } catch (GradleException exception) {
-        logger.lifecycle("localSutDiagnostics: 'compose ps' failed: ${exception.message}")
-        new File(rbpDiagnosticsDir, 'compose-ps.txt').setText("compose ps failed: ${exception.message}", 'UTF-8')
+        logger.lifecycle("localSutHealth: 'compose ps' failed: ${exception.message}")
     }
     try {
-        def logsOutput = rbpCapture(rbpComposeCommand(['logs', '--tail', '100', '--no-color', '--timestamps']))
-        logger.lifecycle(logsOutput)
-        new File(rbpDiagnosticsDir, 'compose-logs.txt').setText(logsOutput, 'UTF-8')
+        logger.lifecycle(rbpCapture(rbpComposeCommand(['logs', '--tail', '100'])))
     } catch (GradleException exception) {
-        logger.lifecycle("localSutDiagnostics: 'compose logs' failed: ${exception.message}")
-        new File(rbpDiagnosticsDir, 'compose-logs.txt').setText("compose logs failed: ${exception.message}", 'UTF-8')
-    }
-}
-
-tasks.register('localSutDiagnostics') {
-    description = 'Dumps `docker compose ps`/`logs` for the local RBP stack to build/diagnostics/rbp/ ' +
-        '(for CI artifact upload) and to the console. Deliberately does not depend on localSutUp/' +
-        'localSutBuild - safe to run any time, including right after localTest fails in CI, without ' +
-        'rebuilding or restarting the stack it is trying to diagnose.'
-    group = 'local sut'
-    outputs.dir(rbpDiagnosticsDir)
-    // No inputs are declared (there is nothing meaningful to hash - this reflects live container
-    // state), so without this a second invocation whose output directory still matches what was
-    // recorded last time would be marked UP-TO-DATE and skip re-dumping, silently leaving stale logs.
-    outputs.upToDateWhen { false }
-    doLast {
-        rbpWriteDiagnostics()
+        logger.lifecycle("localSutHealth: 'compose logs' failed: ${exception.message}")
     }
 }
 
@@ -358,7 +331,7 @@ tasks.register('localSutHealth') {
             }
         }
         if (!pending.isEmpty()) {
-            rbpWriteDiagnostics()
+            rbpDumpDiagnostics()
             throw new GradleException(
                 "localSutHealth: services not healthy after ${timeout}: ${pending.keySet()}")
         }
@@ -407,7 +380,7 @@ tasks.register('localSutHealth') {
             Thread.sleep(2000)
         }
         if (!frontDoorFailures.isEmpty()) {
-            rbpWriteDiagnostics()
+            rbpDumpDiagnostics()
             throw new GradleException(
                 "localSutHealth: assets front door not healthy: ${frontDoorFailures}")
         }
