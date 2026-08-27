@@ -1,0 +1,73 @@
+name: Local SUT Regression
+
+# Runs the full read-only + mutation regression suite against the local Docker Compose RBP stack
+# (see infra/rbp/README.md), instead of the shared public host. Not wired to push/pull_request -
+# it fetches/builds upstream source and starts 7 containers, which is too slow/expensive for every
+# PR. Scheduled weekly as a determinism canary, plus manual dispatch on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 04:17 UTC - deliberately off a round hour/half-hour to avoid the fixed-minute pile-up
+    # of jobs scheduled at :00/:30 across GitHub Actions.
+    - cron: '17 4 * * 1'
+
+concurrency:
+  group: local-sut-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  local-sut-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Install Chromium
+        run: ./gradlew playwrightInstall -PwithDeps=true
+
+      # setup-gradle caches the Gradle User Home (incl. the local build cache) between runs, and this
+      # project has org.gradle.caching=true + a local build cache enabled - so a Test task can come
+      # back FROM-CACHE instead of actually re-executing against the live stack. --rerun forces real
+      # execution every time. The Docker/Maven side is a separate, deliberate cold-build decision (the
+      # rbp-m2-cache Docker volume never persists across ephemeral runners either way) - not addressed
+      # here; tracked as the next optimization step once this workflow is green and its real runtime
+      # is known.
+      - name: Run local SUT regression + mutation suite
+        run: ./gradlew localTest --rerun
+
+      - name: Dump local SUT diagnostics
+        if: failure()
+        run: ./gradlew localSutDiagnostics
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: local-sut-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            build/reports/tests/
+            build/test-results/
+            build/allure-results/
+            build/artifacts/
+            build/diagnostics/rbp/
+
+      - name: Stop local SUT stack
+        if: always()
+        continue-on-error: true
+        run: ./gradlew localSutDown
