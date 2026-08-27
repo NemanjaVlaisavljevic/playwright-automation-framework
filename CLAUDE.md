@@ -26,11 +26,20 @@ A Java + Playwright UI/API automation framework testing [Restful Booker Platform
 ./gradlew.bat localSutHealth      # wait for every service's health endpoint (no fixed blind startup delay)
 ./gradlew.bat localTest           # run the full regression + mutation suite against the local stack (http://localhost)
 ./gradlew.bat stabilityTest       # rerun localTest N times (-PstabilityRuns=N, default 10) to check determinism
+./gradlew.bat localSutDiagnostics # dump `docker compose ps`/`logs` to build/diagnostics/rbp/; no dependsOn on up/build, safe any time
 ./gradlew.bat localSutDown        # stop the local stack
 ./gradlew.bat localSutReset       # stop the local stack and remove its containers/volumes
 ```
 
 `localTest` is the mutation-suite target intended for real use — it points `baseUrl` at the local stack, so the shared-target guard never blocks it. See `infra/rbp/README.md` for the full local-SUT task list; it also documents a small local patch (`infra/rbp/patches/`) needed to work around a build-time env var bug in upstream's own `assets` Dockerfile. `localTest` passes 27/27 and `stabilityTest -PstabilityRuns=10` has passed 10/10.
+
+## CI
+
+Two GitHub Actions workflows, both pinned to full commit SHAs (with a version comment):
+- `.github/workflows/quality-gate.yml` — `spotlessCheck` + the default read-only `test` suite, on every push to `main` and every PR.
+- `.github/workflows/local-sut.yml` — `localTest` (full read-only + mutation regression) against the local Docker Compose stack, on a weekly schedule plus manual `workflow_dispatch`. Not wired to push/PR: fetching upstream source and building/starting 7 containers is too slow for that. On failure it runs `localSutDiagnostics` before uploading evidence, and always tears the stack down (`localSutDown`, `continue-on-error: true`) regardless of outcome.
+
+Both workflows run their `Test` task with `--rerun`: `setup-gradle` caches the Gradle User Home between runs, and this project has `org.gradle.caching=true` plus a local build cache (`settings.gradle`), so a `Test` task can otherwise come back `FROM-CACHE` instead of actually re-executing against the live app. `.m2`/Docker-layer caching is a separate matter and is **not** wired up — the `rbp-m2-cache` Docker volume and any Maven/Gradle dependency cache never persist across CI's ephemeral runners, so every `local-sut.yml` run still does a cold Java-service build; deliberately deferred rather than blocking this workflow's rollout.
 
 Run a single test class/method with standard Gradle test filtering, e.g.:
 `./gradlew.bat test --tests "dev.vlaisanem.automation.tests.api.RoomApiContractTest"`
