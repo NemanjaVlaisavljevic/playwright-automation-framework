@@ -1,0 +1,45 @@
+@import "./tokens.css";
+@import "./reset.css";
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+}
+
+a {
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* One consistent focus style across every native and custom interactive element - never removed
+ * without a replacement. `:focus-visible` (not `:focus`) so it only shows for keyboard/AT users,
+ * not on every mouse click. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* For content that must be present for assistive tech (a table's accessible name, extra context
+ * for a screen reader) but has no useful sighted representation - never used to hide something a
+ * sighted user also needs. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

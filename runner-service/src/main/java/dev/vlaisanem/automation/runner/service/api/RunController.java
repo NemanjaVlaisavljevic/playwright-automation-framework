@@ -132,9 +132,7 @@ public class RunController {
     @ApiResponse(
         responseCode = "200",
         content =
-            @Content(
-                mediaType = MediaType.TEXT_PLAIN_VALUE,
-                schema = @Schema(type = "string", format = "binary"))),
+            @Content(mediaType = MediaType.TEXT_PLAIN_VALUE, schema = @Schema(type = "string"))),
     @ApiResponse(
         responseCode = "404",
         description = "No run exists for the given runId, or its process log does not exist yet.",

@@ -533,6 +533,102 @@ tasks.register('stabilityTest') {
     }
 }
 
+// --- Dashboard E2E (real browser + real runner-service + real runner-dashboard) -----------------
+// Deliberately its own source set, not just another tag-filtered Test task over sourceSets.test:
+// these tests exercise the runner-dashboard/runner-service stack itself, not Restful Booker
+// Platform, so they share none of AutomationExtension's RBP-facing tag taxonomy and must never be
+// reachable by any Gradle task name the runner-service's own RunRequestValidator allowlist could
+// launch (that allowlist is the actual recursion guard - this source set living outside `test`
+// entirely, and this task never being wired into `check`, is what keeps it outside that allowlist
+// in the first place).
+sourceSets {
+    dashboardE2eTest {
+        java.srcDir('src/dashboardE2eTest/java')
+        resources.srcDir('src/dashboardE2eTest/resources')
+    }
+}
+
+configurations {
+    dashboardE2eTestImplementation.extendsFrom testImplementation
+}
+
+// Deliberately NOT dashboardE2eTestRuntimeOnly.extendsFrom(testRuntimeOnly): that would pull in
+// `project(':runner-listener')`, whose META-INF/services-registered TestExecutionListener
+// auto-discovers on ANY JUnit Platform launcher classpath and starts writing its own raw JSONL
+// event files (see RunnerEventTestExecutionListener) - confirmed live, running this suite once
+// produced build/runner-events/raw/local-*.tests.jsonl files that this suite's tests have nothing
+// to do with. Listed out explicitly instead so this source set only ever gets what it actually
+// needs to execute JUnit Platform tests at all.
+dependencies {
+    dashboardE2eTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+}
+
+// Builds the dashboard's production bundle once, ahead of the whole dashboardE2eTest run - shared
+// by both DashboardE2eEnvironment's own instance and BackendUnavailableE2eTest's isolated one (see
+// their respective `vite preview` invocations), each serving the same dist/ on its own port. Normal
+// Gradle up-to-date checking applies here (unlike dashboardE2eTest itself, just below) - there is no
+// reason to rebuild an unchanged bundle on every invocation.
+tasks.register('dashboardBuild', Exec) {
+    description = 'Builds the runner-dashboard production bundle for dashboardE2eTest.'
+    group = 'verification'
+    workingDir file('runner-dashboard')
+    if (OperatingSystem.current().isWindows()) {
+        commandLine 'cmd.exe', '/c', 'npm.cmd', 'run', 'build'
+    } else {
+        commandLine 'npm', 'run', 'build'
+    }
+    inputs.dir(file('runner-dashboard/src'))
+    inputs.dir(file('runner-dashboard/public'))
+    inputs.files(
+        file('runner-dashboard/package.json'),
+        file('runner-dashboard/package-lock.json'),
+        file('runner-dashboard/index.html'),
+        file('runner-dashboard/vite.config.ts'),
+        file('runner-dashboard/tsconfig.json'),
+        file('runner-dashboard/tsconfig.app.json'),
+        file('runner-dashboard/tsconfig.node.json'))
+    outputs.dir(file('runner-dashboard/dist'))
+}
+
+tasks.register('dashboardE2eTest', Test) {
+    description = 'Real-browser Playwright E2E tests against a real runner-service + runner-dashboard.'
+    group = 'verification'
+    testClassesDirs = sourceSets.dashboardE2eTest.output.classesDirs
+    classpath = sourceSets.dashboardE2eTest.runtimeClasspath
+    dependsOn ':runner-service:bootJar', 'dashboardBuild'
+    useJUnitPlatform()
+    // This task starts real OS processes (a real backend, a real dashboard server) and drives a
+    // real public target through a real browser on every invocation - it has side effects Gradle's
+    // input/output modeling cannot see, so treating it as cacheable/up-to-date like an ordinary
+    // Test task would let a re-run silently report stale PASSED results without ever touching the
+    // real system again.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    // The shared backend (a single-worker executor - see RunService), fixed dashboard ports, and
+    // DashboardE2eEnvironment's own root-context-store "start once" pattern all assume exactly one
+    // test class executes at a time - both at the Gradle-worker level and inside the JUnit Platform
+    // engine itself.
+    maxParallelForks = 1
+    systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+    systemProperty 'file.encoding', 'UTF-8'
+    // The exact jar path (Spring Boot's own naming/versioning), and where the two sibling
+    // directories this suite orchestrates actually live - resolved once here rather than
+    // re-guessed in Java, since `runner-dashboard/` is deliberately not a Gradle module itself
+    // (see its own README) and has no other way to tell this task where it is.
+    systemProperty 'dashboardE2e.runnerServiceJar',
+        tasks.getByPath(':runner-service:bootJar').archiveFile.get().asFile.absolutePath
+    systemProperty 'dashboardE2e.repoRoot', rootProject.projectDir.absolutePath
+    systemProperty 'dashboardE2e.dashboardDir', file('runner-dashboard').absolutePath
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = false
+    }
+    reports.junitXml.required = true
+    reports.html.required = true
+}
+
 tasks.register('playwrightInstall', JavaExec) {
     description = 'Installs the Playwright browser selected with -Pbrowser (chromium by default).'
     group = 'playwright'

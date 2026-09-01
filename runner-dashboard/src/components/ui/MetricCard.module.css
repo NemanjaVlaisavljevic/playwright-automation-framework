@@ -1,0 +1,35 @@
+.card {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  border-top: 3px solid var(--color-border-strong);
+}
+
+.value {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.label {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.info {
+  border-top-color: var(--color-info);
+}
+
+.success {
+  border-top-color: var(--color-success);
+}
+
+.danger {
+  border-top-color: var(--color-danger);
+}
+
+.warning {
+  border-top-color: var(--color-warning);
+}

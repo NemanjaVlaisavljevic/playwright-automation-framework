@@ -267,6 +267,61 @@ class OpenApiContractTest {
         .containsExactlyInAnyOrder("environment", "suite");
   }
 
+  /**
+   * Locks both invariants {@code OpenApiConfig#problemDetailContractCustomizer} exists to fix -
+   * verified empirically against a real {@code 404} response body ({@code
+   * {"detail":"...","instance":"/api/v1/runs/does-not-exist","status":404,"title":"Not Found"}}):
+   * {@code title}/{@code status}/{@code detail}/{@code instance} are always present ({@code type}
+   * and {@code properties} deliberately are not, since that same response omits both); and {@code
+   * instance} must not carry {@code format: uri}, since typed-openapi maps that to Zod's {@code
+   * z.url()}, which rejects the relative path Spring actually sends.
+   */
+  @Test
+  void problemDetailHasExactlyTheExpectedRequiredFields() {
+    JsonNode problemDetail = spec.path("components").path("schemas").path("ProblemDetail");
+    assertThat(requiredFieldsOf(problemDetail))
+        .containsExactlyInAnyOrder("title", "status", "detail", "instance");
+  }
+
+  @Test
+  void problemDetailInstanceIsAPlainStringNotAnAbsoluteUri() {
+    JsonNode instance =
+        spec.path("components")
+            .path("schemas")
+            .path("ProblemDetail")
+            .path("properties")
+            .path("instance");
+    assertThat(instance.path("type").asText()).isEqualTo("string");
+    assertThat(instance.has("format"))
+        .as("instance must not carry format: uri - real values are relative URI references")
+        .isFalse();
+  }
+
+  /**
+   * Regression test for a real bug: the previous {@code @Schema(type = "string", format =
+   * "binary")} annotation described an opaque binary payload, but this endpoint's actual {@code
+   * text/plain} content is UTF-8 log text meant to be read, not opaque bytes. typed-openapi mapped
+   * {@code format: binary} to Zod's {@code z.custom<Blob>(...)}, while the generated client's own
+   * {@code text/plain} handling parses the body as a string via {@code response.text()} - output
+   * validation against that mismatch would throw for every real log download. This test would have
+   * failed against the original annotation; it must keep failing if {@code format: binary} ever
+   * comes back.
+   */
+  @Test
+  void downloadRunLogSchemaIsAPlainStringNotBinary() {
+    JsonNode schema =
+        spec.path("paths")
+            .path("/api/v1/runs/{runId}/log")
+            .path("get")
+            .path("responses")
+            .path("200")
+            .path("content")
+            .path(MediaType.TEXT_PLAIN_VALUE)
+            .path("schema");
+    assertThat(schema.path("type").asText()).isEqualTo("string");
+    assertThat(schema.path("format").asText()).isNotEqualTo("binary");
+  }
+
   private List<String> allOperationIds() {
     List<String> ids = new ArrayList<>();
     Iterator<Map.Entry<String, JsonNode>> paths = spec.path("paths").fields();

@@ -1,0 +1,62 @@
+/** A small, deliberately incomplete reset - just enough to stop the browser's own defaults from
+ * fighting the tokens above; not a full CSS-reset library. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100svh;
+  line-height: var(--line-height-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+img,
+picture,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+a {
+  color: inherit;
+}
+
+/**
+ * The one deliberate exception to "no !important" (see README): this has to out-rank any
+ * component's own transition/animation duration, and the WCAG-recommended pattern for
+ * `prefers-reduced-motion` is exactly a global override like this one - a per-component opt-in
+ * would require every future animated component to remember to add it itself.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
