@@ -1,5 +1,9 @@
 rootProject.name = 'playwright-automation-framework'
 
+include 'runner-contract'
+include 'runner-listener'
+include 'runner-service'
+
 buildCache {
     local {
         enabled = true

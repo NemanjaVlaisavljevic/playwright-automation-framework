@@ -1,0 +1,55 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.1.1'
+}
+
+group = 'dev.vlaisanem.automation'
+version = '1.0.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    implementation platform('org.springframework.boot:spring-boot-dependencies:4.1.1')
+
+    implementation project(':runner-contract')
+
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+    // spring-boot-starter-webmvc alone does not pull in Jackson's autoconfiguration (unlike the
+    // classic spring-boot-starter-web) - without this, no ObjectMapper bean is ever created and the
+    // context fails to start the moment anything (FileBackedRunEventJournal, ListenerEventIngestor)
+    // asks Spring for one. Caught by actually starting the service, not by any unit test - those all
+    // construct their own ObjectMapper directly, bypassing Spring's DI entirely.
+    implementation 'org.springframework.boot:spring-boot-starter-json'
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    // API docs only (no Swagger UI) - the frontend build pipeline consumes /v3/api-docs to
+    // generate a typed client; nothing in this service's own runtime needs an interactive UI.
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-api:3.1.0'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Spring Boot 4 moved @WebMvcTest out of spring-boot-test-autoconfigure into its own module.
+    testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// Gradle's bootRun defaults to this subproject's own directory as the working directory, but
+// RunnerProperties.repoRoot (default ".") assumes it's the repository root (where gradlew.bat /
+// gradlew live) - without this, ./gradlew.bat :runner-service:bootRun resolves the wrapper path
+// one directory too deep and every run fails at process startup.
+tasks.named('bootRun') {
+    workingDir = rootProject.projectDir
+}

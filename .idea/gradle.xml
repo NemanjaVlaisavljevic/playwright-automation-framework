@@ -8,9 +8,11 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/runner-contract" />
+            <option value="$PROJECT_DIR$/runner-listener" />
+            <option value="$PROJECT_DIR$/runner-service" />
           </set>
         </option>
-        <option name="myGradleHome" value="" />
       </GradleProjectSettings>
     </option>
   </component>

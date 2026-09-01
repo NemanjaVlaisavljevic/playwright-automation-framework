@@ -25,6 +25,10 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
+    // Auto-discovered via META-INF/services/org.junit.platform.launcher.TestExecutionListener -
+    // emits one RunnerEvent JSONL line per test start/finish/skip. See runner-listener module.
+    testRuntimeOnly project(':runner-listener')
+
     testImplementation 'com.microsoft.playwright:playwright:1.62.0'
     testImplementation 'org.assertj:assertj-core:3.27.6'
     testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
@@ -35,6 +39,23 @@ dependencies {
     testRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
 }
 
+// The runner-listener module writes one JSONL file per runId (see RunnerEventTestExecutionListener)
+// and assumes exactly one JVM process ever writes it. Gradle's Test JVM does not inherit -D system
+// properties from the Gradle invocation by default (only environment variables are inherited
+// automatically) - so runner.runId/runner.rawEventsDir must be forwarded explicitly here to reach a
+// forked test JVM launched with them. maxParallelForks is pinned to 1 (Gradle's own default, but
+// made explicit rather than relied upon) because the listener's in-JVM lock cannot protect a shared
+// runId file against a second, separate Gradle test worker process.
+def forwardRunnerEventProperties = { Test task ->
+    ['runner.runId', 'runner.rawEventsDir'].each { property ->
+        def value = System.getProperty(property)
+        if (value) {
+            task.systemProperty property, value
+        }
+    }
+    task.maxParallelForks = 1
+}
+
 def configureAutomationTest = { Test task ->
     task.testClassesDirs = sourceSets.test.output.classesDirs
     task.classpath = sourceSets.test.runtimeClasspath
@@ -42,6 +63,7 @@ def configureAutomationTest = { Test task ->
         excludeTags 'mutation'
     }
     task.systemProperty 'file.encoding', 'UTF-8'
+    forwardRunnerEventProperties(task)
     task.testLogging {
         events 'passed', 'skipped', 'failed'
         exceptionFormat = 'full'
@@ -119,6 +141,7 @@ tasks.register('mutationTest', Test) {
         includeTags 'mutation'
     }
     systemProperty 'file.encoding', 'UTF-8'
+    forwardRunnerEventProperties(delegate)
     testLogging {
         events 'passed', 'skipped', 'failed'
         exceptionFormat = 'full'
@@ -444,6 +467,7 @@ tasks.register('localTest', Test) {
     }
     systemProperty 'file.encoding', 'UTF-8'
     systemProperty 'baseUrl', rbpLocalBaseUrl
+    forwardRunnerEventProperties(delegate)
     testLogging {
         events 'passed', 'skipped', 'failed'
         exceptionFormat = 'full'
@@ -538,6 +562,28 @@ spotless {
         target '*.gradle', '*.md', '.gitignore', '.github/**/*.yml', 'src/**/*.json', 'src/**/*.properties', 'src/**/*.xml'
         trimTrailingWhitespace()
         endWithNewline()
+    }
+}
+
+// Runner modules (runner-contract/runner-listener/runner-service) each have their own build.gradle,
+// so Spotless is not inherited from the root project's own config above - apply it here instead of
+// duplicating the same java/misc blocks in every module's build.gradle.
+subprojects {
+    apply plugin: 'com.diffplug.spotless'
+
+    spotless {
+        java {
+            target 'src/**/*.java'
+            googleJavaFormat()
+            removeUnusedImports()
+            trimTrailingWhitespace()
+            endWithNewline()
+        }
+        format 'misc', {
+            target '*.gradle', '*.md', '.gitignore', 'src/**/*.json', 'src/**/*.properties', 'src/**/*.xml', 'src/**/*.yml'
+            trimTrailingWhitespace()
+            endWithNewline()
+        }
     }
 }
 

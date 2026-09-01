@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: runner-service
+  jackson:
+    default-property-inclusion: non_null
+  mvc:
+    problemdetails:
+      enabled: true
+
+# address defaults to loopback-only: this service can launch arbitrary Gradle/Playwright processes
+# on request, so it must never be reachable from other machines on the network without explicit
+# opt-in. A future container deployment overrides this via the standard Spring Boot env var, e.g.
+# SERVER_ADDRESS=0.0.0.0 - never change this default directly.
+server:
+  address: 127.0.0.1
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+# repo-root defaults to "." - this service is expected to be launched with the repository root
+# (the directory containing gradlew/gradlew.bat) as its working directory.
+runner:
+  repo-root: .
+  process-timeout: PT10M
+  raw-events-dir: build/runner-events/raw
+  journal-dir: build/runner-events/journal
+  logs-dir: build/runner-logs
+  process-log-max-bytes: 10485760
+  termination-grace-period: PT5S
+  degraded-poll-interval: PT2S
+  queue-capacity: 5
+  ingestion-poll-interval: PT0.15S
+  ingestion-drain-timeout: PT5S
+  sse-max-subscribers: 100
+  sse-heartbeat-interval: PT15S
+  sse-emitter-timeout: PT10M
