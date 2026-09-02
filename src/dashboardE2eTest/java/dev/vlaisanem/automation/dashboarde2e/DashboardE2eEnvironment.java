@@ -8,7 +8,6 @@ import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
-import com.microsoft.playwright.Tracing;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -16,7 +15,6 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -104,18 +102,13 @@ final class DashboardE2eEnvironment
 
   @Override
   public void beforeEach(ExtensionContext context) throws IOException {
-    // A stale directory from a previous FAILING run of this same test must not survive a
-    // subsequent PASSING run - otherwise its old screenshot/trace/video could be mistaken for
-    // fresh evidence of a failure that didn't actually happen this time.
-    deleteRecursively(failureDirFor(context));
+    BrowserFailureArtifacts.clearStale(failureDirFor(context));
 
     Browser browser = sharedResources(context).browser;
     Path videoDir = Files.createTempDirectory("dashboard-e2e-video-");
     BrowserContext browserContext =
         browser.newContext(new Browser.NewContextOptions().setRecordVideoDir(videoDir));
-    browserContext
-        .tracing()
-        .start(new Tracing.StartOptions().setScreenshots(true).setSnapshots(true));
+    BrowserFailureArtifacts.startTracing(browserContext);
     Page page = browserContext.newPage();
     context.getStore(NAMESPACE).put(BrowserContext.class, browserContext);
     context.getStore(NAMESPACE).put(Page.class, page);
@@ -134,47 +127,23 @@ final class DashboardE2eEnvironment
     // Screenshot and trace FIRST, before anything below that could itself change what is on
     // screen - cancelActiveRunIfAny flips a still-RUNNING run to CANCELLED, and capturing evidence
     // after that would show a state the test never actually failed in, hiding the real one.
-    if (failed) {
-      safely(() -> Files.createDirectories(failureDir));
-      safely(
-          () ->
-              page.screenshot(
-                  new Page.ScreenshotOptions()
-                      .setPath(failureDir.resolve("screenshot.png"))
-                      .setFullPage(true)));
-      safely(
-          () ->
-              browserContext
-                  .tracing()
-                  .stop(new Tracing.StopOptions().setPath(failureDir.resolve("trace.zip"))));
-    } else {
-      safely(() -> browserContext.tracing().stop());
-    }
+    BrowserFailureArtifacts.captureBeforeClose(failureDir, failed, page, browserContext);
 
     // Independent of pass/fail: a run this test launched must never be left occupying the shared
     // backend's single-worker slot, whether or not artifact capture itself went smoothly.
-    safely(() -> cancelActiveRunIfAny(page));
+    BrowserFailureArtifacts.safely(() -> cancelActiveRunIfAny(page));
 
     // Playwright only finalizes a context's recorded video once the context itself closes - the
     // final path is not available to read beforehand. Run unconditionally, even if a step above
     // threw, so the context (and the browser resource it holds) is never leaked.
-    safely(browserContext::close);
-    if (failed) {
-      var video = page.video();
-      if (video != null) {
-        safely(() -> Files.move(video.path(), failureDir.resolve("video.webm")));
-      }
-    }
-    safely(() -> deleteRecursively(videoDir));
+    BrowserFailureArtifacts.safely(browserContext::close);
+    BrowserFailureArtifacts.saveVideoIfFailed(failureDir, failed, page);
+    BrowserFailureArtifacts.safely(() -> BrowserFailureArtifacts.deleteRecursively(videoDir));
   }
 
   private static Path failureDirFor(ExtensionContext context) {
-    return Path.of(
-        "build",
-        "dashboard-e2e-failures",
-        context.getRequiredTestClass().getSimpleName()
-            + "-"
-            + context.getRequiredTestMethod().getName());
+    return BrowserFailureArtifacts.directoryFor(
+        context.getRequiredTestClass(), context.getRequiredTestMethod().getName());
   }
 
   /**
@@ -188,10 +157,10 @@ final class DashboardE2eEnvironment
    *
    * <p>Only a {@code 404} (a test whose final page was never a real run at all, e.g. {@code
    * NotFoundRunE2eTest}) is treated as "nothing to clean up". Every other failure mode - a thrown
-   * network exception, a non-{@code 404} non-2xx status, a malformed response body, or the
-   * terminal-status poll below timing out - is deliberately allowed to propagate as an exception:
-   * {@code safely()} logs it, so a cleanup that silently failed while a run stayed active is never
-   * mistaken for one that actually worked.
+   * network exception, a non-{@code 404} non-2xx status, a malformed response body, the
+   * terminal-status poll below timing out, or the poll's wait between attempts being interrupted -
+   * is deliberately allowed to propagate as an exception: {@code safely()} logs it, so a cleanup
+   * that silently failed while a run stayed active is never mistaken for one that actually worked.
    */
   private void cancelActiveRunIfAny(Page page) {
     String url;
@@ -224,7 +193,8 @@ final class DashboardE2eEnvironment
         Thread.sleep(500);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        return;
+        throw new IllegalStateException(
+            "interrupted while waiting for run at " + runUrl + " to reach a terminal status", e);
       }
     }
     throw new IllegalStateException(
@@ -387,44 +357,5 @@ final class DashboardE2eEnvironment
     }
     command.addAll(List.of(args));
     return command;
-  }
-
-  /**
-   * A best-effort per-test cleanup step (capturing an artifact, cancelling a leftover run) must
-   * never itself hide the test's own real failure by throwing over it, and one such step failing
-   * must never prevent the next one from still running.
-   */
-  private static void safely(ThrowingRunnable action) {
-    try {
-      action.run();
-    } catch (Exception e) {
-      System.err.println("dashboardE2eTest: cleanup step failed: " + e);
-    }
-  }
-
-  @FunctionalInterface
-  private interface ThrowingRunnable {
-    void run() throws Exception;
-  }
-
-  private static void deleteRecursively(Path root) {
-    if (root == null || !Files.exists(root)) {
-      return;
-    }
-    try (var paths = Files.walk(root)) {
-      paths
-          .sorted(Comparator.reverseOrder())
-          .forEach(
-              path -> {
-                try {
-                  Files.delete(path);
-                } catch (IOException e) {
-                  // Best-effort cleanup of a scratch temp directory - not worth failing a test run
-                  // over a file the OS is still briefly holding onto.
-                }
-              });
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
   }
 }

@@ -69,6 +69,33 @@ The default `test` task excludes the `mutation` tag. This is deliberate: a profe
 
 Requires Docker Desktop (with Compose) and `git`; no other toolchain needs to be installed on the host — the Java build runs inside a throwaway Maven container. `localSutPrepare` applies a small local patch on top of the pinned upstream source to fix a build-time env var ordering bug in the `assets` service's own Dockerfile (details, including why it's a patch and not a fork, in `infra/rbp/README.md`). With that patch, `localTest` passes 27/27, and `stabilityTest -PstabilityRuns=10` has passed 10/10.
 
+## Dashboard end-to-end tests
+
+`dashboardE2eTest` proves the `runner-service` (Spring Boot, SSE-based test runner) and `runner-dashboard` (React/Vite frontend) actually work together, end to end, through a real headless Chromium — not just their own unit/component suites in isolation.
+
+```bash
+./gradlew.bat dashboardE2eTest   # one command: builds everything it needs and runs all 7 scenarios
+```
+
+That single command already depends on everything else it needs — `:runner-service:bootJar` and `dashboardBuild` (the dashboard's production bundle, built once via `npm run build` and cached by normal Gradle up-to-date checking) — so no separate build step is required. `dashboardBuild` can still be run on its own (`./gradlew.bat dashboardBuild`) to just produce/refresh `runner-dashboard/dist` without running any tests.
+
+Prerequisites beyond the base [Quick start](#quick-start) ones: Node 24 (see `runner-dashboard/.nvmrc`) and npm on `PATH`, and the Chromium browser installed via `./gradlew.bat playwrightInstall` (the same Playwright browser cache the main suite uses — no separate install step).
+
+What it actually starts: one real `runner-service` process (`java -jar`, the real backend), one real `runner-dashboard` served via `vite preview` against the production bundle (not `vite dev` — this is what proves the shipped artifact works, not just its dev-mode transform pipeline), and one real headless Chromium driving it via Playwright — shared across six of the seven scenarios (each still gets its own fresh browser context/page). The backend-unavailable/recovery scenario deliberately gets its own fully isolated backend+dashboard pair on separate ports instead, since it needs to actually kill "the backend" without affecting the other six. The run-lifecycle scenario launches a real SMOKE-suite run through the dashboard's own UI and follows it live over SSE against this repo's public read-only target (`automationintesting.online`); the Cancel scenario does the same with the REGRESSION suite specifically, so it runs long enough to reliably observe the run still `RUNNING` before clicking Cancel — both are genuine cross-process, cross-network integration tests, not a mock.
+
+The 7 scenarios: run lifecycle (launch → live SSE updates → terminal status, with numeric Total/Passed metric checks), a 404 for a non-existent run, downloading a run's log, a strict Cancel that must actually reach `CANCELLED` (not merely stop updating), an SSE gap-replay scenario, a native-reconnect scenario, and an isolated backend-unavailable/recovery pair that kills and restarts its own backend on separate ports so it can never affect the other 6. The gap-replay and native-reconnect scenarios are honestly labeled as browser-level SSE transport/recovery integration tests (built with Playwright network routing) rather than full backend-failure E2E — see their own test-class Javadoc for the distinction.
+
+Where results land:
+
+| What | Where |
+|---|---|
+| JUnit HTML report | `build/reports/tests/dashboardE2eTest/` |
+| JUnit XML | `build/test-results/dashboardE2eTest/` |
+| Failure evidence (screenshot, Playwright trace, video) | `build/dashboard-e2e-failures/<TestClass>-<method>/`, one directory per failed test only |
+| `runner-service`/`runner-dashboard` stdout/stderr | `build/dashboard-e2e-logs/<name>.log` — always written, not just on failure |
+
+Every test gets a Playwright trace and video running the whole time, but only a **failed** test's are actually kept — open `trace.zip` with `npx playwright show-trace` for a timeline replay of exactly what the browser saw.
+
 ## Configuration
 
 System properties take precedence over environment variables.

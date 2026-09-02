@@ -8,6 +8,7 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.assertions.LocatorAssertions;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -18,7 +19,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.ExtensionContext;
 
 /**
  * Deliberately does <b>not</b> use {@link DashboardE2eEnvironment} - this scenario needs to
@@ -35,7 +40,16 @@ import org.junit.jupiter.api.Timeout;
  * server.proxy} for its own proxy config when {@code preview.proxy} is not set separately, so no
  * extra config was needed there - only {@code --strictPort} to guarantee it actually binds {@link
  * #ISOLATED_DASHBOARD_PORT} rather than silently picking another one.
+ *
+ * <p>Still gets the same screenshot/trace/video-on-failure evidence as every other test in this
+ * suite (see {@link BrowserFailureArtifacts}), just wired up directly in {@link
+ * #startIsolatedBackend} / {@link #cleanup} instead of through {@code DashboardE2eEnvironment}'s
+ * extension - this class's own {@code @BeforeEach}/{@code @AfterEach} already own the page's
+ * lifecycle, and {@link FailureFlag} (a minimal {@link AfterTestExecutionCallback}) is the only
+ * piece needed on top to know whether the test failed, since {@code @AfterEach} methods have no
+ * direct way to ask that.
  */
+@ExtendWith(BackendUnavailableE2eTest.FailureFlag.class)
 class BackendUnavailableE2eTest {
 
   private static final int ISOLATED_BACKEND_PORT = 8081;
@@ -53,6 +67,9 @@ class BackendUnavailableE2eTest {
 
   private DashboardProcess isolatedBackend;
   private Page page;
+  private Path videoDir;
+  private Path failureDir;
+  private boolean testFailed;
 
   @BeforeAll
   static void startIsolatedDashboardPreview() throws IOException {
@@ -145,9 +162,15 @@ class BackendUnavailableE2eTest {
   }
 
   @BeforeEach
-  void startIsolatedBackend() throws IOException {
+  void startIsolatedBackend(TestInfo testInfo) throws IOException {
+    failureDir =
+        BrowserFailureArtifacts.directoryFor(
+            getClass(), testInfo.getTestMethod().orElseThrow().getName());
+    BrowserFailureArtifacts.clearStale(failureDir);
     isolatedBackend = startBackendOnIsolatedPort();
-    page = browser.newPage();
+    videoDir = Files.createTempDirectory("dashboard-e2e-video-");
+    page = browser.newPage(new Browser.NewPageOptions().setRecordVideoDir(videoDir));
+    BrowserFailureArtifacts.startTracing(page.context());
   }
 
   @AfterEach
@@ -157,12 +180,34 @@ class BackendUnavailableE2eTest {
     // threw or because it was never set in the first place.
     try {
       if (page != null) {
-        page.close();
+        // Screenshot and trace FIRST, before closing anything below that would change what's on
+        // screen or finalize the video - see BrowserFailureArtifacts for why the ordering matters.
+        BrowserFailureArtifacts.captureBeforeClose(failureDir, testFailed, page, page.context());
+        // Closes the context (not just the page) so the recorded video is actually finalized -
+        // same as DashboardE2eEnvironment's own browserContext.close(), just reached via the page
+        // since this class never holds a separate BrowserContext reference.
+        page.context().close();
+        BrowserFailureArtifacts.saveVideoIfFailed(failureDir, testFailed, page);
       }
     } finally {
       if (isolatedBackend != null) {
         isolatedBackend.stop();
       }
+      BrowserFailureArtifacts.safely(() -> BrowserFailureArtifacts.deleteRecursively(videoDir));
+    }
+  }
+
+  /**
+   * The only piece of {@code DashboardE2eEnvironment}'s extension this class still needs: exposes
+   * whether the test failed to {@link #cleanup}, which - as a plain {@code @AfterEach} method - has
+   * no direct way to ask that itself. Runs after the test but before {@code @AfterEach}, on the
+   * same test instance, so setting a field here is visible there.
+   */
+  static final class FailureFlag implements AfterTestExecutionCallback {
+    @Override
+    public void afterTestExecution(ExtensionContext context) {
+      ((BackendUnavailableE2eTest) context.getRequiredTestInstance()).testFailed =
+          context.getExecutionException().isPresent();
     }
   }
 

@@ -1,0 +1,112 @@
+name: Dashboard E2E
+
+# Real-browser Playwright E2E against a real runner-service + real runner-dashboard (see
+# dashboardE2eTest in the root build.gradle) - 7 scenarios, one of them driving a real regression
+# run through the dashboard's own UI against the public read-only target. Not wired to push/pull_request
+# - it builds two full stacks and drives them through a real Chromium browser, which is too slow/
+# expensive for every PR (mirrors local-sut.yml's own reasoning for the same tradeoff). Scheduled
+# weekly as a determinism canary, plus manual dispatch on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    # Thursday 05:43 UTC - deliberately off a round hour/half-hour (and a different day than
+    # local-sut.yml's Monday 04:17 UTC) to avoid both the fixed-minute pile-up of jobs scheduled at
+    # :00/:30 across GitHub Actions, and the two expensive weekly workflows competing on the same day.
+    - cron: '43 5 * * 4'
+
+concurrency:
+  group: dashboard-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: runner-dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: runner-dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: runner-dashboard
+        run: npm ci
+
+      # -PwithDeps=true also installs Chromium's Linux system dependencies (Playwright's own
+      # --with-deps), needed on a bare ubuntu-latest runner - same flag quality-gate.yml and
+      # local-sut.yml already use for the main suite's browser.
+      - name: Install Chromium
+        run: ./gradlew playwrightInstall -PwithDeps=true
+
+      - name: Run dashboard E2E suite
+        run: ./gradlew dashboardE2eTest
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-e2e-junit-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: build/test-results/dashboardE2eTest/
+
+      - name: Upload Gradle HTML report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-e2e-html-report-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: build/reports/tests/dashboardE2eTest/
+
+      - name: Upload process logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-e2e-process-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: build/dashboard-e2e-logs/
+
+      - name: Upload failure artifacts (screenshots, traces, videos)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-e2e-failure-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: build/dashboard-e2e-failures/
+
+      # Safety net only: DashboardE2eEnvironment/BackendUnavailableE2eTest already stop every process
+      # they start as part of normal JUnit teardown (see their own close()/@AfterAll). This only
+      # matters if the JVM itself was killed (e.g. the job hit its timeout) before that teardown ran,
+      # which would otherwise leave a runner-service/vite-preview process bound to the runner's ports
+      # for any later job on the same runner.
+      - name: Clean up any leftover processes
+        if: always()
+        continue-on-error: true
+        run: |
+          # The [r]/[v] bracket trick keeps pkill's own pattern from matching its own `ps` scan of
+          # itself. The vite pattern is loose (`vite.*preview`, not a literal "vite preview") since
+          # the real command line is a bare `node .../vite/bin/vite.js preview ...`, not a `vite`
+          # executable with a space-separated "preview" argument next to the word "vite" itself.
+          pkill -f '[r]unner-service.*SNAPSHOT\.jar' || true
+          pkill -f '[v]ite.*preview' || true

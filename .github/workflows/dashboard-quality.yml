@@ -1,0 +1,165 @@
+name: Dashboard Quality Gate
+
+# Fast frontend CI for runner-dashboard (React/Vite) + the backend/frontend OpenAPI contract it
+# depends on. Two jobs: frontend-quality (no JVM needed) and openapi-contract (builds/starts a real
+# runner-service). Both are gated by the same workflow-level `paths` filter below, so any triggering
+# change (including a frontend-only one) runs both jobs - path filtering here decides whether the
+# whole workflow runs at all, not which job runs. openapi-contract stays a separate job (rather than
+# folded into frontend-quality) so its JVM/backend cost is easy to see and skip in the Actions UI,
+# not because it is triggered independently. Not wired into dashboardE2eTest - that suite is
+# real-browser E2E and lives in its own, separate, expensive workflow (dashboard-e2e.yml).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runner-dashboard/**'
+      - 'runner-service/src/main/java/**'
+      - 'runner-service/src/main/resources/application.yml'
+      - 'runner-service/build.gradle'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/dashboard-quality.yml'
+  pull_request:
+    paths:
+      - 'runner-dashboard/**'
+      - 'runner-service/src/main/java/**'
+      - 'runner-service/src/main/resources/application.yml'
+      - 'runner-service/build.gradle'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/dashboard-quality.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: dashboard-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: runner-dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: runner-dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: runner-dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # format, lint, import boundaries, TypeScript, unit/component tests + coverage gate, build -
+      # see package.json's own "check" script for the exact composition.
+      - name: Quality gate (format, lint, boundaries, typecheck, test+coverage, build)
+        run: npm run check
+
+      # Regenerates the typed client from the *committed* openapi/runner-api.json snapshot and
+      # fails if that leaves either the snapshot or the generated client dirty - catches "someone
+      # hand-edited the generated client" or "the snapshot and the client silently drifted apart".
+      # Does NOT talk to a live backend - see the openapi-contract job below for that check.
+      - name: OpenAPI snapshot/generated-client consistency
+        run: npm run api:check:snapshot
+
+      - name: Upload coverage and test report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-quality-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runner-dashboard/coverage/
+            runner-dashboard/test-results/
+
+  openapi-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: runner-dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: runner-dashboard/package-lock.json
+
+      - name: Build runner-service
+        run: ./gradlew :runner-service:bootJar
+
+      - name: Start runner-service
+        run: |
+          mkdir -p build/dashboard-quality-logs
+          # Excludes the Spring Boot plugin's own "-plain.jar" (the non-executable jar without an
+          # embedded launcher/dependencies) - not tied to "-SNAPSHOT" in the name, so this keeps
+          # working once the project cuts a non-SNAPSHOT release version.
+          jar=$(find runner-service/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-plain.jar' -print -quit)
+          test -n "$jar"
+          nohup java -jar "$jar" > build/dashboard-quality-logs/runner-service.log 2>&1 &
+          echo $! > runner-service.pid
+
+      - name: Wait for runner-service to become healthy
+        # No fixed blind startup delay - poll on a short interval against a deadline, the same
+        # convention this repo already uses for localSutHealth/DashboardProcess.
+        run: |
+          deadline=$((SECONDS + 60))
+          until curl -sf http://127.0.0.1:8080/actuator/health > /dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "runner-service did not become healthy within 60s" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Install dashboard dependencies
+        working-directory: runner-dashboard
+        run: npm ci
+
+      # Pulls the real, live /v3/api-docs from the backend just started above, regenerates the
+      # typed client from it, and fails if that leaves the checked-in openapi/runner-api.json
+      # snapshot or the generated client dirty. This is the gate that actually catches "a Java
+      # controller/schema changed and the developer forgot to refresh the frontend snapshot/client"
+      # - the frontend-quality job's api:check:snapshot above cannot see this, since it never talks
+      # to a live backend.
+      - name: OpenAPI contract check against the live backend
+        working-directory: runner-dashboard
+        run: npm run api:check:contract
+
+      - name: Stop runner-service
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f runner-service.pid ]; then
+            kill "$(cat runner-service.pid)" || true
+          fi
+
+      - name: Upload backend log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openapi-contract-backend-log-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: build/dashboard-quality-logs/

@@ -31,6 +31,10 @@ export default defineConfig({
     // deterministic across every machine/CI runner, regardless of its own default timezone. The
     // production build is unaffected - a real browser always uses the viewer's actual timezone.
     env: { TZ: "UTC" },
+    // Mirrors the Java suite's own build/test-results/*.xml - a machine-readable report CI can
+    // upload alongside coverage when the gate fails, not just console output.
+    reporters: ["default", "junit"],
+    outputFile: { junit: "test-results/junit.xml" },
     coverage: {
       provider: "v8",
       // Setting `include` (Vitest 4 dropped the old `all: true` flag) extends the report to
