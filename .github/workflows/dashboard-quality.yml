@@ -10,7 +10,7 @@ name: Dashboard Quality Gate
 # real-browser E2E and lives in its own, separate, expensive workflow (dashboard-e2e.yml).
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'runner-dashboard/**'
       - 'runner-service/src/main/java/**'
