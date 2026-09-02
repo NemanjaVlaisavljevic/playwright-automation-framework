@@ -35,10 +35,14 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -86,6 +90,89 @@ class RunServiceTest {
 
     assertThat(finished.status()).isEqualTo(RunStatus.SUCCEEDED);
     assertThat(finished.exitCode()).isEqualTo(0);
+  }
+
+  @Test
+  void startsEachRunWithItsOwnArtifactsDirectoryPassedAsAnEnvironmentVariable(
+      @TempDir Path eventsDir) throws Exception {
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newService(launcher, eventsDir, 5);
+
+    Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
+    awaitStatus(submitted.runId(), RunStatus.RUNNING);
+
+    assertThat(launcher.startedEnvironments).hasSize(1);
+    Path expectedDir = eventsDir.resolve("artifacts").resolve(submitted.runId());
+    assertThat(launcher.startedEnvironments.get(0))
+        .containsEntry("ARTIFACTS_DIR", expectedDir.toString());
+    // Actually created on disk, not just computed - see reserveArtifactsDirectory's own atomic
+    // Files.createDirectory, the fix for the review's finding that a plain Files.exists check left
+    // a check-then-act race between two callers.
+    assertThat(expectedDir).isDirectory();
+  }
+
+  @Test
+  void refusesToReserveTheSameArtifactsDirectoryTwice(@TempDir Path eventsDir) throws Exception {
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newService(launcher, eventsDir, 5);
+    String runId = "already-reserved";
+
+    service.reserveArtifactsDirectory(runId);
+
+    assertThatThrownBy(() -> service.reserveArtifactsDirectory(runId))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining(runId);
+  }
+
+  /**
+   * Regression test for the review's finding: the previous {@code Files.exists} check followed by a
+   * separate creation left a window in which two callers could both see "does not exist yet" and
+   * both proceed. {@code Files.createDirectory} is atomic - exactly one of any number of concurrent
+   * callers for the same {@code runId} can ever succeed, which this drives with a real race (both
+   * threads released by the same latch) rather than trusting the atomicity claim un-exercised.
+   */
+  @Test
+  void exactlyOneOfTwoConcurrentReservationsForTheSameRunIdSucceeds(@TempDir Path eventsDir)
+      throws Exception {
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newService(launcher, eventsDir, 5);
+    String runId = "raced-run-id";
+    CountDownLatch ready = new CountDownLatch(2);
+    CountDownLatch release = new CountDownLatch(1);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      List<Future<Boolean>> attempts =
+          List.of(
+              pool.submit(() -> attemptReservation(runId, ready, release)),
+              pool.submit(() -> attemptReservation(runId, ready, release)));
+      ready.await();
+      release.countDown();
+
+      long succeeded = attempts.stream().filter(RunServiceTest::futureResult).count();
+      assertThat(succeeded).isEqualTo(1);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  private boolean attemptReservation(String runId, CountDownLatch ready, CountDownLatch release)
+      throws Exception {
+    ready.countDown();
+    release.await();
+    try {
+      service.reserveArtifactsDirectory(runId);
+      return true;
+    } catch (IllegalStateException expectedForTheLoser) {
+      return false;
+    }
+  }
+
+  private static boolean futureResult(Future<Boolean> future) {
+    try {
+      return future.get();
+    } catch (Exception exception) {
+      throw new RuntimeException(exception);
+    }
   }
 
   @Test
@@ -376,6 +463,7 @@ class RunServiceTest {
             eventsDir.toString(),
             eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
+            eventsDir.resolve("artifacts").toString(),
             1024 * 1024,
             Duration.ofMillis(50),
             Duration.ofMillis(20),
@@ -700,6 +788,7 @@ class RunServiceTest {
             eventsDir.toString(),
             eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
+            eventsDir.resolve("artifacts").toString(),
             1024 * 1024,
             Duration.ofMillis(50),
             Duration.ofMillis(20),
@@ -853,6 +942,7 @@ class RunServiceTest {
   private static final class FakeProcessLauncher implements ProcessLauncher {
 
     private final List<List<String>> startedCommands = new CopyOnWriteArrayList<>();
+    private final List<Map<String, String>> startedEnvironments = new CopyOnWriteArrayList<>();
     private volatile boolean failToStart;
     private volatile boolean blockProcessStart;
     private volatile boolean failTermination;
@@ -866,7 +956,11 @@ class RunServiceTest {
     private final CountDownLatch awaitCompletionFinished = new CountDownLatch(1);
 
     @Override
-    public Process start(List<String> command, Path workingDirectory, Path outputFile)
+    public Process start(
+        List<String> command,
+        Path workingDirectory,
+        Path outputFile,
+        Map<String, String> environment)
         throws IOException {
       if (failToStart) {
         throw new IOException("simulated startup failure");
@@ -883,6 +977,7 @@ class RunServiceTest {
       Files.createDirectories(outputFile.getParent());
       Files.writeString(outputFile, "simulated process output");
       startedCommands.add(command);
+      startedEnvironments.add(environment);
       FakeProcess process = new FakeProcess();
       lastProcess = process;
       return process;

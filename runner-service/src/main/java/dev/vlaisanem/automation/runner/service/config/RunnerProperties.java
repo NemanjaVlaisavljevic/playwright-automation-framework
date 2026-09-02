@@ -18,6 +18,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     service-owned timeline that also carries {@code RUN_*} lifecycle events the listener never
  *     produces.
  * @param logsDir directory containing one bounded combined stdout/stderr log per run.
+ * @param artifactsDir root directory under which every run gets its own isolated subdirectory
+ *     (named after its runId), passed to the spawned Gradle process as the {@code ARTIFACTS_DIR}
+ *     environment variable - the same configuration key {@code TestConfig#artifactsDirectory()}
+ *     already reads. Keeps screenshots/traces from two different runs (sequential or, once
+ *     supported, concurrent) from ever landing in the same directory.
  * @param processLogMaxBytes maximum number of bytes retained in one process log.
  * @param terminationGracePeriod time allowed for graceful and then forced process-tree shutdown.
  * @param degradedPollInterval how often the background reaper re-checks a known-surviving process
@@ -46,6 +51,7 @@ public record RunnerProperties(
     String rawEventsDir,
     String journalDir,
     String logsDir,
+    String artifactsDir,
     long processLogMaxBytes,
     Duration terminationGracePeriod,
     Duration degradedPollInterval,
@@ -71,6 +77,9 @@ public record RunnerProperties(
     }
     if (logsDir == null || logsDir.isBlank()) {
       throw new IllegalArgumentException("runner.logs-dir must not be blank");
+    }
+    if (artifactsDir == null || artifactsDir.isBlank()) {
+      throw new IllegalArgumentException("runner.artifacts-dir must not be blank");
     }
     if (processLogMaxBytes < 1024) {
       throw new IllegalArgumentException("runner.process-log-max-bytes must be at least 1024");

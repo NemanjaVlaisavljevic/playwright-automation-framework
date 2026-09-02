@@ -13,6 +13,9 @@ export const RunResponse = z.object({ runId: z.string(), environment: z.literal(
 export type ProblemDetail = __TypedOpenapi.Schemas.ProblemDetail;
 export const ProblemDetail = z.object({ type: z.url().optional(), title: z.string(), status: z.number().int(), detail: z.string(), instance: z.string(), properties: z.record(z.string(), z.unknown()).optional() }).catchall(z.unknown());
 
+export type ArtifactSummaryResponse = __TypedOpenapi.Schemas.ArtifactSummaryResponse;
+export const ArtifactSummaryResponse = z.object({ artifactId: z.string(), testId: z.string(), testDisplayName: z.string(), type: z.enum(["SCREENSHOT", "TRACE", "VIDEO"]), mediaType: z.string(), sizeBytes: z.number().int(), createdAt: z.iso.datetime(), downloadUrl: z.string() }).catchall(z.unknown());
+
 export type EnvironmentCapabilities = __TypedOpenapi.Schemas.EnvironmentCapabilities;
 export const EnvironmentCapabilities = z.object({ name: z.literal("PUBLIC"), suites: z.array(z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION"])) }).catchall(z.unknown());
 
@@ -72,6 +75,26 @@ export const get_DownloadRunLog = {
   responses: { 200: z.string(), 404: ProblemDetail, 500: ProblemDetail },
 };
 
+export type get_ListRunArtifacts = __TypedOpenapi.Endpoints.get_ListRunArtifacts;
+export const get_ListRunArtifacts = {
+  method: z.literal("GET"),
+  path: z.literal("/api/v1/runs/{runId}/artifacts"),
+  requestFormat: z.literal("json"),
+  responseFormat: z.literal("json"),
+  parameters: { query: z.object({ testId: z.string() }).partial().strict().optional(), path: z.object({ runId: z.string() }).strict() },
+  responses: { 200: z.array(ArtifactSummaryResponse), 404: ProblemDetail, 500: ProblemDetail },
+};
+
+export type get_DownloadRunArtifact = __TypedOpenapi.Endpoints.get_DownloadRunArtifact;
+export const get_DownloadRunArtifact = {
+  method: z.literal("GET"),
+  path: z.literal("/api/v1/runs/{runId}/artifacts/{artifactId}"),
+  requestFormat: z.literal("json"),
+  responseFormat: z.literal("json"),
+  parameters: { path: z.object({ runId: z.string(), artifactId: z.string() }).strict() },
+  responses: { 200: z.unknown(), 404: ProblemDetail, 500: ProblemDetail },
+};
+
 export type get_GetRunnerCapabilities = __TypedOpenapi.Endpoints.get_GetRunnerCapabilities;
 export const get_GetRunnerCapabilities = {
   method: z.literal("GET"),
@@ -84,13 +107,15 @@ export const get_GetRunnerCapabilities = {
 
 // </Endpoints>
 
-  
+
      // <EndpointByMethod>
      export const EndpointByMethod = {
      get: {
            "/api/v1/runs": get_ListRuns,
 "/api/v1/runs/{runId}": get_GetRun,
 "/api/v1/runs/{runId}/log": get_DownloadRunLog,
+"/api/v1/runs/{runId}/artifacts": get_ListRunArtifacts,
+"/api/v1/runs/{runId}/artifacts/{artifactId}": get_DownloadRunArtifact,
 "/api/v1/capabilities": get_GetRunnerCapabilities
          },
 post: {
@@ -100,14 +125,14 @@ post: {
      } satisfies { [M in keyof __TypedOpenapi.EndpointByMethod]: { [P in keyof __TypedOpenapi.EndpointByMethod[M]]: unknown } }
      export type EndpointByMethod = __TypedOpenapi.EndpointByMethod;
      // </EndpointByMethod>
-     
+
 
     // <EndpointByMethod.Shorthands>
     export type GetEndpoints = EndpointByMethod["get"]
 export type PostEndpoints = EndpointByMethod["post"]
     // </EndpointByMethod.Shorthands>
-    
-  
+
+
 // <ApiClientTypes>
 export type EndpointParameters = {
   body?: unknown;
@@ -128,36 +153,36 @@ export type SecurityRequirements = readonly (readonly string[])[];
     // <EndpointRequestFormats>
     /** Non-json request body encodings; missing entries default to `"json"`. */
     export const endpointRequestFormats = {
-    
+
     } as Partial<{ [M in keyof EndpointByMethod]: Partial<{ [P in keyof EndpointByMethod[M]]: RequestFormat }> }>;
     // </EndpointRequestFormats>
-    
+
 
     // <EndpointParameterStyles>
     export type ParameterSerialization = { style: string; explode: boolean; allowReserved: boolean };
     export type EndpointParameterStyles = Partial<Record<"query" | "path" | "header" | "cookie", Record<string, ParameterSerialization>>>;
     /** OpenAPI parameter styles used by the built-in encoders. */
-    export const endpointParameterStyles = {"post":{"/api/v1/runs/{runId}/cancel":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}}},"get":{"/api/v1/runs/{runId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/log":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}}}} as Partial<Record<string, Partial<Record<string, EndpointParameterStyles>>>>;
+    export const endpointParameterStyles = {"post":{"/api/v1/runs/{runId}/cancel":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}}},"get":{"/api/v1/runs/{runId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/log":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/artifacts":{"query":{"testId":{"style":"form","explode":true,"allowReserved":false}},"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/artifacts/{artifactId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false},"artifactId":{"style":"simple","explode":false,"allowReserved":false}}}}} as Partial<Record<string, Partial<Record<string, EndpointParameterStyles>>>>;
     // </EndpointParameterStyles>
-    
+
 
     // <EndpointResponseFormats>
     /** Non-json response body modes; missing entries default to `"json"`. SSE skips JSON parse + output validation. */
     export const endpointResponseFormats = {
-    
+
     } as Partial<{ [M in keyof EndpointByMethod]: Partial<{ [P in keyof EndpointByMethod[M]]: ResponseFormat }> }>;
     // </EndpointResponseFormats>
-    
+
 
     // <EndpointSecurityRequirements>
     /** OpenAPI security requirements applied when an endpoint has no explicit entry. */
     export const defaultSecurityRequirements = [] as SecurityRequirements;
     /** Endpoint-specific security requirements that differ from the default. */
     export const endpointSecurityRequirements = {
-    
+
     } as Partial<{ [M in keyof EndpointByMethod]: Partial<{ [P in keyof EndpointByMethod[M]]: SecurityRequirements }> }>;
     // </EndpointSecurityRequirements>
-    
+
 
 export type DefaultEndpoint = {
   parameters?: EndpointParameters | undefined;
@@ -598,7 +623,7 @@ export class ApiClient {
         return this.request("get", path, params[0] as never) as Promise<unknown>;
     }
     // </ApiClient.get>
-    
+
 // <ApiClient.post>
     post<Path extends keyof PostEndpoints, TEndpoint extends PostEndpoints[Path]>(
       path: Path,
@@ -625,7 +650,7 @@ export class ApiClient {
         return this.request("post", path, params[0] as never) as Promise<unknown>;
     }
     // </ApiClient.post>
-    
+
 
     // <ApiClient.request>
     /**
@@ -823,4 +848,3 @@ export function createApiClient(
 
 // </ApiClient>
 
-  

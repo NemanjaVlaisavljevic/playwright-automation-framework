@@ -6,6 +6,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,32 @@ class RunExceptionHandlerTest {
               assertThat(event.getLevel()).isEqualTo(Level.ERROR);
               assertThat(event.getThrowableProxy().getMessage())
                   .isEqualTo("internal detail: connection string leaked");
+            });
+  }
+
+  /**
+   * Regression test for a review's finding: an absolute filesystem path (or any other internal
+   * detail) in {@link ArtifactManifestCorruptException#diagnosticReason()} must reach the server
+   * log for diagnosis but never the client-facing {@link ProblemDetail#getDetail()}.
+   */
+  @Test
+  void artifactManifestCorruptExceptionNeverLeaksTheDiagnosticReasonButLogsIt() {
+    ArtifactManifestCorruptException original =
+        new ArtifactManifestCorruptException(
+            "run-1", "could not read C:\\secret\\path\\manifest.jsonl: access denied");
+
+    ProblemDetail response = handler.handleArtifactManifestCorrupt(original);
+
+    assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+    assertThat(response.getDetail())
+        .isEqualTo("Artifact data for run run-1 is corrupt and cannot be served.");
+    assertThat(response.getDetail()).doesNotContain("C:\\secret\\path");
+
+    assertThat(logAppender.list)
+        .anySatisfy(
+            event -> {
+              assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+              assertThat(event.getFormattedMessage()).contains("C:\\secret\\path");
             });
   }
 }

@@ -1,9 +1,9 @@
 package dev.vlaisanem.automation.runner.listener;
 
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.contract.RunnerExecutionIdentity;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.UUID;
 import org.junit.platform.engine.TestExecutionResult;
 import org.junit.platform.launcher.TestExecutionListener;
 import org.junit.platform.launcher.TestIdentifier;
@@ -22,8 +22,6 @@ import org.junit.platform.launcher.TestPlan;
  */
 public final class RunnerEventTestExecutionListener implements TestExecutionListener {
 
-  private static final String RUN_ID_PROPERTY = "runner.runId";
-  private static final String RUN_ID_ENV = "RUNNER_RUN_ID";
   private static final String RAW_EVENTS_DIR_PROPERTY = "runner.rawEventsDir";
   private static final String RAW_EVENTS_DIR_ENV = "RUNNER_RAW_EVENTS_DIR";
   private static final String DEFAULT_RAW_EVENTS_DIR = "build/runner-events/raw";
@@ -125,8 +123,7 @@ public final class RunnerEventTestExecutionListener implements TestExecutionList
   }
 
   private static String resolveRunId() {
-    String configured = setting(RUN_ID_PROPERTY, RUN_ID_ENV, null);
-    return configured != null ? configured : "local-" + UUID.randomUUID();
+    return RunnerExecutionIdentity.currentRunId();
   }
 
   private static Path resolveRawEventsDir() {

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Seam between {@code RunService}'s orchestration logic and a real OS process, so the former can be
@@ -12,7 +13,12 @@ import java.util.List;
  */
 public interface ProcessLauncher {
 
-  Process start(List<String> command, Path workingDirectory, Path outputFile) throws IOException;
+  /**
+   * {@code environment} entries are added on top of the launched process's inherited environment.
+   */
+  Process start(
+      List<String> command, Path workingDirectory, Path outputFile, Map<String, String> environment)
+      throws IOException;
 
   ProcessOutcome awaitCompletion(Process process, Duration timeout);
 

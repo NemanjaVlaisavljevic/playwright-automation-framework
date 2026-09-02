@@ -263,6 +263,139 @@
         }
       }
     },
+    "/api/v1/runs/{runId}/artifacts": {
+      "get": {
+        "tags": [
+          "artifact-controller"
+        ],
+        "operationId": "listRunArtifacts",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "testId",
+            "in": "query",
+            "description": "Narrows the result to one test's own artifacts, if given.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArtifactSummaryResponse"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No run exists for the given runId.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error, or the run's artifact manifest is corrupt.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{runId}/artifacts/{artifactId}": {
+      "get": {
+        "tags": [
+          "artifact-controller"
+        ],
+        "operationId": "downloadRunArtifact",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "video/webm": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No run exists for the given runId, or no artifact exists for the given artifactId.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error, or the run's artifact manifest is corrupt.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/capabilities": {
       "get": {
         "tags": [
@@ -418,6 +551,52 @@
           "instance",
           "status",
           "title"
+        ]
+      },
+      "ArtifactSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "artifactId": {
+            "type": "string"
+          },
+          "testId": {
+            "type": "string"
+          },
+          "testDisplayName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "SCREENSHOT",
+              "TRACE",
+              "VIDEO"
+            ]
+          },
+          "mediaType": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "downloadUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifactId",
+          "createdAt",
+          "downloadUrl",
+          "mediaType",
+          "sizeBytes",
+          "testDisplayName",
+          "testId",
+          "type"
         ]
       },
       "CapabilitiesResponse": {

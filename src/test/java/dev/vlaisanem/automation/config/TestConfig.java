@@ -1,5 +1,6 @@
 package dev.vlaisanem.automation.config;
 
+import dev.vlaisanem.automation.runner.contract.RunnerExecutionIdentity;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -14,6 +15,7 @@ public record TestConfig(
     boolean tracing,
     boolean recordVideo,
     Path artifactsDirectory,
+    String runId,
     String adminUsername,
     String adminPassword,
     String sharedTargetBaseUrl,
@@ -31,6 +33,12 @@ public record TestConfig(
     }
     if (navigationTimeout.isNegative() || navigationTimeout.isZero()) {
       throw new IllegalArgumentException("navigationTimeout must be positive");
+    }
+    if (runId == null || runId.isBlank()) {
+      // Caught here, not left to surface only once ArtifactManifestWriter tries to use it - a
+      // blank/missing runId would otherwise be reported as a generic "could not capture artifact"
+      // warning, hiding a real configuration bug behind an unrelated-looking log line.
+      throw new IllegalArgumentException("runId must not be blank");
     }
     if (sharedTargetBaseUrl == null || sharedTargetBaseUrl.isBlank()) {
       throw new IllegalArgumentException("sharedTargetBaseUrl must not be blank");
@@ -81,6 +89,13 @@ public record TestConfig(
         booleanSetting("tracing", "TRACING", true),
         booleanSetting("recordVideo", "RECORD_VIDEO", false),
         Path.of(setting("artifactsDir", "ARTIFACTS_DIR", "build/artifacts")),
+        // Resolved through the one shared, JVM-scoped identity both this class and
+        // RunnerEventTestExecutionListener use - not this class's own independent setting() lookup
+        // - so a manifest entry's runId always matches its run's RunnerEvents, however the JVM was
+        // launched (a Gradle Test task, an IDE's own JUnit runner, a bare `java` invocation). See
+        // RunnerExecutionIdentity's own Javadoc for why generating this fallback in a Gradle build
+        // script closure instead would be strictly worse.
+        RunnerExecutionIdentity.currentRunId(),
         setting("adminUsername", "ADMIN_USERNAME", "admin"),
         setting("adminPassword", "ADMIN_PASSWORD", "password"),
         setting(

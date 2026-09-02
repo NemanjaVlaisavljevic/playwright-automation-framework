@@ -117,17 +117,18 @@ unit-tested line by line).
 `runner-api.ts` (the wrapper) and `problem-detail.ts` (the `ProblemDetail` schema, for the error
 type below). Not "only `runner-api.ts`" - components and everything outside `src/api/` are what
 must never import generated code directly, types included: `runner-api.ts` re-exports the
-app-facing DTO types (`CapabilitiesResponse`, `CreateRunRequest`, `RunResponse`) precisely so
-`domain/`, `features/`, etc. never have a reason to reach into `./generated/` just for a type.
-`domain/run.ts` and `RunsTable.tsx` both did exactly that before a review caught it - a documented
-convention with nothing enforcing it just drifts, and oxlint's import plugin has no equivalent of
-eslint-plugin-import's `no-restricted-paths` to lean on - so `npm run check:boundaries`
-(`scripts/check-import-boundaries.mjs`, wired into `check`) fails the build if it happens again.
-Components call `runner-api.ts`'s plain functions (`getHealth`, `getCapabilities`, `listRuns`,
-`getRun`, `createRun`, `cancelRun` - the process log is just `run.processLogUrl` from a
-`RunResponse`, not a separate call) through TanStack Query (`src/api/query-keys.ts` for the query
-key shapes); none of them ever call `fetch()` or touch a `Response`/`TypedStatusError`/`ZodError`
-directly.
+app-facing DTO types (`ArtifactSummaryResponse`, `CapabilitiesResponse`, `CreateRunRequest`,
+`RunResponse`) precisely so `domain/`, `features/`, etc. never have a reason to reach into
+`./generated/` just for a type. `domain/run.ts` and `RunsTable.tsx` both did exactly that before a
+review caught it - a documented convention with nothing enforcing it just drifts, and oxlint's
+import plugin has no equivalent of eslint-plugin-import's `no-restricted-paths` to lean on - so
+`npm run check:boundaries` (`scripts/check-import-boundaries.mjs`, wired into `check`) fails the
+build if it happens again. Components call `runner-api.ts`'s plain functions (`getHealth`,
+`getCapabilities`, `listRuns`, `getRun`, `createRun`, `cancelRun`, `listRunArtifacts` - the process
+log is just `run.processLogUrl` from a `RunResponse`, and each artifact's `downloadUrl` likewise
+comes straight off its `ArtifactSummaryResponse`, neither is a separate call) through TanStack
+Query (`src/api/query-keys.ts` for the query key shapes); none of them ever call `fetch()` or touch
+a `Response`/`TypedStatusError`/`ZodError` directly.
 
 Every failure surfaces as one `RunnerApiError` (`src/api/problem-detail.ts`), discriminated by
 `kind` - deliberately three, not collapsed into one:
@@ -377,6 +378,23 @@ and updates in place on `TEST_PASSED`, and `RUN_FINISHED` closes the connection 
 the Cancel button disappears, and the header's Status/Finished fields update from the REST refetch
 the hook itself triggers - all 5 tests in that run reached `PASSED`.
 
+An **Artifacts** section (own `GET /api/v1/runs/{runId}/artifacts` query, `listRunArtifacts`) lists
+every screenshot/trace captured for the run, one row per artifact - hidden entirely while empty
+(most runs never fail, so most runs never produce one), rather than an `EmptyState` like the Tests
+table always shows. A `SCREENSHOT` row renders an inline thumbnail (`<img src={downloadUrl}>`,
+opens the full image in a new tab); every other type renders a plain download link instead, mirroring
+the backend's own `Content-Disposition: inline` vs `attachment` split (see the runner-service's
+`ArtifactController`). This phase intentionally ships REST-only: there's no `ARTIFACT_CREATED` live
+event yet (that's the Step API / Event V2 phase), so a still-running test's own artifacts can't be
+pushed to the page - instead, the query is invalidated once `connectionState` reaches `"CLOSED"`
+(`useRunEventStream`'s own signal that the run just went terminal), by which point every artifact
+for the run is guaranteed to have been captured and manifested.
+
+Verified live against a real `runner-service` and a real Gradle-launched `SMOKE` run with a
+deliberately broken assertion: the Artifacts section appeared once the run reached `FAILED`, showing
+a real screenshot thumbnail (620.2 KB) and a "Download trace" link (1.1 MB) for the one failing
+test, both `<a href>`s pointing at the exact `artifactId`s the backend returned.
+
 ## Design system & UI
 
 Styling is CSS Modules (`*.module.css`, Vite supports this natively - no plugin, no runtime cost)
@@ -489,7 +507,8 @@ src/
 │   ├── runner-event.ts   # hand-written Zod contract for SSE events (see above)
 │   ├── run.ts              # Environment/Suite/RunStatus types derived from generated types
 │   ├── duration.ts           # formatDuration / runDurationMs
-│   └── datetime.ts             # formatLocalDateTime
+│   ├── datetime.ts             # formatLocalDateTime
+│   └── bytes.ts                  # formatBytes - artifact size column
 ├── features/
 │   ├── run-launch/        # RunLaunchForm - the /runs "start a run" form
 │   ├── run-list/           # RunListPage + RunsTable (search/filter/sort) - /runs

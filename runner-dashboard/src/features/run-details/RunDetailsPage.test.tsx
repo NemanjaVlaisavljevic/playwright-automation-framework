@@ -23,14 +23,24 @@ function run(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-function renderPage(client: FakeEventStreamClient) {
+function renderPage(
+  client: FakeEventStreamClient,
+  options: { runPollIntervalMs?: number } = {},
+) {
   return render(
     <QueryClientProvider client={createQueryClient()}>
       <MemoryRouter initialEntries={[`/runs/${RUN_ID}`]}>
         <Routes>
           <Route
             path="/runs/:runId"
-            element={<RunDetailsPage eventStreamClient={client} />}
+            element={
+              <RunDetailsPage
+                eventStreamClient={client}
+                {...(options.runPollIntervalMs !== undefined
+                  ? { runPollIntervalMs: options.runPollIntervalMs }
+                  : {})}
+              />
+            }
           />
         </Routes>
       </MemoryRouter>
@@ -324,6 +334,235 @@ describe("RunDetailsPage", () => {
     expect(
       await screen.findByText(/This run is no longer available/),
     ).toBeInTheDocument();
+  });
+
+  it("shows no Artifacts section when the run has produced none", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())),
+      http.get("/api/v1/runs/:runId/artifacts", () => HttpResponse.json([])),
+    );
+    renderPage(new FakeEventStreamClient());
+
+    await screen.findByText("QUEUED");
+    expect(
+      screen.queryByRole("heading", { name: "Artifacts" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a screenshot thumbnail and a trace download link once artifacts are captured", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId", () =>
+        HttpResponse.json(run({ status: "FAILED" })),
+      ),
+      http.get("/api/v1/runs/:runId/artifacts", () =>
+        HttpResponse.json([
+          {
+            artifactId: "shot-1",
+            testId: "test-a",
+            testDisplayName: "loginTest()",
+            type: "SCREENSHOT",
+            mediaType: "image/png",
+            sizeBytes: 2048,
+            createdAt: "2026-09-01T10:00:05Z",
+            downloadUrl: `/api/v1/runs/${RUN_ID}/artifacts/shot-1`,
+          },
+          {
+            artifactId: "trace-1",
+            testId: "test-a",
+            testDisplayName: "loginTest()",
+            type: "TRACE",
+            mediaType: "application/zip",
+            sizeBytes: 1_258_291,
+            createdAt: "2026-09-01T10:00:06Z",
+            downloadUrl: `/api/v1/runs/${RUN_ID}/artifacts/trace-1`,
+          },
+        ]),
+      ),
+    );
+    renderPage(new FakeEventStreamClient());
+
+    expect(
+      await screen.findByRole("heading", { name: "Artifacts" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2.0 KB")).toBeInTheDocument();
+    expect(screen.getByText("1.2 MB")).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Screenshot for loginTest()" }),
+    ).toHaveAttribute("src", `/api/v1/runs/${RUN_ID}/artifacts/shot-1`);
+    expect(
+      screen.getByRole("link", { name: "Download trace" }),
+    ).toHaveAttribute("href", `/api/v1/runs/${RUN_ID}/artifacts/trace-1`);
+  });
+
+  it("shows a visible error when the artifacts request fails", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())),
+      http.get(
+        "/api/v1/runs/:runId/artifacts",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    renderPage(new FakeEventStreamClient());
+
+    expect(
+      await screen.findByText(/Could not load artifacts:/),
+    ).toBeInTheDocument();
+  });
+
+  it("never calls the artifacts endpoint when the run itself 404s (regression: duplicated 'not available' text)", async () => {
+    let artifactsRequested = false;
+    server.use(
+      http.get(
+        "/api/v1/runs/:runId",
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get("/api/v1/runs/:runId/artifacts", () => {
+        artifactsRequested = true;
+        return HttpResponse.json([]);
+      }),
+    );
+    renderPage(new FakeEventStreamClient());
+
+    expect(
+      await screen.findByText(/This run is no longer available/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Could not load artifacts:/),
+    ).not.toBeInTheDocument();
+    expect(artifactsRequested).toBe(false);
+  });
+
+  it("recovers a stuck run status and its artifacts via REST polling once the stream permanently freezes (regression)", async () => {
+    // Without the P1 fix: `useRunEventStream` invalidates `run` exactly once when the stream
+    // freezes into PROTOCOL_ERROR, but if the run is still RUNNING at that one refetch, nothing
+    // else ever refetches it again - the header stays stuck on RUNNING and the Artifacts section
+    // (gated on the run reaching a terminal status) never appears, even once the backend actually
+    // finishes the run and captures a screenshot.
+    let runFinished = false;
+    let runRequestCount = 0;
+    server.use(
+      http.get("/api/v1/runs/:runId", () => {
+        runRequestCount += 1;
+        return HttpResponse.json(
+          runFinished
+            ? run({
+                status: "FAILED",
+                startedAt: "2026-09-01T10:00:05Z",
+                finishedAt: "2026-09-01T10:00:30Z",
+              })
+            : run({ status: "RUNNING", startedAt: "2026-09-01T10:00:05Z" }),
+        );
+      }),
+      http.get("/api/v1/runs/:runId/artifacts", () =>
+        HttpResponse.json(
+          runFinished
+            ? [
+                {
+                  artifactId: "shot-1",
+                  testId: "test-a",
+                  testDisplayName: "loginTest()",
+                  type: "SCREENSHOT",
+                  mediaType: "image/png",
+                  sizeBytes: 2048,
+                  createdAt: "2026-09-01T10:00:29Z",
+                  downloadUrl: `/api/v1/runs/${RUN_ID}/artifacts/shot-1`,
+                },
+              ]
+            : [],
+        ),
+      ),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client, { runPollIntervalMs: 20 });
+
+    await screen.findByText("RUNNING");
+    expect(
+      screen.queryByRole("heading", { name: "Artifacts" }),
+    ).not.toBeInTheDocument();
+
+    // Two sequence gaps exhausts the one fresh-replay retry budget - the same pattern the
+    // permanent-protocol-error test above uses to force a real, non-recoverable PROTOCOL_ERROR.
+    act(() => {
+      client.open();
+      client.emit(event({ sequence: 1, type: "RUN_QUEUED" }));
+      client.emit(event({ sequence: 3, type: "RUN_STARTED" }));
+    });
+    act(() => {
+      client.open();
+      client.emit(event({ sequence: 1, type: "RUN_QUEUED" }));
+      client.emit(event({ sequence: 5, type: "RUN_STARTED" }));
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Live stream lost sync twice and could not recover automatically.",
+    );
+
+    // The backend finishes the run and captures a screenshot only after the stream has already
+    // frozen for good - nothing in the SSE stream itself will ever report this.
+    runFinished = true;
+
+    expect(await screen.findByText("FAILED")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Artifacts" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Screenshot for loginTest()" }),
+    ).toHaveAttribute("src", `/api/v1/runs/${RUN_ID}/artifacts/shot-1`);
+
+    // The other half of the production requirement: reaching a terminal status must actually stop
+    // the fallback poll, not just successfully recover once. `runPollIntervalMs: 20` above means
+    // several intervals easily fit in this wait - without the terminal-status check in
+    // `refetchInterval`, this would keep incrementing.
+    const countAtTerminal = runRequestCount;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(runRequestCount).toBe(countAtTerminal);
+  });
+
+  it("stops REST fallback polling once the run permanently 404s, rather than polling a run that will never come back (regression)", async () => {
+    let runGone = false;
+    let runRequestCount = 0;
+    server.use(
+      http.get("/api/v1/runs/:runId", () => {
+        runRequestCount += 1;
+        if (runGone) {
+          return new HttpResponse(null, { status: 404 });
+        }
+        return HttpResponse.json(
+          run({ status: "RUNNING", startedAt: "2026-09-01T10:00:05Z" }),
+        );
+      }),
+      http.get("/api/v1/runs/:runId/artifacts", () => HttpResponse.json([])),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client, { runPollIntervalMs: 20 });
+
+    await screen.findByText("RUNNING");
+    act(() => {
+      client.open();
+      client.emit(event({ sequence: 1, type: "RUN_QUEUED" }));
+      client.emit(event({ sequence: 3, type: "RUN_STARTED" }));
+    });
+    act(() => {
+      client.open();
+      client.emit(event({ sequence: 1, type: "RUN_QUEUED" }));
+      client.emit(event({ sequence: 5, type: "RUN_STARTED" }));
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Live stream lost sync twice and could not recover automatically.",
+    );
+
+    // The run vanishes for good - e.g. the runner service restarted and lost its in-memory history
+    // (see docs/SSE_CONTRACT_V1.md) - rather than ever coming back with a terminal status. Without
+    // the 404 check, `refetchInterval` would keep polling a run that will never exist again.
+    runGone = true;
+    await screen.findByText(/This run is no longer available/);
+
+    const countAtNotFound = runRequestCount;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(runRequestCount).toBe(countAtNotFound);
   });
 
   it("resets progress/tests when navigating directly from one run's page to another's", async () => {

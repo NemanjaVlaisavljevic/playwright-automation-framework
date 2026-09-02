@@ -30,4 +30,5 @@ export const handlers = [
       processLogUrl: `/api/v1/runs/${String(params.runId)}/log`,
     }),
   ),
+  http.get("/api/v1/runs/:runId/artifacts", () => HttpResponse.json([])),
 ];

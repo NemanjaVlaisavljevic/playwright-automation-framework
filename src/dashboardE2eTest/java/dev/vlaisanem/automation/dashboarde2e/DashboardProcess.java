@@ -36,11 +36,12 @@ final class DashboardProcess {
 
   /**
    * Starts {@code command} in {@code workingDir}, waits for {@code healthUrl} to return HTTP 200
-   * (polling every 500ms, up to {@code timeout}), and returns once it does. stdout/stderr are
-   * merged and appended to {@code build/dashboard-e2e-logs/<name>.log} for post-mortem diagnosis -
-   * never inherited directly (a child process inheriting console handles has previously been
-   * observed to hang indefinitely on Windows, see the root build.gradle's own note on this for
-   * {@code docker compose up}).
+   * twice in a row (polling every 500ms, up to {@code timeout}), and returns once it does. Refuses
+   * to even launch if something is already answering {@code healthUrl} beforehand - see {@link
+   * #refuseIfAlreadyAnswering}. stdout/stderr are merged and appended to {@code
+   * build/dashboard-e2e-logs/<name>.log} for post-mortem diagnosis - never inherited directly (a
+   * child process inheriting console handles has previously been observed to hang indefinitely on
+   * Windows, see the root build.gradle's own note on this for {@code docker compose up}).
    */
   static DashboardProcess start(
       String name,
@@ -50,6 +51,8 @@ final class DashboardProcess {
       String healthUrl,
       Duration healthTimeout)
       throws IOException {
+    refuseIfAlreadyAnswering(name, healthUrl);
+
     Path logFile = logFileFor(name);
     Files.createDirectories(logFile.getParent());
 
@@ -88,6 +91,36 @@ final class DashboardProcess {
   }
 
   /**
+   * A stale process from an earlier run - or any other unrelated service - already bound to {@code
+   * healthUrl}'s port would otherwise be indistinguishable from {@code name} becoming healthy the
+   * moment {@link #waitForHealthy} starts polling, before the process this method is about to
+   * launch has even had a chance to bind that port itself (successfully or not). Observed live in
+   * this repo's own history: a forgotten manual run left the exact backend/dashboard ports
+   * occupied, and the health poll happily accepted the leftover process as the freshly started
+   * instance. Refusing to even launch when something is already answering closes that window at its
+   * source, rather than trying to distinguish "old" from "new" after the fact.
+   */
+  private static void refuseIfAlreadyAnswering(String name, String healthUrl) {
+    boolean alreadyHealthy;
+    try {
+      alreadyHealthy = httpGet(healthUrl) == 200;
+    } catch (IOException e) {
+      // Could not connect at all - exactly the expected, healthy case before anything has been
+      // launched yet, so there is nothing to refuse.
+      return;
+    }
+    if (alreadyHealthy) {
+      throw new IllegalStateException(
+          "Refusing to start "
+              + name
+              + ": something is already answering HTTP 200 at "
+              + healthUrl
+              + " before this process was even launched - stop whatever is bound to that port"
+              + " first.");
+    }
+  }
+
+  /**
    * Deliberately {@link HttpURLConnection}, not {@code java.net.http.HttpClient}: the modern client
    * was observed live to hang past its own per-request timeout against a real local Vite server in
    * this environment (backend/Tomcat connections through it were fine; Vite's dev server
@@ -95,10 +128,17 @@ final class DashboardProcess {
    * HttpURLConnection} - the same mechanism the root {@code build.gradle}'s own {@code
    * localSutHealth} task already uses successfully for this exact kind of local health-polling -
    * works reliably.
+   *
+   * <p>Requires two consecutive HTTP 200 responses, re-checking {@link Process#isAlive()}
+   * immediately after each one (not just before the request, as a single check before the request
+   * would) - a process that dies between the request being sent and its response being read (e.g.
+   * because the port it tried to bind was already taken) could otherwise have its very last gasp,
+   * or even a second stale process's response, mistaken for having become healthy.
    */
   private void waitForHealthy(String healthUrl, Duration timeout) {
     Instant deadline = Instant.now().plus(timeout);
     Exception lastFailure = null;
+    int consecutiveHealthy = 0;
     while (Instant.now().isBefore(deadline)) {
       if (!process.isAlive()) {
         throw new IllegalStateException(
@@ -109,23 +149,34 @@ final class DashboardProcess {
                 + logFile);
       }
       try {
-        HttpURLConnection connection =
-            (HttpURLConnection) URI.create(healthUrl).toURL().openConnection();
-        connection.setConnectTimeout(2000);
-        connection.setReadTimeout(2000);
-        connection.setRequestMethod("GET");
-        int status = connection.getResponseCode();
-        connection.disconnect();
-        if (status == 200) {
-          return;
+        boolean healthyAndStillAlive = httpGet(healthUrl) == 200 && process.isAlive();
+        if (healthyAndStillAlive) {
+          consecutiveHealthy++;
+          if (consecutiveHealthy >= 2) {
+            return;
+          }
+        } else {
+          consecutiveHealthy = 0;
         }
       } catch (IOException e) {
         lastFailure = e;
+        consecutiveHealthy = 0;
       }
       sleep(Duration.ofMillis(500));
     }
     throw new IllegalStateException(
         name + " did not become healthy within " + timeout + " (see " + logFile + ")", lastFailure);
+  }
+
+  private static int httpGet(String healthUrl) throws IOException {
+    HttpURLConnection connection =
+        (HttpURLConnection) URI.create(healthUrl).toURL().openConnection();
+    connection.setConnectTimeout(2000);
+    connection.setReadTimeout(2000);
+    connection.setRequestMethod("GET");
+    int status = connection.getResponseCode();
+    connection.disconnect();
+    return status;
   }
 
   private static void sleep(Duration duration) {

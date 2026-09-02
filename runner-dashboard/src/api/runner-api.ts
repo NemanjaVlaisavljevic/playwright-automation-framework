@@ -4,6 +4,7 @@ import {
   createApiClient,
   ProblemDetail,
   TypedStatusError,
+  type ArtifactSummaryResponse,
   type CapabilitiesResponse,
   type CreateRunRequest,
   type RunResponse,
@@ -19,7 +20,12 @@ import { RunnerApiError } from "./problem-detail";
  * (`RunsTable.tsx` and `domain/run.ts` both did it) - `scripts/check-import-boundaries.mjs` (wired
  * into `npm run check`) now fails the build if it happens again.
  */
-export type { CapabilitiesResponse, CreateRunRequest, RunResponse };
+export type {
+  ArtifactSummaryResponse,
+  CapabilitiesResponse,
+  CreateRunRequest,
+  RunResponse,
+};
 
 // The generated client's own request() does `new URL(baseUrl + path)`, and the WHATWG URL
 // constructor rejects a relative string with no base ("" + "/api/v1/..." throws) - so this can't
@@ -143,5 +149,24 @@ export function createRun(request: CreateRunRequest): Promise<RunResponse> {
 export function cancelRun(runId: string): Promise<RunResponse> {
   return unwrap(
     client.post("/api/v1/runs/{runId}/cancel", { path: { runId } }),
+  );
+}
+
+/**
+ * Returns every artifact captured so far for the run - callers don't need a separate wrapper for
+ * downloading one: each entry's own `downloadUrl` is a same-origin path meant to be used directly
+ * as an `<a href>`/`<img src>` (mirrors how `RunResponse.processLogUrl` is already used in
+ * `RunDetailsPage.tsx`), not fetched through this client - the download endpoint serves raw
+ * image/zip/video bytes, not JSON, so there's nothing for `unwrap`'s Zod validation to check.
+ */
+export function listRunArtifacts(
+  runId: string,
+  testId?: string,
+): Promise<ArtifactSummaryResponse[]> {
+  return unwrap(
+    client.get("/api/v1/runs/{runId}/artifacts", {
+      path: { runId },
+      ...(testId !== undefined ? { query: { testId } } : {}),
+    }),
   );
 }

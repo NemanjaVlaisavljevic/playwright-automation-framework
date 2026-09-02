@@ -19,6 +19,7 @@ import dev.vlaisanem.automation.runner.service.process.SuiteCommandFactory;
 import dev.vlaisanem.automation.runner.service.repository.RunRepository;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -85,6 +86,7 @@ public class RunService {
   private final Path repoRoot;
   private final Path rawEventsDir;
   private final Path logsDir;
+  private final Path artifactsRootDir;
   private final Duration timeout;
   private final Duration degradedPollInterval;
   private final Duration ingestionDrainTimeout;
@@ -118,6 +120,7 @@ public class RunService {
     this.repoRoot = Path.of(properties.repoRoot()).toAbsolutePath().normalize();
     this.rawEventsDir = Path.of(properties.rawEventsDir()).toAbsolutePath().normalize();
     this.logsDir = Path.of(properties.logsDir()).toAbsolutePath().normalize();
+    this.artifactsRootDir = Path.of(properties.artifactsDir()).toAbsolutePath().normalize();
     this.timeout = properties.processTimeout();
     this.degradedPollInterval = properties.degradedPollInterval();
     this.ingestionDrainTimeout = properties.ingestionDrainTimeout();
@@ -438,7 +441,9 @@ public class RunService {
           continue;
         }
         try {
-          return processLauncher.start(command, repoRoot, processLogPath(runId));
+          Map<String, String> environment =
+              Map.of("ARTIFACTS_DIR", reserveArtifactsDirectory(runId).toString());
+          return processLauncher.start(command, repoRoot, processLogPath(runId), environment);
         } catch (IOException exception) {
           lifecycle.finishIfLive(
               runId,
@@ -469,6 +474,31 @@ public class RunService {
       case CANCELLED -> "Run was cancelled";
       default -> null;
     };
+  }
+
+  /**
+   * Every run gets its own isolated subdirectory - never reused, never shared - so screenshots/
+   * traces from two different runs (sequential today; concurrent if this runner is ever scaled past
+   * its current single-worker executor) can never land in the same directory. {@code Files.exists}
+   * followed by a separate creation would leave a check-then-act race between two callers; {@code
+   * Files.createDirectory} is atomic - exactly one caller for a given {@code runId} ever succeeds,
+   * whether the race is against another run or (once {@code runId} is always a fresh UUID, as it is
+   * today) a genuine collision/reuse bug. On a start failure right after this succeeds, the
+   * now-empty directory is deliberately left in place - it belongs to that run's own {@code ERROR}
+   * outcome and may still gain a manifest/diagnostic entry later, so nothing here ever removes it.
+   */
+  // Package-private, not private: RunServiceTest exercises the reservation directly (see
+  // reservesADistinctArtifactsDirectoryPerRun) - triggering every case (first caller wins a genuine
+  // race, not just a UUID collision) through the full async submit() flow isn't deterministic.
+  Path reserveArtifactsDirectory(String runId) throws IOException {
+    Files.createDirectories(artifactsRootDir);
+    Path dir = artifactsRootDir.resolve(runId);
+    try {
+      return Files.createDirectory(dir);
+    } catch (FileAlreadyExistsException exception) {
+      throw new IllegalStateException(
+          "Artifacts directory already exists for run " + runId + ": " + dir, exception);
+    }
   }
 
   private Path processLogPath(String runId) {

@@ -26,6 +26,7 @@ class TestConfigTest {
         true,
         false,
         Path.of("build/artifacts"),
+        "test-run-id",
         "admin",
         "password",
         sharedTargetBaseUrl,

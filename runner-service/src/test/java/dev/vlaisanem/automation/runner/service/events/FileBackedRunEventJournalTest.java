@@ -402,6 +402,7 @@ class FileBackedRunEventJournalTest {
         tempDir.resolve("raw").toString(),
         tempDir.resolve("journal").toString(),
         tempDir.resolve("logs").toString(),
+        tempDir.resolve("artifacts").toString(),
         1024 * 1024,
         Duration.ofSeconds(5),
         Duration.ofSeconds(1),

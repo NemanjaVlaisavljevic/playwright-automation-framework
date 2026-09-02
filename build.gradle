@@ -29,6 +29,12 @@ dependencies {
     // emits one RunnerEvent JSONL line per test start/finish/skip. See runner-listener module.
     testRuntimeOnly project(':runner-listener')
 
+    // The ArtifactManifestEntry/ArtifactType record+enum shared with runner-service - the
+    // process-boundary contract this framework's own ArtifactManifestWriter writes against. Has no
+    // dependency of its own (no Playwright/Spring/Jackson, no dependency on this project), so this
+    // adds nothing beyond the one small module itself.
+    testImplementation project(':runner-contract')
+
     testImplementation 'com.microsoft.playwright:playwright:1.62.0'
     testImplementation 'org.assertj:assertj-core:3.27.6'
     testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
@@ -36,6 +42,12 @@ dependencies {
     testImplementation 'com.networknt:json-schema-validator:2.0.4'
     testImplementation 'io.qameta.allure:allure-jupiter:2.35.4'
     testImplementation 'org.slf4j:slf4j-api:2.0.18'
+    // Playwright's Page/BrowserContext/Tracing are interfaces specifically to allow this - used
+    // only to unit-test TestFixture's independent-artifact-capture failure handling (TestFixtureTest)
+    // without a real browser. Mockito 5's inline mock maker (the default, no separate mockito-inline
+    // artifact needed) is also what makes mocking the static io.qameta.allure.Allure.addAttachment
+    // possible there.
+    testImplementation 'org.mockito:mockito-core:5.23.0'
     testRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
 }
 
@@ -46,6 +58,18 @@ dependencies {
 // forked test JVM launched with them. maxParallelForks is pinned to 1 (Gradle's own default, but
 // made explicit rather than relied upon) because the listener's in-JVM lock cannot protect a shared
 // runId file against a second, separate Gradle test worker process.
+//
+// Deliberately forwards ONLY when the runner-service already supplied a value - no fallback
+// generated here. An earlier version of this closure generated a random UUID on every invocation
+// when absent, which (a) only ran once per configured Test task, not once per Gradle invocation,
+// so multiple tasks in one invocation would each mint their own value; (b) never applied at all to
+// a JVM launched outside Gradle entirely (an IDE's own JUnit runner, a bare `java` invocation); and
+// (c) made every local `./gradlew test` set a fresh random systemProperty on the Test task, which
+// Gradle treats as a task input - a volatile value there defeats build-cache/up-to-date checking on
+// every single run, worse than not caching at all. The shared fallback (an unmanaged run gets one
+// consistent identity, however the JVM was launched) now lives entirely inside the JVM itself, in
+// runner-contract's RunnerExecutionIdentity - both TestConfig and RunnerEventTestExecutionListener
+// resolve through it, so this closure never needs to invent or forward a fallback value at all.
 def forwardRunnerEventProperties = { Test task ->
     ['runner.runId', 'runner.rawEventsDir'].each { property ->
         def value = System.getProperty(property)

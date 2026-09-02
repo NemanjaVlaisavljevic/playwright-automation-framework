@@ -269,24 +269,26 @@ function RunTableRow({ run }: { run: RunResponse }) {
       <td>{run.environment}</td>
       <td>{formatLocalDateTime(run.requestedAt)}</td>
       <td>{durationMs !== undefined ? formatDuration(durationMs) : "—"}</td>
-      <td className={styles.actions}>
-        <Link to={`/runs/${run.runId}`}>View</Link>
-        {!isTerminalRunStatus(run.status) && (
-          <Button
-            variant="secondary"
-            size="compact"
-            onClick={() => cancel.mutate()}
-            disabled={cancel.isPending}
-          >
-            Cancel
-          </Button>
-        )}
-        {logAvailable && <a href={run.processLogUrl}>Download log</a>}
-        {cancel.isError && (
-          <span role="alert">
-            Could not cancel: {describeError(cancel.error)}
-          </span>
-        )}
+      <td>
+        <div className={styles.actions}>
+          <Link to={`/runs/${run.runId}`}>View</Link>
+          {!isTerminalRunStatus(run.status) && (
+            <Button
+              variant="secondary"
+              size="compact"
+              onClick={() => cancel.mutate()}
+              disabled={cancel.isPending}
+            >
+              Cancel
+            </Button>
+          )}
+          {logAvailable && <a href={run.processLogUrl}>Download log</a>}
+          {cancel.isError && (
+            <span role="alert">
+              Could not cancel: {describeError(cancel.error)}
+            </span>
+          )}
+        </div>
       </td>
     </tr>
   );

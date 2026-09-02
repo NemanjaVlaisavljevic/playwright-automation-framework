@@ -8,6 +8,7 @@ import {
   getCapabilities,
   getHealth,
   getRun,
+  listRunArtifacts,
   listRuns,
 } from "./runner-api";
 
@@ -137,6 +138,63 @@ describe("getRun", () => {
     expect(error.kind).toBe("http");
     expect(error.status).toBe(502);
     expect(error.problem).toBeUndefined();
+  });
+});
+
+describe("listRunArtifacts", () => {
+  const artifact = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    artifactId: "a1",
+    testId: "test-1",
+    testDisplayName: "loginTest()",
+    type: "SCREENSHOT",
+    mediaType: "image/png",
+    sizeBytes: 1024,
+    createdAt: "2026-09-01T10:00:05Z",
+    downloadUrl: "/api/v1/runs/run-1/artifacts/a1",
+    ...overrides,
+  });
+
+  it("returns the parsed artifact list", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId/artifacts", () =>
+        HttpResponse.json([artifact()]),
+      ),
+    );
+
+    await expect(listRunArtifacts("run-1")).resolves.toEqual([artifact()]);
+  });
+
+  it("forwards the testId as a query parameter, fully decoded back to the original JUnit unique ID", async () => {
+    // A real JUnit `TestIdentifier.getUniqueId()` - brackets, colons, parentheses, a dot-qualified
+    // class name - is exactly the kind of value naive string concatenation into a query string
+    // would mangle. Asserting via `url.searchParams.get` (not a raw substring match on the URL) is
+    // the point: it proves the server receives this value back verbatim after a real
+    // encode-then-decode round trip, not merely that *some* escaped form appears in the URL.
+    const testId =
+      "[engine:junit-jupiter]/[class:HomePageTest]/[method:showsRooms()]";
+    server.use(
+      http.get("/api/v1/runs/:runId/artifacts", ({ request }) => {
+        const url = new URL(request.url);
+        return HttpResponse.json(
+          url.searchParams.get("testId") === testId ? [artifact()] : [],
+        );
+      }),
+    );
+
+    await expect(listRunArtifacts("run-1", testId)).resolves.toHaveLength(1);
+  });
+
+  it("normalizes a 404 into an http RunnerApiError", async () => {
+    server.use(
+      http.get(
+        "/api/v1/runs/:runId/artifacts",
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+    );
+
+    const error = await catchError(listRunArtifacts("missing"));
+    expect(error.kind).toBe("http");
+    expect(error.status).toBe(404);
   });
 });
 

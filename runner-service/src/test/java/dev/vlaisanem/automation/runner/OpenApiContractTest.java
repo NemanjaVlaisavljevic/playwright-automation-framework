@@ -43,7 +43,9 @@ class OpenApiContractTest {
           "getRun",
           "cancelRun",
           "downloadRunLog",
-          "getRunnerCapabilities");
+          "getRunnerCapabilities",
+          "listRunArtifacts",
+          "downloadRunArtifact");
 
   @Value("${local.server.port}")
   private int port;
@@ -121,7 +123,17 @@ class OpenApiContractTest {
               "/api/v1/capabilities",
               "get",
               List.of("200", "500"),
-              Map.of("200", MediaType.APPLICATION_JSON_VALUE)));
+              Map.of("200", MediaType.APPLICATION_JSON_VALUE)),
+          new OperationContract(
+              "/api/v1/runs/{runId}/artifacts",
+              "get",
+              List.of("200", "404", "500"),
+              Map.of("200", MediaType.APPLICATION_JSON_VALUE)),
+          new OperationContract(
+              "/api/v1/runs/{runId}/artifacts/{artifactId}",
+              "get",
+              List.of("200", "404", "500"),
+              Map.of("200", MediaType.IMAGE_PNG_VALUE)));
 
   @Test
   void everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes() {
@@ -320,6 +332,43 @@ class OpenApiContractTest {
             .path("schema");
     assertThat(schema.path("type").asText()).isEqualTo("string");
     assertThat(schema.path("format").asText()).isNotEqualTo("binary");
+  }
+
+  /**
+   * {@link #everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes} only spot-
+   * checks one canonical success media type per operation ({@code image/png} here) - this test
+   * separately locks that all three {@link dev.vlaisanem.automation.runner.contract.ArtifactType}
+   * media types the controller can actually serve are documented, not just the one the shared
+   * matrix happens to check.
+   */
+  @Test
+  void downloadRunArtifactDocumentsEveryArtifactTypesMediaType() {
+    JsonNode content =
+        spec.path("paths")
+            .path("/api/v1/runs/{runId}/artifacts/{artifactId}")
+            .path("get")
+            .path("responses")
+            .path("200")
+            .path("content");
+    assertThat(content.has(MediaType.IMAGE_PNG_VALUE)).isTrue();
+    assertThat(content.has("application/zip")).isTrue();
+    assertThat(content.has("video/webm")).isTrue();
+  }
+
+  @Test
+  void artifactSummaryResponseHasExactlyTheExpectedRequiredFields() {
+    JsonNode artifactSummaryResponse =
+        spec.path("components").path("schemas").path("ArtifactSummaryResponse");
+    assertThat(requiredFieldsOf(artifactSummaryResponse))
+        .containsExactlyInAnyOrder(
+            "artifactId",
+            "testId",
+            "testDisplayName",
+            "type",
+            "mediaType",
+            "sizeBytes",
+            "createdAt",
+            "downloadUrl");
   }
 
   private List<String> allOperationIds() {

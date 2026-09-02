@@ -18,7 +18,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "api:export": "node scripts/export-openapi.mjs",
-    "api:generate": "typed-openapi",
+    "api:generate": "typed-openapi && node scripts/strip-generated-trailing-whitespace.mjs src/api/generated",
     "api:check:snapshot": "npm run api:generate && node scripts/check-git-clean.mjs src/api/generated",
     "api:check:contract": "npm run api:export && npm run api:generate && node scripts/check-git-clean.mjs openapi/runner-api.json src/api/generated",
     "check:boundaries": "node scripts/check-import-boundaries.mjs",

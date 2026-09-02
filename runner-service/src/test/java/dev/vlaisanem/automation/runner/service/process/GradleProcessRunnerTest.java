@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -37,7 +38,7 @@ class GradleProcessRunnerTest {
   void completesNormallyWithTheChildsExitCode(@TempDir Path tempDir) throws IOException {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Path outputFile = tempDir.resolve("run.log");
-    Process process = runner.start(sleepAndExitCommand(0, 7), tempDir, outputFile);
+    Process process = runner.start(sleepAndExitCommand(0, 7), tempDir, outputFile, Map.of());
 
     ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofSeconds(30));
 
@@ -51,7 +52,7 @@ class GradleProcessRunnerTest {
   void killsAndReportsTimedOutWhenTheDeadlinePasses(@TempDir Path tempDir) throws IOException {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Process process =
-        runner.start(sleepAndExitCommand(10_000, 0), tempDir, tempDir.resolve("run.log"));
+        runner.start(sleepAndExitCommand(10_000, 0), tempDir, tempDir.resolve("run.log"), Map.of());
 
     ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofMillis(200));
 
@@ -60,10 +61,46 @@ class GradleProcessRunnerTest {
   }
 
   @Test
+  void passesTheGivenEnvironmentVariablesToTheChildProcess(@TempDir Path tempDir)
+      throws IOException {
+    GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
+    Path outputFile = tempDir.resolve("env.log");
+    Process process =
+        runner.start(
+            envPrintingCommand("ARTIFACTS_DIR"),
+            tempDir,
+            outputFile,
+            Map.of("ARTIFACTS_DIR", "/some/run-scoped/path"));
+
+    ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofSeconds(30));
+
+    assertThat(outcome.kind()).isEqualTo(ProcessOutcome.Kind.COMPLETED);
+    assertThat(outputFile).content().contains("/some/run-scoped/path");
+  }
+
+  /**
+   * Regression test for the review's finding: {@code builder.environment().putAll(environment)}
+   * used to run after the output file was already opened, so a failure there (a null map is the one
+   * input verified to throw identically on every platform - see the class-level note) leaked the
+   * file handle instead of being caught by the existing IOException/RuntimeException cleanup.
+   */
+  @Test
+  void doesNotLeakTheOutputFileHandleWhenTheEnvironmentMapIsInvalid(@TempDir Path tempDir) {
+    GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
+    Path outputFile = tempDir.resolve("never-created.log");
+
+    assertThatThrownBy(() -> runner.start(sleepAndExitCommand(0, 0), tempDir, outputFile, null))
+        .isInstanceOf(NullPointerException.class);
+
+    assertThat(outputFile).doesNotExist();
+  }
+
+  @Test
   void doesNotBlockOnTheChildsOutputPipe(@TempDir Path tempDir) throws IOException {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024);
     Path outputFile = tempDir.resolve("chatty.log");
-    Process process = runner.start(sleepAndExitCommand(0, 0, 100_000), tempDir, outputFile);
+    Process process =
+        runner.start(sleepAndExitCommand(0, 0, 100_000), tempDir, outputFile, Map.of());
 
     ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofSeconds(30));
 
@@ -83,7 +120,7 @@ class GradleProcessRunnerTest {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Path pidFile = tempDir.resolve("child.pid");
     Process process =
-        runner.start(processTreeCommand(pidFile), tempDir, tempDir.resolve("tree.log"));
+        runner.start(processTreeCommand(pidFile), tempDir, tempDir.resolve("tree.log"), Map.of());
 
     long childPid = awaitPidFile(pidFile);
     ProcessHandle childHandle = ProcessHandle.of(childPid).orElseThrow();
@@ -282,6 +319,15 @@ class GradleProcessRunnerTest {
     throw new AssertionError("Child PID file was never written: " + pidFile);
   }
 
+  private List<String> envPrintingCommand(String variableName) {
+    return List.of(
+        javaExecutable(),
+        "-cp",
+        System.getProperty("java.class.path"),
+        EnvPrintingFixture.class.getName(),
+        variableName);
+  }
+
   private List<String> sleepAndExitCommand(long sleepMillis, int exitCode) {
     return List.of(
         javaExecutable(),
@@ -311,6 +357,7 @@ class GradleProcessRunnerTest {
             "build/events/raw",
             "build/events/journal",
             "build/logs",
+            "build/artifacts",
             maxLogBytes,
             terminationGracePeriod,
             Duration.ofSeconds(1),

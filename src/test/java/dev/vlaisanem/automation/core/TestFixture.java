@@ -7,6 +7,7 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Tracing;
 import dev.vlaisanem.automation.api.ApiContextFactory;
 import dev.vlaisanem.automation.config.TestConfig;
+import dev.vlaisanem.automation.runner.contract.ArtifactType;
 import io.qameta.allure.Allure;
 import java.io.IOException;
 import java.io.InputStream;
@@ -80,28 +81,104 @@ final class TestFixture implements AutoCloseable {
     return apiContextFactory;
   }
 
+  /**
+   * Every step below is its own independent best-effort attempt (see {@link #safely}) - a failure
+   * in one (an Allure I/O hiccup, a manifest write failure) must never prevent any of the others,
+   * and never touches the test's own real failure ({@code context}'s execution exception, which
+   * this method never reads or alters). The manifest entry for an artifact is recorded as soon as
+   * the file itself exists, before Allure ever sees it - Allure attachment failing must not make an
+   * already-successfully-written screenshot/trace invisible to the manifest (and therefore the
+   * dashboard) too.
+   */
   void captureFailure(ExtensionContext context) {
     if (browserContext == null) {
       return;
     }
     Path testDirectory = config.artifactsDirectory().resolve(artifactName(context));
-    try {
-      Files.createDirectories(testDirectory);
-      if (page != null && !page.isClosed()) {
-        Path screenshot = testDirectory.resolve("failure.png");
-        page.screenshot(new Page.ScreenshotOptions().setPath(screenshot).setFullPage(true));
-        attach("Failure screenshot", "image/png", screenshot, ".png");
+    safely(context, "create the artifacts directory", () -> Files.createDirectories(testDirectory));
+
+    boolean pageOpen =
+        page != null
+            && safelyGet(context, "check whether the page is open", () -> !page.isClosed(), false);
+    if (pageOpen) {
+      Path screenshot = testDirectory.resolve("failure.png");
+      boolean captured =
+          safely(
+              context,
+              "capture a failure screenshot",
+              () ->
+                  page.screenshot(
+                      new Page.ScreenshotOptions().setPath(screenshot).setFullPage(true)));
+      if (captured) {
+        safely(
+            context,
+            "record the screenshot artifact manifest entry",
+            () -> recordArtifact(context, ArtifactType.SCREENSHOT, screenshot, "image/png"));
+        safely(
+            context,
+            "attach the failure screenshot to Allure",
+            () -> attach("Failure screenshot", "image/png", screenshot, ".png"));
       }
-      if (traceRunning) {
-        Path trace = testDirectory.resolve("trace.zip");
-        browserContext.tracing().stop(new Tracing.StopOptions().setPath(trace));
-        traceRunning = false;
-        attach("Playwright trace", "application/zip", trace, ".zip");
-      }
-    } catch (RuntimeException | IOException exception) {
-      LOGGER.warn(
-          "Could not capture all failure artifacts for {}", context.getDisplayName(), exception);
     }
+
+    if (traceRunning) {
+      Path trace = testDirectory.resolve("trace.zip");
+      // Cleared unconditionally, not only on success: tracing().stop() is a one-shot action either
+      // way - even a failed attempt must not be retried (e.g. from close()) or left permanently
+      // "still running".
+      traceRunning = false;
+      boolean captured =
+          safely(
+              context,
+              "stop the Playwright trace",
+              () -> browserContext.tracing().stop(new Tracing.StopOptions().setPath(trace)));
+      if (captured) {
+        safely(
+            context,
+            "record the trace artifact manifest entry",
+            () -> recordArtifact(context, ArtifactType.TRACE, trace, "application/zip"));
+        safely(
+            context,
+            "attach the Playwright trace to Allure",
+            () -> attach("Playwright trace", "application/zip", trace, ".zip"));
+      }
+    }
+  }
+
+  private boolean safely(ExtensionContext context, String step, ThrowingRunnable action) {
+    try {
+      action.run();
+      return true;
+    } catch (RuntimeException | IOException exception) {
+      LOGGER.warn("Could not {} for {}", step, context.getDisplayName(), exception);
+      return false;
+    }
+  }
+
+  /**
+   * Same best-effort contract as {@link #safely}, for a step whose own result (not just whether it
+   * succeeded) feeds a later decision - {@code page.isClosed()} itself can throw if the underlying
+   * driver/browser already crashed, and that must not abort capture entirely (in particular, must
+   * not skip the completely independent trace-capture step below it).
+   */
+  private <T> T safelyGet(
+      ExtensionContext context, String step, ThrowingSupplier<T> action, T fallback) {
+    try {
+      return action.get();
+    } catch (RuntimeException exception) {
+      LOGGER.warn("Could not {} for {}", step, context.getDisplayName(), exception);
+      return fallback;
+    }
+  }
+
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    void run() throws IOException;
+  }
+
+  @FunctionalInterface
+  private interface ThrowingSupplier<T> {
+    T get();
   }
 
   @Override
@@ -126,6 +203,19 @@ final class TestFixture implements AutoCloseable {
         context.getRequiredTestClass().getSimpleName() + "-" + context.getDisplayName();
     String slug = readable.replaceAll("[^a-zA-Z0-9._-]+", "-").replaceAll("-+", "-");
     return slug + "-" + Integer.toHexString(context.getUniqueId().hashCode());
+  }
+
+  private void recordArtifact(
+      ExtensionContext context, ArtifactType type, Path artifactFile, String mediaType)
+      throws IOException {
+    ArtifactManifestWriter.record(
+        config.artifactsDirectory(),
+        config.runId(),
+        context.getUniqueId(),
+        context.getDisplayName(),
+        type,
+        artifactFile,
+        mediaType);
   }
 
   private static void attach(String name, String mediaType, Path path, String extension)

@@ -4,15 +4,16 @@
   export type CreateRunRequest = ({ environment: "PUBLIC", suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION") } & Record<string, unknown>)
 export type RunResponse = ({ runId: string, environment: "PUBLIC", suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string } & Record<string, unknown>)
 export type ProblemDetail = ({ type?: string, title: string, status: number, detail: string, instance: string, properties?: Record<string, unknown> } & Record<string, unknown>)
+export type ArtifactSummaryResponse = ({ artifactId: string, testId: string, testDisplayName: string, type: ("SCREENSHOT" | "TRACE" | "VIDEO"), mediaType: string, sizeBytes: number, createdAt: string, downloadUrl: string } & Record<string, unknown>)
 export type EnvironmentCapabilities = ({ name: "PUBLIC", suites: Array<("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION")> } & Record<string, unknown>)
 export type CapabilitiesResponse = ({ apiVersion: string, eventSchemaVersion: string, environments: Array<EnvironmentCapabilities> } & Record<string, unknown>)
 
     // </Schemas>
     }
-  
+
   export namespace Endpoints {
   // <Endpoints>
-  
+
   export type get_ListRuns = {
       method: "GET",
       path: "/api/v1/runs",
@@ -22,7 +23,7 @@ export type CapabilitiesResponse = ({ apiVersion: string, eventSchemaVersion: st
       responses: {200: Array<Schemas.RunResponse>,
 500: Schemas.ProblemDetail,
 },
-      
+
     }
 export type post_CreateRun = {
       method: "POST",
@@ -30,10 +31,10 @@ export type post_CreateRun = {
       requestFormat: "json",
       responseFormat: "json",
       parameters: {
-            
-        
-        
-        
+
+
+
+
         body:  Schemas.CreateRunRequest,
           }
       responses: {202: Schemas.RunResponse,
@@ -41,7 +42,7 @@ export type post_CreateRun = {
 500: Schemas.ProblemDetail,
 503: Schemas.ProblemDetail,
 },
-      
+
     }
 export type post_CancelRun = {
       method: "POST",
@@ -49,18 +50,18 @@ export type post_CancelRun = {
       requestFormat: "json",
       responseFormat: "json",
       parameters: {
-            
+
         path:  { runId: string },
-        
-        
-        
+
+
+
           }
       responses: {200: Schemas.RunResponse,
 404: Schemas.ProblemDetail,
 500: Schemas.ProblemDetail,
 503: Schemas.ProblemDetail,
 },
-      
+
     }
 export type get_GetRun = {
       method: "GET",
@@ -68,17 +69,17 @@ export type get_GetRun = {
       requestFormat: "json",
       responseFormat: "json",
       parameters: {
-            
+
         path:  { runId: string },
-        
-        
-        
+
+
+
           }
       responses: {200: Schemas.RunResponse,
 404: Schemas.ProblemDetail,
 500: Schemas.ProblemDetail,
 },
-      
+
     }
 export type get_DownloadRunLog = {
       method: "GET",
@@ -86,17 +87,53 @@ export type get_DownloadRunLog = {
       requestFormat: "json",
       responseFormat: "json",
       parameters: {
-            
+
         path:  { runId: string },
-        
-        
-        
+
+
+
           }
       responses: {200: string,
 404: Schemas.ProblemDetail,
 500: Schemas.ProblemDetail,
 },
-      
+
+    }
+export type get_ListRunArtifacts = {
+      method: "GET",
+      path: "/api/v1/runs/{runId}/artifacts",
+      requestFormat: "json",
+      responseFormat: "json",
+      parameters: {
+            query?:  Partial<{ testId: string }>,
+        path:  { runId: string },
+
+
+
+          }
+      responses: {200: Array<Schemas.ArtifactSummaryResponse>,
+404: Schemas.ProblemDetail,
+500: Schemas.ProblemDetail,
+},
+
+    }
+export type get_DownloadRunArtifact = {
+      method: "GET",
+      path: "/api/v1/runs/{runId}/artifacts/{artifactId}",
+      requestFormat: "json",
+      responseFormat: "json",
+      parameters: {
+
+        path:  { runId: string, artifactId: string },
+
+
+
+          }
+      responses: {200: unknown,
+404: Schemas.ProblemDetail,
+500: Schemas.ProblemDetail,
+},
+
     }
 export type get_GetRunnerCapabilities = {
       method: "GET",
@@ -107,19 +144,21 @@ export type get_GetRunnerCapabilities = {
       responses: {200: Schemas.CapabilitiesResponse,
 500: Schemas.ProblemDetail,
 },
-      
+
     }
 
   // </Endpoints>
   }
-  
-  
+
+
      // <EndpointByMethod>
      export type EndpointByMethod = {
      get: {
            "/api/v1/runs": Endpoints.get_ListRuns,
 "/api/v1/runs/{runId}": Endpoints.get_GetRun,
 "/api/v1/runs/{runId}/log": Endpoints.get_DownloadRunLog,
+"/api/v1/runs/{runId}/artifacts": Endpoints.get_ListRunArtifacts,
+"/api/v1/runs/{runId}/artifacts/{artifactId}": Endpoints.get_DownloadRunArtifact,
 "/api/v1/capabilities": Endpoints.get_GetRunnerCapabilities
          },
 post: {
@@ -127,12 +166,11 @@ post: {
 "/api/v1/runs/{runId}/cancel": Endpoints.post_CancelRun
          }
      }
-     
+
      // </EndpointByMethod>
-     
+
 
     // <EndpointByMethod.Shorthands>
     export type GetEndpoints = EndpointByMethod["get"]
 export type PostEndpoints = EndpointByMethod["post"]
     // </EndpointByMethod.Shorthands>
-    

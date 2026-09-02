@@ -1,6 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
-import { cancelRun, getRun } from "../../api/runner-api";
+import {
+  cancelRun,
+  getRun,
+  listRunArtifacts,
+  type ArtifactSummaryResponse,
+} from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
 import { RunnerApiError } from "../../api/problem-detail";
 import { Alert } from "../../components/ui/Alert";
@@ -12,6 +18,7 @@ import { MetricCard } from "../../components/ui/MetricCard";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { StatusBadge } from "../../components/ui/StatusBadge";
+import { formatBytes } from "../../domain/bytes";
 import { formatLocalDateTime } from "../../domain/datetime";
 import { formatDuration, runDurationMs } from "../../domain/duration";
 import { isTerminalRunStatus } from "../../domain/run";
@@ -30,10 +37,13 @@ import styles from "./RunDetailsPage.module.css";
 export interface RunDetailsPageProps {
   /** Overridable for tests - see `RunDetailsPage.test.tsx`. Production code never passes this. */
   eventStreamClient?: EventStreamClient;
+  /** Overridable for tests - see `RunDetailsPage.test.tsx`. Production code never passes this. */
+  runPollIntervalMs?: number;
 }
 
 export function RunDetailsPage({
   eventStreamClient,
+  runPollIntervalMs,
 }: RunDetailsPageProps = {}) {
   const { runId } = useParams<{ runId: string }>();
   if (runId === undefined) {
@@ -47,6 +57,7 @@ export function RunDetailsPage({
       key={runId}
       runId={runId}
       {...(eventStreamClient !== undefined ? { eventStreamClient } : {})}
+      {...(runPollIntervalMs !== undefined ? { runPollIntervalMs } : {})}
     />
   );
 }
@@ -54,18 +65,53 @@ export function RunDetailsPage({
 function RunDetails({
   runId,
   eventStreamClient,
+  runPollIntervalMs = 3000,
 }: {
   runId: string;
   eventStreamClient?: EventStreamClient;
+  runPollIntervalMs?: number;
 }) {
-  const run = useQuery({
-    queryKey: queryKeys.run(runId),
-    queryFn: () => getRun(runId),
-  });
   const { connectionState, streamState } = useRunEventStream(
     runId,
     eventStreamClient,
   );
+
+  const run = useQuery({
+    queryKey: queryKeys.run(runId),
+    queryFn: () => getRun(runId),
+    // `useRunEventStream` invalidates `run` exactly once when the stream freezes for any reason
+    // (see that hook's own doc comment), including a permanent `PROTOCOL_ERROR` - but if the run
+    // hasn't reached a terminal status by that one refetch, nothing else was left to ever refetch
+    // it again: a review caught that this stranded both the header's status and the Artifacts
+    // section (see below) once a run's SSE stream broke before `RUN_FINISHED`. Falling back to
+    // plain REST polling here - only while the stream can no longer be trusted, and only until the
+    // status this same fallback reads back is itself terminal - recovers both.
+    refetchInterval: (query) => {
+      if (connectionState !== "PROTOCOL_ERROR") {
+        return false;
+      }
+      const status = query.state.data?.status;
+      if (status !== undefined && isTerminalRunStatus(status)) {
+        return false;
+      }
+      // A definitive 404 (not a transient network/5xx blip) means the run is gone for good - the
+      // runner service only keeps run history in memory (see docs/SSE_CONTRACT_V1.md), so a
+      // restart between polls is a real, permanent case, not something retrying will ever fix.
+      // `query.state.data` would otherwise keep whatever the last *successful* response was (still
+      // RUNNING, say) forever, since a failed refetch doesn't clear it - polling a run that will
+      // never come back again is exactly the bug a review caught here.
+      const error = query.state.error;
+      if (
+        error instanceof RunnerApiError &&
+        error.kind === "http" &&
+        error.status === 404
+      ) {
+        return false;
+      }
+      return runPollIntervalMs;
+    },
+    refetchIntervalInBackground: true,
+  });
 
   const queryClient = useQueryClient();
   const cancel = useMutation({
@@ -73,6 +119,41 @@ function RunDetails({
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: queryKeys.run(runId) }),
   });
+
+  const artifacts = useQuery({
+    queryKey: queryKeys.runArtifacts(runId),
+    queryFn: () => listRunArtifacts(runId),
+    // Gated on the run lookup itself succeeding: the backend 404s this endpoint too when the run
+    // doesn't exist, and firing it anyway would show a second, redundant "not available" error
+    // alongside the run's own - a real duplicate-text failure an E2E test caught (both errors
+    // share `describeApiError`'s 404 message, which made `getByText(...)` match twice).
+    enabled: run.isSuccess,
+  });
+  const runIsTerminal = run.isSuccess && isTerminalRunStatus(run.data.status);
+  // Faza A ships REST-only artifact retrieval, with no ARTIFACT_CREATED live event yet (deferred to
+  // the Step API / Event V2 phase) - so a fresh capture during a still-running test can't be pushed
+  // to the dashboard. Two distinct, non-exclusive signals both mean "every artifact for this run is
+  // now guaranteed to have been captured and manifested" - the normal path (`RUN_FINISHED` arrived
+  // over SSE, `connectionState` reaches `"CLOSED"`) and the REST fallback path above (a stream that
+  // broke before ever reaching `RUN_FINISHED`, `runIsTerminal` instead). Kept as two separate
+  // effects, each gated on its own path being the one actually responsible - `connectionState`
+  // trivially implies `runIsTerminal` will *also* eventually become true once the resulting
+  // invalidate's refetch resolves, and a single combined effect would then fire the same
+  // invalidation twice (once from each signal) for the one normal-path finish, wasting a request.
+  useEffect(() => {
+    if (connectionState === "CLOSED") {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.runArtifacts(runId),
+      });
+    }
+  }, [connectionState, runId, queryClient]);
+  useEffect(() => {
+    if (connectionState === "PROTOCOL_ERROR" && runIsTerminal) {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.runArtifacts(runId),
+      });
+    }
+  }, [connectionState, runIsTerminal, runId, queryClient]);
 
   const tests = Array.from(streamState.testsById.values()).sort(
     (a, b) => a.firstSequence - b.firstSequence,
@@ -215,8 +296,79 @@ function RunDetails({
           </div>
         )}
       </div>
+
+      {artifacts.isError && (
+        <div className={styles.section}>
+          <Alert>
+            Could not load artifacts: {describeApiError(artifacts.error)}
+          </Alert>
+        </div>
+      )}
+      {artifacts.isSuccess && artifacts.data.length > 0 && (
+        <div className={styles.section}>
+          <h2 className={styles.sectionTitle}>Artifacts</h2>
+          <div className={styles.tableScroll}>
+            <table className={styles.table}>
+              <caption className="visually-hidden">
+                Artifacts for run {runId}
+              </caption>
+              <thead>
+                <tr>
+                  <th>Test</th>
+                  <th>Type</th>
+                  <th>Size</th>
+                  <th>Artifact</th>
+                </tr>
+              </thead>
+              <tbody>
+                {artifacts.data.map((artifact) => (
+                  <ArtifactRow key={artifact.artifactId} artifact={artifact} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </>
   );
+}
+
+function ArtifactRow({ artifact }: { artifact: ArtifactSummaryResponse }) {
+  return (
+    <tr>
+      <td>{artifact.testDisplayName}</td>
+      <td>{artifactTypeLabel(artifact.type)}</td>
+      <td>{formatBytes(artifact.sizeBytes)}</td>
+      <td>
+        {artifact.type === "SCREENSHOT" ? (
+          <a href={artifact.downloadUrl} target="_blank" rel="noreferrer">
+            <img
+              src={artifact.downloadUrl}
+              alt={`Screenshot for ${artifact.testDisplayName}`}
+              className={styles.artifactThumbnail}
+              loading="lazy"
+              decoding="async"
+            />
+          </a>
+        ) : (
+          <a className={styles.downloadLink} href={artifact.downloadUrl}>
+            Download {artifactTypeLabel(artifact.type).toLowerCase()}
+          </a>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function artifactTypeLabel(type: ArtifactSummaryResponse["type"]): string {
+  switch (type) {
+    case "SCREENSHOT":
+      return "Screenshot";
+    case "TRACE":
+      return "Trace";
+    case "VIDEO":
+      return "Video";
+  }
 }
 
 function TestRow({ test }: { test: TestExecution }) {

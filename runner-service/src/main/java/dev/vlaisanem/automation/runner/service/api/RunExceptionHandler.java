@@ -1,5 +1,7 @@
 package dev.vlaisanem.automation.runner.service.api;
 
+import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
+import dev.vlaisanem.automation.runner.service.exception.ArtifactNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
 import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
@@ -72,6 +74,29 @@ public class RunExceptionHandler {
   @ExceptionHandler(InvalidEventResumeSequenceException.class)
   public ProblemDetail handleInvalidResumeSequence(InvalidEventResumeSequenceException exception) {
     return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, exception.getMessage());
+  }
+
+  @ExceptionHandler(ArtifactNotFoundException.class)
+  public ProblemDetail handleArtifactNotFound(ArtifactNotFoundException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, exception.getMessage());
+  }
+
+  /**
+   * Deliberately its own handler, not left to fall through to {@link #handleUnexpected} - a corrupt
+   * manifest is a real, distinguishable data-integrity problem, so the client gets a specific
+   * (though still generic) detail message identifying which run, rather than the catch-all's fully
+   * generic one. Unlike every other handler above, {@link
+   * ArtifactManifestCorruptException#getMessage()} is <em>not</em> re-exposed because it happens to
+   * be client-safe by coincidence - it is client-safe by construction (see the exception's own
+   * Javadoc); the real cause ({@link ArtifactManifestCorruptException#diagnosticReason()}, which
+   * can legitimately contain an absolute filesystem path or a raw Jackson error) is logged here and
+   * never sent to the client.
+   */
+  @ExceptionHandler(ArtifactManifestCorruptException.class)
+  public ProblemDetail handleArtifactManifestCorrupt(ArtifactManifestCorruptException exception) {
+    log.error("Artifact manifest corruption detected: {}", exception.diagnosticReason(), exception);
+    return ProblemDetail.forStatusAndDetail(
+        HttpStatus.INTERNAL_SERVER_ERROR, exception.getMessage());
   }
 
   @ExceptionHandler(Exception.class)

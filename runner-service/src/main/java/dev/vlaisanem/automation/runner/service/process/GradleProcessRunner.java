@@ -40,8 +40,17 @@ public class GradleProcessRunner implements ProcessLauncher {
   }
 
   @Override
-  public Process start(List<String> command, Path workingDirectory, Path outputFile)
+  public Process start(
+      List<String> command, Path workingDirectory, Path outputFile, Map<String, String> environment)
       throws IOException {
+    // Built and populated BEFORE the output file is opened below - putAll() can throw (a null map,
+    // or - platform-dependently - an invalid variable name/value) and must not leave an open file
+    // handle behind if it does (observed live on Windows: a leaked handle keeps the log file locked
+    // for the rest of the JVM's life).
+    ProcessBuilder builder =
+        new ProcessBuilder(command).directory(workingDirectory.toFile()).redirectErrorStream(true);
+    builder.environment().putAll(environment);
+
     Path absoluteOutputFile = outputFile.toAbsolutePath().normalize();
     Path parent = absoluteOutputFile.getParent();
     if (parent != null) {
@@ -50,8 +59,6 @@ public class GradleProcessRunner implements ProcessLauncher {
     OutputStream output =
         Files.newOutputStream(
             absoluteOutputFile, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
-    ProcessBuilder builder =
-        new ProcessBuilder(command).directory(workingDirectory.toFile()).redirectErrorStream(true);
     try {
       Process process = builder.start();
       drainOutput(process, output, absoluteOutputFile);
