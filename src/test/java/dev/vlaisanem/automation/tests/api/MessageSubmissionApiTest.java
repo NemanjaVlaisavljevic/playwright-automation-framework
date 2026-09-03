@@ -6,6 +6,7 @@ import com.microsoft.playwright.APIRequestContext;
 import dev.vlaisanem.automation.api.ApiResult;
 import dev.vlaisanem.automation.api.MessageClient;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.model.MessageAck;
 import dev.vlaisanem.automation.model.MessageRequest;
 import io.qameta.allure.Epic;
@@ -32,7 +33,7 @@ class MessageSubmissionApiTest {
 
   @Test
   @DisplayName("A guest can submit a valid contact message")
-  void guestCanSubmitValidMessage(APIRequestContext request) {
+  void guestCanSubmitValidMessage(APIRequestContext request, Steps steps) {
     String suffix = UUID.randomUUID().toString().substring(0, 8);
     MessageRequest message =
         new MessageRequest(
@@ -43,9 +44,16 @@ class MessageSubmissionApiTest {
             "This message was submitted by the opt-in portfolio automation suite to verify the"
                 + " contact API accepts a well-formed request.");
 
-    ApiResult response = new MessageClient(request).sendMessage(message);
+    ApiResult response =
+        steps.call(
+            "Submit a valid contact message",
+            () -> new MessageClient(request).sendMessage(message));
 
-    assertThat(response.status()).isEqualTo(200);
-    assertThat(response.bodyAs(MessageAck.class).success()).isTrue();
+    steps.run(
+        "Verify message accepted",
+        () -> {
+          assertThat(response.status()).isEqualTo(200);
+          assertThat(response.bodyAs(MessageAck.class).success()).isTrue();
+        });
   }
 }

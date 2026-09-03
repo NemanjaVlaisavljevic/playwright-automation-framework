@@ -5,11 +5,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.microsoft.playwright.APIRequestContext;
 import com.microsoft.playwright.Page;
 import dev.vlaisanem.automation.api.ApiContextFactory;
+import dev.vlaisanem.automation.api.ApiResult;
 import dev.vlaisanem.automation.api.AuthClient;
 import dev.vlaisanem.automation.api.BookingClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.BookingTestData;
 import dev.vlaisanem.automation.data.ManagedBooking;
 import dev.vlaisanem.automation.data.ManagedRoom;
@@ -39,48 +41,91 @@ class AdminBookingManagementJourneyTest {
   @Test
   @DisplayName("Admin can view, edit, and delete a room's booking through the admin UI")
   void adminCanManageBookingLifecycleThroughUi(
-      Page page, APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
+      Page page,
+      APIRequestContext request,
+      ApiContextFactory apiContexts,
+      TestConfig config,
+      Steps steps) {
     String token =
-        new AuthClient(request)
-            .loginAndReadToken(new AuthCredentials(config.adminUsername(), config.adminPassword()))
-            .token();
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                new AuthClient(request)
+                    .loginAndReadToken(
+                        new AuthCredentials(config.adminUsername(), config.adminPassword()))
+                    .token());
     APIRequestContext adminRequest = apiContexts.withCookie("token", token);
     RoomClient rooms = new RoomClient(adminRequest);
     BookingClient bookings = new BookingClient(adminRequest);
 
-    try (ManagedRoom room = ManagedRoom.create(rooms)) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(rooms))) {
       CreateBookingRequest requested = BookingTestData.uniqueBooking(room.roomId());
-      try (ManagedBooking booking = ManagedBooking.create(bookings, bookings, requested)) {
+      try (ManagedBooking booking =
+          steps.call(
+              "Provision an existing booking",
+              () -> ManagedBooking.create(bookings, bookings, requested))) {
         BookingResponse created = booking.created();
 
-        new AdminLoginPage(page).open().loginAs(config.adminUsername(), config.adminPassword());
-        new AdminRoomsPage(page).assertLoaded();
-        page.navigate("/admin/room/" + room.roomId());
+        steps.run(
+            "Log in to the admin UI",
+            () -> {
+              new AdminLoginPage(page)
+                  .open()
+                  .loginAs(config.adminUsername(), config.adminPassword());
+              new AdminRoomsPage(page).assertLoaded();
+            });
+
         AdminRoomDetailPage detailPage =
-            new AdminRoomDetailPage(page).assertLoaded(room.request().roomName());
-        detailPage.assertBookingListed(
-            created.firstName(),
-            created.lastName(),
-            created.bookingDates().checkin(),
-            created.bookingDates().checkout());
+            steps.call(
+                "Open room detail page",
+                () -> {
+                  page.navigate("/admin/room/" + room.roomId());
+                  return new AdminRoomDetailPage(page).assertLoaded(room.request().roomName());
+                });
+
+        steps.run(
+            "Verify booking listed",
+            () ->
+                detailPage.assertBookingListed(
+                    created.firstName(),
+                    created.lastName(),
+                    created.bookingDates().checkin(),
+                    created.bookingDates().checkout()));
 
         String updatedLastName = "Updated-" + created.lastName();
-        detailPage
-            .editBooking(created.firstName(), created.lastName())
-            .fillBookingEdit(created.firstName(), updatedLastName)
-            .confirmBookingEdit();
-        detailPage.assertBookingListed(
-            created.firstName(),
-            updatedLastName,
-            created.bookingDates().checkin(),
-            created.bookingDates().checkout());
-        assertThat(
-                bookings.getBooking(booking.bookingId()).bodyAs(BookingResponse.class).lastName())
-            .isEqualTo(updatedLastName);
+        steps.run(
+            "Edit the booking's last name",
+            () ->
+                detailPage
+                    .editBooking(created.firstName(), created.lastName())
+                    .fillBookingEdit(created.firstName(), updatedLastName)
+                    .confirmBookingEdit());
 
-        detailPage.deleteBooking(created.firstName(), updatedLastName);
-        detailPage.assertBookingNotListed(created.firstName(), updatedLastName);
-        assertThat(bookings.getBooking(booking.bookingId()).status()).isEqualTo(404);
+        steps.run(
+            "Verify updated booking",
+            () -> {
+              detailPage.assertBookingListed(
+                  created.firstName(),
+                  updatedLastName,
+                  created.bookingDates().checkin(),
+                  created.bookingDates().checkout());
+              ApiResult persisted = bookings.getBooking(booking.bookingId());
+              assertThat(persisted.status()).isEqualTo(200);
+              assertThat(persisted.bodyAs(BookingResponse.class).lastName())
+                  .isEqualTo(updatedLastName);
+            });
+
+        steps.run(
+            "Delete the booking through the admin UI",
+            () -> detailPage.deleteBooking(created.firstName(), updatedLastName));
+
+        steps.run(
+            "Verify booking deletion",
+            () -> {
+              detailPage.assertBookingNotListed(created.firstName(), updatedLastName);
+              assertThat(bookings.getBooking(booking.bookingId()).status()).isEqualTo(404);
+            });
 
         booking.release();
       }

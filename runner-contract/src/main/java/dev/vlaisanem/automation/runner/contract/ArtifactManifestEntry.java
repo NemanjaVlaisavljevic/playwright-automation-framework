@@ -20,6 +20,9 @@ import java.util.regex.Pattern;
  *     same underlying {@code TestDescriptor}) - always identical to the {@code testId} carried on
  *     that test's own {@link RunnerEvent}s.
  * @param testDisplayName human-readable test name, mirroring {@link RunnerEvent#testDisplayName()}.
+ * @param stepId the step this artifact belongs to, mirroring {@link RunnerEvent#stepId()}, or
+ *     {@code null} when the artifact was captured for a test that never used the {@code Steps} API
+ *     (or does not (yet) correlate to one specific step).
  * @param relativePath path to the artifact file, relative to that run's own artifacts root
  *     directory - never absolute, never containing a {@code ..} segment, and always using {@code /}
  *     as its separator (even when the entry was written on Windows) so a reader never needs to know
@@ -36,13 +39,14 @@ public record ArtifactManifestEntry(
     String runId,
     String testId,
     String testDisplayName,
+    String stepId,
     ArtifactType type,
     String relativePath,
     String mediaType,
     long sizeBytes,
     Instant createdAt) {
 
-  public static final String CURRENT_SCHEMA_VERSION = "1.0";
+  public static final String CURRENT_SCHEMA_VERSION = "1.1";
 
   // Deliberately restrictive, not just non-blank: this value is embedded verbatim into a
   // downloadUrl, used as a REST path segment, and concatenated into a Content-Disposition header
@@ -63,6 +67,9 @@ public record ArtifactManifestEntry(
     requireNonBlank(runId, "runId");
     requireNonBlank(testId, "testId");
     requireNonBlank(testDisplayName, "testDisplayName");
+    if (stepId != null && stepId.isBlank()) {
+      throw new IllegalArgumentException("stepId must not be blank when present");
+    }
     Objects.requireNonNull(type, "type must not be null");
     requireNonBlank(relativePath, "relativePath");
     validateRelativePath(relativePath);

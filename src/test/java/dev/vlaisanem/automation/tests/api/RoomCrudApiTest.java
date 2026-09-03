@@ -9,6 +9,7 @@ import dev.vlaisanem.automation.api.AuthClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.ManagedRoom;
 import dev.vlaisanem.automation.model.AuthCredentials;
 import dev.vlaisanem.automation.model.CreateRoomRequest;
@@ -33,20 +34,29 @@ class RoomCrudApiTest {
   @Test
   @DisplayName("Admin can create, read, update, and delete an isolated room")
   void adminCanManageRoomLifecycle(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
     AuthClient auth = new AuthClient(request);
     String token =
-        auth.loginAndReadToken(new AuthCredentials(config.adminUsername(), config.adminPassword()))
-            .token();
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                auth.loginAndReadToken(
+                        new AuthCredentials(config.adminUsername(), config.adminPassword()))
+                    .token());
     RoomClient rooms = new RoomClient(apiContexts.withCookie("token", token));
 
-    try (ManagedRoom managedRoom = ManagedRoom.create(rooms)) {
+    try (ManagedRoom managedRoom =
+        steps.call("Provision an available room", () -> ManagedRoom.create(rooms))) {
       CreateRoomRequest roomRequest = managedRoom.request();
       int roomId = managedRoom.roomId();
 
-      ApiResult read = rooms.getRoom(roomId);
-      assertThat(read.status()).isEqualTo(200);
-      assertThat(read.bodyAs(Room.class).roomName()).isEqualTo(roomRequest.roomName());
+      ApiResult read = steps.call("Read the room", () -> rooms.getRoom(roomId));
+      steps.run(
+          "Verify read room",
+          () -> {
+            assertThat(read.status()).isEqualTo(200);
+            assertThat(read.bodyAs(Room.class).roomName()).isEqualTo(roomRequest.roomName());
+          });
 
       CreateRoomRequest updated =
           new CreateRoomRequest(
@@ -57,8 +67,12 @@ class RoomCrudApiTest {
               roomRequest.description(),
               175,
               roomRequest.features());
-      assertThat(rooms.updateRoom(roomId, updated).status()).isEqualTo(202);
-      assertThat(rooms.getRoom(roomId).bodyAs(Room.class).roomPrice()).isEqualTo(175);
+      ApiResult update = steps.call("Update the room", () -> rooms.updateRoom(roomId, updated));
+      steps.run("Verify update accepted", () -> assertThat(update.status()).isEqualTo(202));
+
+      steps.run(
+          "Verify updated room persists on re-read",
+          () -> assertThat(rooms.getRoom(roomId).bodyAs(Room.class).roomPrice()).isEqualTo(175));
     }
   }
 }

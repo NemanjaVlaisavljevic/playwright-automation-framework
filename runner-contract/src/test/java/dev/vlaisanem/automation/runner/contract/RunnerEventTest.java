@@ -22,10 +22,14 @@ class RunnerEventTest {
             null,
             null,
             null,
+            null,
+            null,
             null);
 
     assertThat(event.testId()).isNull();
     assertThat(event.testDisplayName()).isNull();
+    assertThat(event.stepId()).isNull();
+    assertThat(event.stepName()).isNull();
   }
 
   @Test
@@ -40,6 +44,8 @@ class RunnerEventTest {
                     EventType.RUN_FINISHED,
                     RunOutcome.SUCCEEDED,
                     "some-test-id",
+                    null,
+                    null,
                     null,
                     null))
         .isInstanceOf(IllegalArgumentException.class)
@@ -56,6 +62,8 @@ class RunnerEventTest {
                     2,
                     NOW,
                     EventType.TEST_STARTED,
+                    null,
+                    null,
                     null,
                     null,
                     null,
@@ -77,6 +85,8 @@ class RunnerEventTest {
                     null,
                     "test-id",
                     " ",
+                    null,
+                    null,
                     null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("requires a non-blank testDisplayName");
@@ -95,9 +105,111 @@ class RunnerEventTest {
                     null,
                     "test-id",
                     null,
+                    null,
+                    null,
                     null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("requires a non-blank testDisplayName");
+  }
+
+  @Test
+  void testLevelEventRejectsStepIdentifier() {
+    assertThatThrownBy(
+            () ->
+                new RunnerEvent(
+                    RunnerEvent.CURRENT_SCHEMA_VERSION,
+                    "run-1",
+                    2,
+                    NOW,
+                    EventType.TEST_STARTED,
+                    null,
+                    "test-id",
+                    "test display name",
+                    "step-1",
+                    null,
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must not carry a step identifier");
+  }
+
+  @Test
+  void stepLevelEventRequiresTestIdentifier() {
+    assertThatThrownBy(
+            () ->
+                new RunnerEvent(
+                    RunnerEvent.CURRENT_SCHEMA_VERSION,
+                    "run-1",
+                    2,
+                    NOW,
+                    EventType.STEP_STARTED,
+                    null,
+                    null,
+                    null,
+                    "step-1",
+                    "open homepage",
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("requires a non-blank testId");
+  }
+
+  @Test
+  void stepLevelEventRequiresStepIdentifier() {
+    assertThatThrownBy(
+            () ->
+                new RunnerEvent(
+                    RunnerEvent.CURRENT_SCHEMA_VERSION,
+                    "run-1",
+                    2,
+                    NOW,
+                    EventType.STEP_STARTED,
+                    null,
+                    "test-id",
+                    "test display name",
+                    null,
+                    "open homepage",
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("requires a non-blank stepId");
+  }
+
+  @Test
+  void stepLevelEventRequiresStepName() {
+    assertThatThrownBy(
+            () ->
+                new RunnerEvent(
+                    RunnerEvent.CURRENT_SCHEMA_VERSION,
+                    "run-1",
+                    2,
+                    NOW,
+                    EventType.STEP_STARTED,
+                    null,
+                    "test-id",
+                    "test display name",
+                    "step-1",
+                    null,
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("requires a non-blank stepName");
+  }
+
+  @Test
+  void stepLevelEventAcceptsFullStepIdentity() {
+    RunnerEvent event =
+        new RunnerEvent(
+            RunnerEvent.CURRENT_SCHEMA_VERSION,
+            "run-1",
+            2,
+            NOW,
+            EventType.STEP_PASSED,
+            null,
+            "test-id",
+            "test display name",
+            "step-1",
+            "open homepage",
+            null);
+
+    assertThat(event.stepId()).isEqualTo("step-1");
+    assertThat(event.stepName()).isEqualTo("open homepage");
   }
 
   @Test
@@ -110,6 +222,8 @@ class RunnerEventTest {
                     2,
                     NOW,
                     EventType.RUN_FINISHED,
+                    null,
+                    null,
                     null,
                     null,
                     null,
@@ -131,6 +245,8 @@ class RunnerEventTest {
                     RunOutcome.SUCCEEDED,
                     null,
                     null,
+                    null,
+                    null,
                     null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("must not carry a runOutcome");
@@ -146,6 +262,8 @@ class RunnerEventTest {
                     1,
                     NOW,
                     EventType.RUN_STARTED,
+                    null,
+                    null,
                     null,
                     null,
                     null,
@@ -185,6 +303,41 @@ class RunnerEventTest {
   }
 
   @Test
+  void stepStartedCarriesStepIdentityAndNoDetail() {
+    RunnerEvent event =
+        RunnerEvent.stepStarted(
+            "run-1", 4, NOW, "test-id", "test display name", "step-1", "open homepage");
+
+    assertThat(event.type()).isEqualTo(EventType.STEP_STARTED);
+    assertThat(event.testId()).isEqualTo("test-id");
+    assertThat(event.testDisplayName()).isEqualTo("test display name");
+    assertThat(event.stepId()).isEqualTo("step-1");
+    assertThat(event.stepName()).isEqualTo("open homepage");
+    assertThat(event.detail()).isNull();
+  }
+
+  @Test
+  void stepPassedCarriesStepIdentity() {
+    RunnerEvent event =
+        RunnerEvent.stepPassed(
+            "run-1", 5, NOW, "test-id", "test display name", "step-1", "open homepage");
+
+    assertThat(event.type()).isEqualTo(EventType.STEP_PASSED);
+    assertThat(event.stepId()).isEqualTo("step-1");
+  }
+
+  @Test
+  void stepFailedCarriesStepIdentityAndFailureMessage() {
+    RunnerEvent event =
+        RunnerEvent.stepFailed(
+            "run-1", 6, NOW, "test-id", "test display name", "step-1", "open homepage", "boom");
+
+    assertThat(event.type()).isEqualTo(EventType.STEP_FAILED);
+    assertThat(event.stepId()).isEqualTo("step-1");
+    assertThat(event.detail()).isEqualTo("boom");
+  }
+
+  @Test
   void rejectsNonPositiveSequence() {
     assertThatThrownBy(
             () ->
@@ -194,6 +347,8 @@ class RunnerEventTest {
                     0,
                     NOW,
                     EventType.RUN_STARTED,
+                    null,
+                    null,
                     null,
                     null,
                     null,

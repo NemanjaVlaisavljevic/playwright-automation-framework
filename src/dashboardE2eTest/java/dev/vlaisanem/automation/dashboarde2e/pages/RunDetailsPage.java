@@ -44,8 +44,15 @@ public final class RunDetailsPage {
     return page.locator("dt", new Page.LocatorOptions().setHasText("Status")).locator("+ dd");
   }
 
+  /**
+   * Exact match: {@code getByRole}'s default substring matching would otherwise also resolve a
+   * disclosure-toggle button whose accessible name happens to contain "Cancel" as a substring (e.g.
+   * a test named "...for cancellation/INTERRUPTED reconciliation verification"), a real strict-mode
+   * violation this project's own fixtures ran into.
+   */
   public Locator cancelButton() {
-    return page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Cancel"));
+    return page.getByRole(
+        AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Cancel").setExact(true));
   }
 
   public Locator downloadLogLink() {
@@ -77,10 +84,60 @@ public final class RunDetailsPage {
         .filter(new Locator.FilterOptions().setHasText(testDisplayName));
   }
 
+  /**
+   * A test row with any steps renders its name as a disclosure toggle, collapsed by default - its
+   * step list is not even in the DOM until expanded. Clicks the toggle by its accessible name
+   * (exact match: a substring match could otherwise resolve two different test names where one is a
+   * prefix of the other).
+   */
+  public void expandSteps(String testDisplayName) {
+    page.getByRole(
+            AriaRole.BUTTON, new Page.GetByRoleOptions().setName(testDisplayName).setExact(true))
+        .click();
+  }
+
+  /**
+   * A step's own {@code <li>} row (see {@code RunDetailsPage.tsx}'s {@code StepRow}) - status
+   * badge, name, any artifact links, and an optional {@code Detail} disclosure, all scoped to this
+   * one step so a caller never has to worry about a same-named element elsewhere on the page.
+   */
+  public Locator stepRow(String stepName) {
+    return page.getByRole(AriaRole.LISTITEM)
+        .filter(new Locator.FilterOptions().setHasText(stepName));
+  }
+
+  /**
+   * Expands the step's {@code <details><summary>Detail</summary>...} disclosure (a real native
+   * toggle - collapsed by default, so its {@code <pre>} content must be opened before an assertion
+   * that requires it visible, not just present in the DOM) and returns the failure detail text
+   * inside it.
+   */
+  public String stepDetailText(String stepName) {
+    Locator row = stepRow(stepName);
+    row.getByText("Detail").click();
+    return row.locator("pre").textContent();
+  }
+
+  /** A step-scoped artifact link (e.g. {@code "Screenshot"} or {@code "Trace"}). */
+  public Locator stepArtifactLink(String stepName, String artifactLabel) {
+    return stepRow(stepName)
+        .getByRole(AriaRole.LINK, new Locator.GetByRoleOptions().setName(artifactLabel));
+  }
+
   public void waitForConnectionState(String expectedText, Duration timeout) {
     assertThat(connectionBanner())
         .hasText(
             expectedText, new LocatorAssertions.HasTextOptions().setTimeout(timeout.toMillis()));
+  }
+
+  /**
+   * Any status badge (test-level or step-level) still reading exactly {@code "RUNNING"} - once the
+   * run itself is terminal, this must always be empty. Case-sensitive exact match: the "Running"
+   * {@code MetricCard} label and the "Run finished." banner text both differ only in case, so an
+   * unscoped case-insensitive search would false-positive on either.
+   */
+  public Locator anyRunningStatusBadge() {
+    return page.getByText("RUNNING", new Page.GetByTextOptions().setExact(true));
   }
 
   public void waitForStatus(String expectedStatus, Duration timeout) {

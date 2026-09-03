@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.microsoft.playwright.APIRequestContext;
 import dev.vlaisanem.automation.api.MessageClient;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.model.MessageDetails;
 import dev.vlaisanem.automation.model.MessagesResponse;
 import io.qameta.allure.Epic;
@@ -30,19 +31,30 @@ class MessageAuthorizationApiTest {
 
   @Test
   @DisplayName("Known gap: an anonymous guest can list every contact message")
-  void anonymousCanListAllMessages(APIRequestContext request) {
+  void anonymousCanListAllMessages(APIRequestContext request, Steps steps) {
     MessagesResponse messages =
-        new MessageClient(request).getMessages().bodyAs(MessagesResponse.class);
+        steps.call(
+            "List all messages anonymously",
+            () -> new MessageClient(request).getMessages().bodyAs(MessagesResponse.class));
 
-    assertThat(messages.messages()).isNotEmpty();
+    steps.run(
+        "Verify messages are readable without authentication (known gap)",
+        () -> assertThat(messages.messages()).isNotEmpty());
   }
 
   @Test
   @DisplayName("Known gap: an anonymous guest can read another guest's email and phone number")
-  void anonymousCanReadAnyMessagesPersonalDetails(APIRequestContext request) {
-    MessageDetails message = new MessageClient(request).getMessage(1).bodyAs(MessageDetails.class);
+  void anonymousCanReadAnyMessagesPersonalDetails(APIRequestContext request, Steps steps) {
+    MessageDetails message =
+        steps.call(
+            "Read a message's details anonymously",
+            () -> new MessageClient(request).getMessage(1).bodyAs(MessageDetails.class));
 
-    assertThat(message.email()).isNotBlank();
-    assertThat(message.phone()).isNotBlank();
+    steps.run(
+        "Verify personal details are readable without authentication (known gap)",
+        () -> {
+          assertThat(message.email()).isNotBlank();
+          assertThat(message.phone()).isNotBlank();
+        });
   }
 }

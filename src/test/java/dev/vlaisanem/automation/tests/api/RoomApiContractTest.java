@@ -6,6 +6,7 @@ import com.microsoft.playwright.APIRequestContext;
 import dev.vlaisanem.automation.api.ApiResult;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.model.RoomsResponse;
 import io.qameta.allure.Epic;
 import io.qameta.allure.Feature;
@@ -28,22 +29,31 @@ class RoomApiContractTest {
   @Test
   @DisplayName("GET /api/room returns a usable room inventory")
   @Severity(SeverityLevel.BLOCKER)
-  void roomInventoryMatchesContract(APIRequestContext request) {
-    ApiResult response = new RoomClient(request).listRooms();
+  void roomInventoryMatchesContract(APIRequestContext request, Steps steps) {
+    ApiResult response =
+        steps.call("List the room inventory", () -> new RoomClient(request).listRooms());
 
-    assertThat(response.status()).isEqualTo(200);
-    assertThat(response.header("content-type")).containsIgnoringCase("application/json");
-    assertThat(response.schemaErrors("schemas/rooms-response.schema.json")).isEmpty();
+    steps.run(
+        "Verify response contract",
+        () -> {
+          assertThat(response.status()).isEqualTo(200);
+          assertThat(response.header("content-type")).containsIgnoringCase("application/json");
+          assertThat(response.schemaErrors("schemas/rooms-response.schema.json")).isEmpty();
+        });
 
-    RoomsResponse inventory = response.bodyAs(RoomsResponse.class);
-    assertThat(inventory.rooms())
-        .isNotEmpty()
-        .allSatisfy(
-            room -> {
-              assertThat(room.roomId()).isPositive();
-              assertThat(room.roomName()).isNotBlank();
-              assertThat(room.type()).isIn("Single", "Twin", "Double", "Family", "Suite");
-              assertThat(room.roomPrice()).isPositive();
-            });
+    steps.run(
+        "Verify every room in the inventory",
+        () -> {
+          RoomsResponse inventory = response.bodyAs(RoomsResponse.class);
+          assertThat(inventory.rooms())
+              .isNotEmpty()
+              .allSatisfy(
+                  room -> {
+                    assertThat(room.roomId()).isPositive();
+                    assertThat(room.roomName()).isNotBlank();
+                    assertThat(room.type()).isIn("Single", "Twin", "Double", "Family", "Suite");
+                    assertThat(room.roomPrice()).isPositive();
+                  });
+        });
   }
 }

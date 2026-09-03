@@ -384,11 +384,20 @@ every screenshot/trace captured for the run, one row per artifact - hidden entir
 table always shows. A `SCREENSHOT` row renders an inline thumbnail (`<img src={downloadUrl}>`,
 opens the full image in a new tab); every other type renders a plain download link instead, mirroring
 the backend's own `Content-Disposition: inline` vs `attachment` split (see the runner-service's
-`ArtifactController`). This phase intentionally ships REST-only: there's no `ARTIFACT_CREATED` live
-event yet (that's the Step API / Event V2 phase), so a still-running test's own artifacts can't be
-pushed to the page - instead, the query is invalidated once `connectionState` reaches `"CLOSED"`
-(`useRunEventStream`'s own signal that the run just went terminal), by which point every artifact
-for the run is guaranteed to have been captured and manifested.
+`ArtifactController`). Faza B additionally nests each test's own steps under its row, with a failed
+step's artifacts linked directly against it (grouped by the `(testId, stepId)` pair, since `stepId`
+is only scoped to one test - see `RunnerEvent`'s own contract).
+
+There is still no `ARTIFACT_CREATED` live event (a manifest write racing an in-flight
+`listRunArtifacts` response, precise per-artifact timing - a real future-phase concern, deliberately
+not solved here), so a fresh capture can't be pushed to the page the instant it's written. Three
+distinct, non-exclusive signals invalidate the query instead: a `TEST_FAILED`/`TEST_ABORTED` event
+for any test in the run (`AutomationExtension`'s `captureFailure` finishes writing that test's own
+manifest entry before the listener ever emits its terminal `TEST_*` event, so this is a reliable
+"check again" signal the moment a test fails - a viewer no longer has to wait for the whole run to
+finish to see a failed test's screenshot/trace); `connectionState` reaching `"CLOSED"` after a normal
+finish; and the terminal REST status the fallback poll observes once a stream breaks permanently
+before ever reaching `RUN_FINISHED`.
 
 Verified live against a real `runner-service` and a real Gradle-launched `SMOKE` run with a
 deliberately broken assertion: the Artifacts section appeared once the run reached `FAILED`, showing

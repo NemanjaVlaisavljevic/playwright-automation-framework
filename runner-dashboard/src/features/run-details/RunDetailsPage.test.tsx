@@ -1,10 +1,17 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createQueryClient } from "../../app/query-client";
+import { CURRENT_SCHEMA_VERSION } from "../../domain/runner-event";
 import { server } from "../../test/msw/server";
 import { FakeEventStreamClient } from "../event-stream/fake-event-stream-client";
 import { RunDetailsPage } from "./RunDetailsPage";
@@ -50,7 +57,7 @@ function renderPage(
 
 function event(overrides: Record<string, unknown>): string {
   return JSON.stringify({
-    schemaVersion: "1.0",
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     runId: RUN_ID,
     timestamp: "2026-09-01T10:00:05Z",
     ...overrides,
@@ -188,6 +195,749 @@ describe("RunDetailsPage", () => {
     expect(metricValue("Total")).toBe("1");
     expect(metricValue("Running")).toBe("0");
     expect(metricValue("Passed")).toBe("1");
+  });
+
+  it("renders nested step state and links a failed step's artifact (Faza B drill-down)", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId", () =>
+        HttpResponse.json(run({ status: "FAILED" })),
+      ),
+      http.get("/api/v1/runs/:runId/artifacts", () =>
+        HttpResponse.json([
+          {
+            artifactId: "trace-1",
+            testId: "test-a",
+            testDisplayName: "loginTest()",
+            stepId: "step-2",
+            type: "TRACE",
+            mediaType: "application/zip",
+            sizeBytes: 1024,
+            createdAt: "2026-09-01T10:00:06Z",
+            downloadUrl: `/api/v1/runs/${RUN_ID}/artifacts/trace-1`,
+          },
+        ]),
+      ),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("FAILED");
+
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "loginTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "loginTest()",
+          stepId: "step-1",
+          stepName: "open homepage",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 3,
+          type: "STEP_PASSED",
+          testId: "test-a",
+          testDisplayName: "loginTest()",
+          stepId: "step-1",
+          stepName: "open homepage",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 4,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "loginTest()",
+          stepId: "step-2",
+          stepName: "assert confirmation banner",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 5,
+          type: "STEP_FAILED",
+          testId: "test-a",
+          testDisplayName: "loginTest()",
+          stepId: "step-2",
+          stepName: "assert confirmation banner",
+          detail: "boom",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 6,
+          type: "TEST_FAILED",
+          testId: "test-a",
+          testDisplayName: "loginTest()",
+          detail: "boom",
+        }),
+      );
+    });
+
+    // Test rows with steps are collapsed by default - expand before their steps are visible.
+    await userEvent.click(screen.getByRole("button", { name: "loginTest()" }));
+
+    expect(screen.getByText("open homepage")).toBeInTheDocument();
+    expect(screen.getByText("assert confirmation banner")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("link", { name: "Download trace" }),
+    ).toHaveAttribute("href", `/api/v1/runs/${RUN_ID}/artifacts/trace-1`);
+  });
+
+  /**
+   * Regression test: artifacts must not wait for the whole run to finish. `AutomationExtension`
+   * writes a failed test's manifest entry before the listener emits that test's own terminal
+   * `TEST_*` event, so `TEST_FAILED`/`TEST_ABORTED` is itself a reliable "check again" signal - a
+   * viewer should see a failed test's screenshot/trace immediately, not only after `RUN_FINISHED`.
+   */
+  it("shows a failed test's artifact before the run finishes, while a second test is still running", async () => {
+    let artifactsCallCount = 0;
+    server.use(
+      http.get("/api/v1/runs/:runId", () =>
+        HttpResponse.json(
+          run({ status: "RUNNING", startedAt: "2026-09-01T10:00:01Z" }),
+        ),
+      ),
+      http.get("/api/v1/runs/:runId/artifacts", () => {
+        artifactsCallCount += 1;
+        // The first fetch (on mount) sees nothing yet - no test had failed at that point. Only a
+        // later refetch, triggered by the invalidation this test is proving, sees the artifact.
+        if (artifactsCallCount === 1) {
+          return HttpResponse.json([]);
+        }
+        return HttpResponse.json([
+          {
+            artifactId: "trace-1",
+            testId: "test-a",
+            testDisplayName: "aTest()",
+            type: "TRACE",
+            mediaType: "application/zip",
+            sizeBytes: 1024,
+            createdAt: "2026-09-01T10:00:06Z",
+            downloadUrl: `/api/v1/runs/${RUN_ID}/artifacts/trace-1`,
+          },
+        ]);
+      }),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("RUNNING");
+
+    act(() => {
+      client.open();
+      client.emit(event({ sequence: 1, type: "RUN_STARTED" }));
+      client.emit(
+        event({
+          sequence: 2,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 3,
+          type: "TEST_FAILED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          detail: "boom",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 4,
+          type: "TEST_STARTED",
+          testId: "test-b",
+          testDisplayName: "bTest()",
+        }),
+      );
+    });
+
+    // test-b is still RUNNING and no RUN_FINISHED has been emitted - the stream must still be live,
+    // not the "Run finished." banner - while the failed test's artifact is already visible.
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("link", { name: "Download trace" }),
+    ).toHaveAttribute("href", `/api/v1/runs/${RUN_ID}/artifacts/trace-1`);
+  });
+
+  /**
+   * Regression test: `stepId` is scoped to one test, not globally unique (see `RunnerEvent`'s own
+   * contract) - two different tests are free to reuse the same `stepId`. Grouping artifacts by
+   * `stepId` alone would show a single test's artifact under both tests' matching step.
+   */
+  it("does not leak an artifact into another test's step that happens to share the same stepId", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId", () =>
+        HttpResponse.json(run({ status: "FAILED" })),
+      ),
+      http.get("/api/v1/runs/:runId/artifacts", () =>
+        HttpResponse.json([
+          {
+            artifactId: "trace-1",
+            testId: "test-a",
+            testDisplayName: "aTest()",
+            stepId: "shared-step",
+            type: "TRACE",
+            mediaType: "application/zip",
+            sizeBytes: 1024,
+            createdAt: "2026-09-01T10:00:06Z",
+            downloadUrl: `/api/v1/runs/${RUN_ID}/artifacts/trace-1`,
+          },
+        ]),
+      ),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("FAILED");
+
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "shared-step",
+          stepName: "step in test a",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 3,
+          type: "STEP_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "shared-step",
+          stepName: "step in test a",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 4,
+          type: "TEST_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 5,
+          type: "TEST_STARTED",
+          testId: "test-b",
+          testDisplayName: "bTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 6,
+          type: "STEP_STARTED",
+          testId: "test-b",
+          testDisplayName: "bTest()",
+          stepId: "shared-step",
+          stepName: "step in test b",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 7,
+          type: "STEP_FAILED",
+          testId: "test-b",
+          testDisplayName: "bTest()",
+          stepId: "shared-step",
+          stepName: "step in test b",
+          detail: "boom in b",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 8,
+          type: "TEST_FAILED",
+          testId: "test-b",
+          testDisplayName: "bTest()",
+          detail: "boom in b",
+        }),
+      );
+    });
+
+    // Test rows with steps are collapsed by default - expand both before their steps are visible.
+    await userEvent.click(screen.getByRole("button", { name: "aTest()" }));
+    await userEvent.click(screen.getByRole("button", { name: "bTest()" }));
+
+    expect(screen.getByText("step in test a")).toBeInTheDocument();
+    expect(screen.getByText("step in test b")).toBeInTheDocument();
+    // The artifact belongs only to test-a's step - not duplicated onto test-b's step of the same
+    // stepId.
+    expect(
+      await screen.findAllByRole("link", { name: "Download trace" }),
+    ).toHaveLength(1);
+  });
+
+  it("auto-expands a still-RUNNING test's steps, then collapses them once it finishes with no manual choice made", async () => {
+    server.use(http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())));
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("QUEUED");
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "open homepage",
+        }),
+      );
+    });
+
+    // No click at all - the row is open purely because the test is still RUNNING.
+    expect(screen.getByText("open homepage")).toBeInTheDocument();
+
+    act(() => {
+      client.emit(
+        event({
+          sequence: 3,
+          type: "STEP_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "open homepage",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 4,
+          type: "TEST_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+    });
+
+    // The user never made an explicit choice, so the row reverts to the normal collapsed default
+    // once the test is no longer RUNNING.
+    expect(screen.queryByText("open homepage")).not.toBeInTheDocument();
+  });
+
+  it("keeps a manually-collapsed test's steps hidden after it finishes running", async () => {
+    server.use(http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())));
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("QUEUED");
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "open homepage",
+        }),
+      );
+    });
+    expect(screen.getByText("open homepage")).toBeInTheDocument();
+
+    // An explicit choice while still RUNNING - overriding the auto-open default.
+    await userEvent.click(screen.getByRole("button", { name: "aTest()" }));
+    expect(screen.queryByText("open homepage")).not.toBeInTheDocument();
+
+    act(() => {
+      client.emit(
+        event({
+          sequence: 3,
+          type: "STEP_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "open homepage",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 4,
+          type: "TEST_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+    });
+
+    // The explicit choice survives the RUNNING -> terminal transition.
+    expect(screen.queryByText("open homepage")).not.toBeInTheDocument();
+  });
+
+  it("shows each step's own duration once it finishes", async () => {
+    server.use(http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())));
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("QUEUED");
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "provision a room",
+          timestamp: "2026-09-01T10:00:00Z",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 3,
+          type: "STEP_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "provision a room",
+          timestamp: "2026-09-01T10:00:05Z",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 4,
+          type: "TEST_PASSED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+    });
+
+    // Test rows with steps are collapsed by default once finished - expand before the duration is
+    // visible.
+    await userEvent.click(screen.getByRole("button", { name: "aTest()" }));
+
+    expect(screen.getByText("provision a room")).toBeInTheDocument();
+    expect(screen.getByText("5s")).toBeInTheDocument();
+  });
+
+  /**
+   * Regression test for the C4.1 finding: previously `RUN_FINISHED` never touched `testsById`, so a
+   * test (and its step) that was still RUNNING the instant the run ended - here, because the user
+   * cancelled it mid-step - stayed rendered as RUNNING forever, even though the run itself already
+   * shows a terminal status. The view model must relabel both as INTERRUPTED, using the run's own
+   * `finishedAt` for duration display so it stops advancing rather than ticking against `Date.now()`
+   * forever.
+   */
+  it("shows a test and its still-RUNNING step as INTERRUPTED once the run is cancelled mid-step, with a fixed duration", async () => {
+    let cancelled = false;
+    server.use(
+      http.get("/api/v1/runs/:runId", () =>
+        HttpResponse.json(
+          run(
+            cancelled
+              ? {
+                  status: "CANCELLED",
+                  startedAt: "2026-09-01T10:00:00Z",
+                  finishedAt: "2026-09-01T10:00:20Z",
+                }
+              : { status: "RUNNING", startedAt: "2026-09-01T10:00:00Z" },
+          ),
+        ),
+      ),
+      http.post("/api/v1/runs/:runId/cancel", () => {
+        cancelled = true;
+        return HttpResponse.json(
+          run({
+            status: "CANCELLED",
+            startedAt: "2026-09-01T10:00:00Z",
+            finishedAt: "2026-09-01T10:00:20Z",
+          }),
+        );
+      }),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("RUNNING");
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "provision a room",
+          timestamp: "2026-09-01T10:00:05Z",
+        }),
+      );
+      // Deliberately no STEP_PASSED/STEP_FAILED or TEST_PASSED/TEST_FAILED - the process is killed
+      // before either can be reported, exactly as a real cancellation mid-step looks on the wire.
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await screen.findByText("CANCELLED");
+
+    // The test row was auto-expanded while it was still RUNNING, but INTERRUPTED is a terminal
+    // display status like any other - the row correctly reverts to its normal collapsed default
+    // (see the "auto-expand must use display status" requirement), so an explicit click is needed
+    // to see its step.
+    await userEvent.click(screen.getByRole("button", { name: "aTest()" }));
+
+    expect(screen.getAllByText("INTERRUPTED")).toHaveLength(2); // the test row and its one step
+    expect(
+      screen.getByText(
+        "Run ended before this test reported a terminal result.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Run ended before this step reported a terminal result.",
+      ),
+    ).toBeInTheDocument();
+    // Duration fixed at the run's own finishedAt (20s after the test started) - not still advancing
+    // against real wall-clock time by the time this assertion runs.
+    expect(screen.getByText("20s")).toBeInTheDocument();
+  });
+
+  it("flags a data-integrity warning when a SUCCEEDED run still reports an interrupted test", async () => {
+    server.use(
+      http.get("/api/v1/runs/:runId", () =>
+        HttpResponse.json(
+          run({
+            status: "SUCCEEDED",
+            startedAt: "2026-09-01T10:00:00Z",
+            finishedAt: "2026-09-01T10:00:20Z",
+          }),
+        ),
+      ),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("SUCCEEDED");
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+        }),
+      );
+      // No TEST_PASSED/TEST_FAILED - a SUCCEEDED run can never legitimately have this happen, which
+      // is exactly what makes it an integrity warning rather than an ordinary interruption.
+    });
+
+    expect(
+      await screen.findByText(/event stream may be incomplete/),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * Regression test for a real review finding: the terminal reconciliation must not depend on a
+   * REST refetch. `useRunEventStream` triggers a `run` query refetch the instant the stream itself
+   * goes non-active (including reaching `"terminal"`) - if that refetch fails (or returns a stale
+   * snapshot), the REST-only `run.data.status`/`finishedAt` could stay stuck on RUNNING forever,
+   * reintroducing exactly the bug C4.1 fixed. The SSE stream's own `RUN_FINISHED` timestamp must be
+   * the primary terminal-time signal, not just a REST fallback.
+   */
+  it("reconciles a test/step as INTERRUPTED from the stream's own RUN_FINISHED timestamp even when the final REST refetch fails", async () => {
+    let getRunCallCount = 0;
+    server.use(
+      http.get("/api/v1/runs/:runId", () => {
+        getRunCallCount += 1;
+        if (getRunCallCount === 1) {
+          return HttpResponse.json(
+            run({ status: "RUNNING", startedAt: "2026-09-01T10:00:00Z" }),
+          );
+        }
+        // The refetch `useRunEventStream` fires once the stream reaches "terminal" - simulated here
+        // as failing outright, so `run.data` never advances past the initial RUNNING snapshot.
+        return HttpResponse.error();
+      }),
+    );
+    const client = new FakeEventStreamClient();
+    renderPage(client);
+
+    await screen.findByText("RUNNING");
+    act(() => {
+      client.open();
+      client.emit(
+        event({
+          sequence: 1,
+          type: "TEST_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          timestamp: "2026-09-01T10:00:00Z",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 2,
+          type: "STEP_STARTED",
+          testId: "test-a",
+          testDisplayName: "aTest()",
+          stepId: "step-1",
+          stepName: "provision a room",
+          timestamp: "2026-09-01T10:00:05Z",
+        }),
+      );
+      client.emit(
+        event({
+          sequence: 3,
+          type: "RUN_FINISHED",
+          runOutcome: "CANCELLED",
+          timestamp: "2026-09-01T10:00:20Z",
+        }),
+      );
+    });
+
+    // Confirms the refetch this test relies on actually happened (and failed) - not just that the
+    // assertions below happen to pass regardless.
+    await waitFor(() => expect(getRunCallCount).toBeGreaterThan(1));
+
+    await userEvent.click(screen.getByRole("button", { name: "aTest()" }));
+    expect(screen.getAllByText("INTERRUPTED")).toHaveLength(2);
+    // Test duration: 10:00:00 -> 10:00:20 (RUN_FINISHED's own timestamp), not real elapsed time.
+    expect(screen.getByText("20s")).toBeInTheDocument();
+    // Step duration: 10:00:05 -> 10:00:20.
+    expect(screen.getByText("15s")).toBeInTheDocument();
+  });
+
+  it("copies the run ID to the clipboard and briefly confirms it in the button's own label", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    server.use(http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())));
+    renderPage(new FakeEventStreamClient());
+
+    await screen.findByText("QUEUED");
+    await userEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(writeText).toHaveBeenCalledWith(RUN_ID);
+    expect(
+      await screen.findByRole("button", { name: "Copied!" }),
+    ).toBeInTheDocument();
+  });
+
+  it("resets the confirmation timer on a second Copy click instead of racing the first one's revert", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    server.use(http.get("/api/v1/runs/:runId", () => HttpResponse.json(run())));
+    renderPage(new FakeEventStreamClient());
+    await screen.findByText("QUEUED");
+
+    // fireEvent (not userEvent) + manual microtask flushing: userEvent's own internal delay
+    // handling doesn't mix reliably with fake timers, but the actual behavior under test - two
+    // clicks racing a setTimeout - needs the fake clock to be advanceable independently of any
+    // real wall-clock delay.
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+        // Two microtask ticks: one for `writeText`'s own resolution, one for `handleCopy`'s
+        // continuation after that `await` to actually run and call `setCopied`.
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        screen.getByRole("button", { name: "Copied!" }),
+      ).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(
+        screen.getByRole("button", { name: "Copied!" }),
+      ).toBeInTheDocument();
+
+      // A second click 1000ms into the first click's 1500ms revert window must push that
+      // deadline out again, not leave the first timer running alongside a second one.
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Copied!" }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      // If the first timer had not been cleared, it would already have reverted this by now -
+      // 1000ms (before the second click) + 1000ms (after it) = 2000ms since the first click,
+      // past its own 1500ms deadline.
+      expect(
+        screen.getByRole("button", { name: "Copied!" }),
+      ).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("hides Cancel and shows no Download link for a non-terminal run with no startedAt yet", async () => {

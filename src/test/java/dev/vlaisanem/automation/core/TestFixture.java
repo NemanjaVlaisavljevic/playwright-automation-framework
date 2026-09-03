@@ -26,6 +26,7 @@ final class TestFixture implements AutoCloseable {
   private Page page;
   private APIRequestContext apiRequestContext;
   private ApiContextFactory apiContextFactory;
+  private Steps steps;
   private boolean traceRunning;
 
   TestFixture(TestConfig config, RuntimeRegistry registry) {
@@ -79,6 +80,13 @@ final class TestFixture implements AutoCloseable {
           new ApiContextFactory(registry.engine(config).playwright().request(), config);
     }
     return apiContextFactory;
+  }
+
+  Steps steps(ExtensionContext context) {
+    if (steps == null) {
+      steps = new Steps(config.runId(), context.getUniqueId(), context.getDisplayName());
+    }
+    return steps;
   }
 
   /**
@@ -208,11 +216,18 @@ final class TestFixture implements AutoCloseable {
   private void recordArtifact(
       ExtensionContext context, ArtifactType type, Path artifactFile, String mediaType)
       throws IOException {
+    // Only the step whose action threw the exact instance JUnit reports as this test's own
+    // execution exception counts - not merely "the last step that happened to fail" (see
+    // Steps#stepIdForFailure), so a test that catches a step's failure and fails later for an
+    // unrelated reason never mis-attributes its artifact to that earlier, already-handled step.
+    String stepId =
+        steps == null ? null : steps.stepIdForFailure(context.getExecutionException().orElse(null));
     ArtifactManifestWriter.record(
         config.artifactsDirectory(),
         config.runId(),
         context.getUniqueId(),
         context.getDisplayName(),
+        stepId,
         type,
         artifactFile,
         mediaType);

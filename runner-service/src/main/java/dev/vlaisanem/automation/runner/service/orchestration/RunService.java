@@ -152,7 +152,7 @@ public class RunService {
     Run run = lifecycle.queue(runId, environment, suite, Instant.now());
     ActiveRun activeRun = new ActiveRun();
     activeRuns.put(runId, activeRun);
-    Runnable queuedTask = () -> executeRun(runId, suite, activeRun);
+    Runnable queuedTask = () -> executeRun(runId, environment, suite, activeRun);
     activeRun.queuedTask().set(queuedTask);
 
     try {
@@ -257,7 +257,7 @@ public class RunService {
     return find(runId);
   }
 
-  private void executeRun(String runId, Suite suite, ActiveRun activeRun) {
+  private void executeRun(String runId, Environment environment, Suite suite, ActiveRun activeRun) {
     Process process = null;
     ListenerEventIngestor ingestor = null;
     activeRun.attachWorker(Thread.currentThread());
@@ -279,7 +279,8 @@ public class RunService {
         return;
       }
 
-      List<String> command = SuiteCommandFactory.commandFor(suite, repoRoot, runId, rawEventsDir);
+      List<String> command =
+          SuiteCommandFactory.commandFor(environment, suite, repoRoot, runId, rawEventsDir);
       process = awaitAvailableThenStart(runId, activeRun, command);
       if (process == null) {
         // Already recorded a terminal status (CANCELLED while waiting, or ERROR from a start()

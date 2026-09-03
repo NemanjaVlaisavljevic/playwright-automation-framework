@@ -60,6 +60,7 @@ final class ArtifactManifestWriter {
       String runId,
       String testId,
       String testDisplayName,
+      String stepId,
       ArtifactType type,
       Path artifactFile,
       String mediaType)
@@ -72,6 +73,7 @@ final class ArtifactManifestWriter {
             runId,
             testId,
             testDisplayName,
+            stepId,
             type,
             relativePath,
             mediaType,

@@ -205,6 +205,7 @@ class ArtifactServiceTest {
         RUN_ID,
         testId,
         "display name for " + testId,
+        null,
         ArtifactType.SCREENSHOT,
         relativePath,
         "image/png",

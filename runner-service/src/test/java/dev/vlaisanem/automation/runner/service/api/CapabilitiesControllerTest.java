@@ -4,6 +4,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
@@ -20,9 +21,13 @@ class CapabilitiesControllerTest {
         .perform(get("/api/v1/capabilities"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.apiVersion").value("v1"))
-        .andExpect(jsonPath("$.eventSchemaVersion").value("1.0"))
+        .andExpect(jsonPath("$.eventSchemaVersion").value(RunnerEvent.CURRENT_SCHEMA_VERSION))
         .andExpect(jsonPath("$.environments[0].name").value("PUBLIC"))
         .andExpect(jsonPath("$.environments[0].suites[0]").value("SMOKE"))
-        .andExpect(jsonPath("$.environments[0].suites[4]").value("REGRESSION"));
+        .andExpect(jsonPath("$.environments[0].suites[4]").value("REGRESSION"))
+        .andExpect(jsonPath("$.environments[0].suites[5]").value("FIXTURE"))
+        .andExpect(jsonPath("$.environments[1].name").value("LOCAL"))
+        .andExpect(jsonPath("$.environments[1].suites[0]").value("JOURNEY"))
+        .andExpect(jsonPath("$.environments[1].suites.length()").value(1));
   }
 }

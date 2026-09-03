@@ -1,4 +1,5 @@
 import { http, HttpResponse } from "msw";
+import { CURRENT_SCHEMA_VERSION } from "../../domain/runner-event";
 
 /**
  * Default happy-path handlers used by every test unless overridden with `server.use(...)` for a
@@ -10,11 +11,11 @@ export const handlers = [
   http.get("/api/v1/capabilities", () =>
     HttpResponse.json({
       apiVersion: "v1",
-      eventSchemaVersion: "1.0",
+      eventSchemaVersion: CURRENT_SCHEMA_VERSION,
       environments: [
         {
           name: "PUBLIC",
-          suites: ["SMOKE", "API", "UI", "JOURNEY", "REGRESSION"],
+          suites: ["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"],
         },
       ],
     }),

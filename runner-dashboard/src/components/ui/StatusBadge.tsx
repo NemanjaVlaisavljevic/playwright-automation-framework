@@ -13,7 +13,10 @@ export type BadgeStatus =
   | "CANCELLED"
   | "ABORTED"
   | "TIMED_OUT"
-  | "SKIPPED";
+  | "SKIPPED"
+  // Display-only - a test/step relabeled by `run-details-view-model.ts` because it was still
+  // RUNNING when the run itself already reached a terminal status. Never a real wire-level status.
+  | "INTERRUPTED";
 
 type Tone = "neutral" | "info" | "success" | "danger" | "warning";
 
@@ -29,6 +32,7 @@ const TONE_BY_STATUS: Record<BadgeStatus, Tone> = {
   ABORTED: "warning",
   TIMED_OUT: "warning",
   SKIPPED: "neutral",
+  INTERRUPTED: "warning",
 };
 
 export interface StatusBadgeProps {

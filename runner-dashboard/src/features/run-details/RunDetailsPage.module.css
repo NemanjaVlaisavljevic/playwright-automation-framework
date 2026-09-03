@@ -28,6 +28,23 @@
   color: var(--color-danger);
 }
 
+.copyButton {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-accent);
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.copyButton:hover {
+  background: var(--color-surface-muted);
+}
+
 .backLink {
   margin-bottom: var(--space-4);
 }
@@ -53,6 +70,15 @@
 .details dt {
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
+}
+
+/*
+ * StatusBadge has its own horizontal padding (see StatusBadge.module.css) so its pill's visible
+ * text sits noticeably right of where plain-text values (Suite, Environment, ...) start in the
+ * same grid column - this offsets that padding back out so the badge's text lines up with them.
+ */
+.statusValue {
+  margin-left: calc(-1 * var(--space-2));
 }
 
 .downloadLink {
@@ -123,6 +149,59 @@
   font-size: var(--font-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.testNameToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.testNameToggle:hover {
+  text-decoration: underline;
+}
+
+.disclosureIcon {
+  display: inline-block;
+  width: 1em;
+  color: var(--color-text-muted);
+}
+
+.stepsCell {
+  background: var(--color-surface-muted);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.stepList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 0 0 var(--space-4);
+  list-style: none;
+}
+
+.stepItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.stepName {
+  font-size: var(--font-size-sm);
+}
+
+.stepDuration {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
 }
 
 @media (max-width: 640px) {

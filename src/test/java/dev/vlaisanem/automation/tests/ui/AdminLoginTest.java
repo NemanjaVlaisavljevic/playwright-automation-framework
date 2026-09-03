@@ -3,6 +3,7 @@ package dev.vlaisanem.automation.tests.ui;
 import com.microsoft.playwright.Page;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.ui.pages.AdminLoginPage;
 import dev.vlaisanem.automation.ui.pages.AdminRoomsPage;
 import io.qameta.allure.Epic;
@@ -23,18 +24,28 @@ class AdminLoginTest {
 
   @Test
   @DisplayName("Admin with valid credentials reaches the room management screen")
-  void validCredentialsReachAdminRooms(Page page, TestConfig config) {
-    new AdminLoginPage(page).open().loginAs(config.adminUsername(), config.adminPassword());
+  void validCredentialsReachAdminRooms(Page page, TestConfig config, Steps steps) {
+    steps.run(
+        "Log in as admin",
+        () ->
+            new AdminLoginPage(page)
+                .open()
+                .loginAs(config.adminUsername(), config.adminPassword()));
 
-    new AdminRoomsPage(page).assertLoaded();
+    steps.run("Verify admin rooms page loaded", () -> new AdminRoomsPage(page).assertLoaded());
   }
 
   @Test
   @DisplayName("Admin with an invalid password stays on the login screen")
-  void invalidCredentialsShowError(Page page, TestConfig config) {
-    new AdminLoginPage(page)
-        .open()
-        .loginAs(config.adminUsername(), "not-the-real-password")
-        .assertInvalidCredentials();
+  void invalidCredentialsShowError(Page page, TestConfig config, Steps steps) {
+    AdminLoginPage loginPage =
+        steps.call(
+            "Attempt login with an invalid password",
+            () ->
+                new AdminLoginPage(page)
+                    .open()
+                    .loginAs(config.adminUsername(), "not-the-real-password"));
+
+    steps.run("Verify invalid credentials message", loginPage::assertInvalidCredentials);
   }
 }

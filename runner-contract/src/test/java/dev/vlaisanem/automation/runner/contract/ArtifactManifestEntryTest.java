@@ -106,6 +106,27 @@ class ArtifactManifestEntryTest {
   }
 
   @Test
+  void acceptsANullStepId() {
+    ArtifactManifestEntry entry = entryWith(b -> b.stepId = null);
+
+    assertThat(entry.stepId()).isNull();
+  }
+
+  @Test
+  void rejectsABlankStepId() {
+    assertThatThrownBy(() -> entryWith(b -> b.stepId = " "))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("stepId");
+  }
+
+  @Test
+  void acceptsANonBlankStepId() {
+    ArtifactManifestEntry entry = entryWith(b -> b.stepId = "step-1");
+
+    assertThat(entry.stepId()).isEqualTo("step-1");
+  }
+
+  @Test
   void rejectsANullType() {
     assertThatThrownBy(() -> entryWith(b -> b.type = null))
         .isInstanceOf(NullPointerException.class)
@@ -197,6 +218,7 @@ class ArtifactManifestEntryTest {
     String runId = "run-1";
     String testId = "[engine:junit-jupiter]/[class:SomeTest]/[method:someTest()]";
     String testDisplayName = "someTest()";
+    String stepId = null;
     ArtifactType type = ArtifactType.SCREENSHOT;
     String relativePath = "tests/run-1-test-1/failure.png";
     String mediaType = "image/png";
@@ -210,6 +232,7 @@ class ArtifactManifestEntryTest {
           runId,
           testId,
           testDisplayName,
+          stepId,
           type,
           relativePath,
           mediaType,

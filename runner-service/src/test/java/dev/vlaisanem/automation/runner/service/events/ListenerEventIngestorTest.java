@@ -61,6 +61,53 @@ class ListenerEventIngestorTest {
   }
 
   /**
+   * Proves event-vocabulary coexistence at the ingestion boundary (Faza B): every event below
+   * carries the same {@code schemaVersion} - a run mixing an ordinary test (no steps) with one that
+   * used the {@code Steps} API (interleaved {@code STEP_*} events) must ingest both patterns side
+   * by side under one strictly monotonic canonical sequence - see {@code EventType}'s own Javadoc
+   * on why {@code STEP_*} is additive, not a breaking change.
+   */
+  @Test
+  void forwardsInterleavedStepAndTestLevelEventsFromTheSameRun(@TempDir Path dir)
+      throws IOException {
+    String runId = "run-1";
+    Path dataFile = dir.resolve(runId + ".tests.jsonl");
+    Path marker = dir.resolve(runId + ".tests.complete");
+    writeLines(
+        dataFile,
+        RunnerEvent.testStarted(runId, 1, NOW, "t1", "test one"),
+        RunnerEvent.testPassed(runId, 2, NOW, "t1", "test one"),
+        RunnerEvent.testStarted(runId, 3, NOW, "t2", "test two"),
+        RunnerEvent.stepStarted(runId, 4, NOW, "t2", "test two", "s1", "step one"),
+        RunnerEvent.stepPassed(runId, 5, NOW, "t2", "test two", "s1", "step one"),
+        RunnerEvent.stepStarted(runId, 6, NOW, "t2", "test two", "s2", "step two"),
+        RunnerEvent.stepFailed(runId, 7, NOW, "t2", "test two", "s2", "step two", "boom"),
+        RunnerEvent.testFailed(runId, 8, NOW, "t2", "test two", "boom"));
+    Files.createFile(marker);
+    RecordingRunEventAppender appender = new RecordingRunEventAppender();
+
+    ListenerEventIngestor ingestor = newIngestor(runId, dataFile, marker, appender);
+    IngestionResult result = ingestor.stopAndAwaitFinished(DRAIN_TIMEOUT);
+
+    assertThat(result.valid()).isTrue();
+    List<RunnerEvent> forwarded = appender.eventsFor(runId);
+    assertThat(forwarded)
+        .extracting(RunnerEvent::type)
+        .containsExactly(
+            EventType.TEST_STARTED,
+            EventType.TEST_PASSED,
+            EventType.TEST_STARTED,
+            EventType.STEP_STARTED,
+            EventType.STEP_PASSED,
+            EventType.STEP_STARTED,
+            EventType.STEP_FAILED,
+            EventType.TEST_FAILED);
+    assertThat(forwarded)
+        .extracting(RunnerEvent::sequence)
+        .containsExactly(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L);
+  }
+
+  /**
    * Regression test for the review's finding: the ingestor must poll for new bytes rather than read
    * the file only once, since WatchService-style notification can coalesce rapid writes on Windows.
    */
@@ -342,7 +389,9 @@ class ListenerEventIngestorTest {
     String line =
         OBJECT_MAPPER
             .writeValueAsString(wrongVersion)
-            .replace("\"schemaVersion\":\"1.0\"", "\"schemaVersion\":\"999\"");
+            .replace(
+                "\"schemaVersion\":\"" + RunnerEvent.CURRENT_SCHEMA_VERSION + "\"",
+                "\"schemaVersion\":\"999\"");
     Files.writeString(dataFile, line + "\n", StandardCharsets.UTF_8);
     RecordingRunEventAppender appender = new RecordingRunEventAppender();
 

@@ -25,6 +25,8 @@ class RunnerEventObjectMapperTest {
             RunOutcome.SUCCEEDED,
             null,
             null,
+            null,
+            null,
             null);
 
     String json = objectMapper.writeValueAsString(expected);

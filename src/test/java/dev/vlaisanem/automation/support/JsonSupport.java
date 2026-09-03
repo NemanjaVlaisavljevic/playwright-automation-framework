@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import dev.vlaisanem.automation.runner.listener.SensitiveDataKeys;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -14,8 +15,7 @@ import java.util.Set;
 import java.util.stream.StreamSupport;
 
 public final class JsonSupport {
-  private static final Set<String> SENSITIVE_KEYS =
-      Set.of("password", "token", "authorization", "cookie", "secret", "apikey", "api_key");
+  private static final Set<String> SENSITIVE_KEYS = SensitiveDataKeys.KEYS;
 
   private static final ObjectMapper MAPPER =
       JsonMapper.builder()

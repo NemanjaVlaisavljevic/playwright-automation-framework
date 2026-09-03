@@ -7,6 +7,7 @@ import dev.vlaisanem.automation.api.ApiResult;
 import dev.vlaisanem.automation.api.AuthClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.model.AuthCredentials;
 import dev.vlaisanem.automation.model.AuthToken;
 import io.qameta.allure.Epic;
@@ -27,12 +28,19 @@ class AuthenticationApiTest {
 
   @Test
   @DisplayName("Admin can obtain a non-empty session token")
-  void adminCanAuthenticate(APIRequestContext request, TestConfig config) {
+  void adminCanAuthenticate(APIRequestContext request, TestConfig config, Steps steps) {
     ApiResult response =
-        new AuthClient(request)
-            .login(new AuthCredentials(config.adminUsername(), config.adminPassword()));
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                new AuthClient(request)
+                    .login(new AuthCredentials(config.adminUsername(), config.adminPassword())));
 
-    assertThat(response.status()).isEqualTo(200);
-    assertThat(response.bodyAs(AuthToken.class).token()).isNotBlank();
+    steps.run(
+        "Verify a non-empty session token is issued",
+        () -> {
+          assertThat(response.status()).isEqualTo(200);
+          assertThat(response.bodyAs(AuthToken.class).token()).isNotBlank();
+        });
   }
 }

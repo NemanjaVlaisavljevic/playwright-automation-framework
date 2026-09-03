@@ -92,6 +92,28 @@ class RunServiceTest {
     assertThat(finished.exitCode()).isEqualTo(0);
   }
 
+  /**
+   * Regression test for the review's finding: {@code SuiteCommandFactoryTest} proves {@code
+   * RunCatalog} maps {@code LOCAL}+{@code JOURNEY} to {@code localJourneyTest} in isolation, but
+   * nothing previously proved {@code RunService.submit} actually carries the caller's chosen {@link
+   * Environment} through {@code executeRun} into the command it hands the launcher - every other
+   * test here submits {@link Environment#PUBLIC}. Confirms the launched command names the dedicated
+   * local task and never the public {@code journeyTest} task.
+   */
+  @Test
+  void submitPassesTheSelectedLocalEnvironmentThroughToTheLaunchedCommand(@TempDir Path eventsDir)
+      throws Exception {
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newService(launcher, eventsDir, 5);
+
+    Run submitted = service.submit(Environment.LOCAL, Suite.JOURNEY);
+    awaitStatus(submitted.runId(), RunStatus.RUNNING);
+
+    assertThat(launcher.startedCommands).hasSize(1);
+    assertThat(launcher.startedCommands.get(0)).contains("localJourneyTest");
+    assertThat(launcher.startedCommands.get(0)).doesNotContain("journeyTest");
+  }
+
   @Test
   void startsEachRunWithItsOwnArtifactsDirectoryPassedAsAnEnvironmentVariable(
       @TempDir Path eventsDir) throws Exception {

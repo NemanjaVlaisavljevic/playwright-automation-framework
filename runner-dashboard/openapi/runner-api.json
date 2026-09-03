@@ -435,7 +435,8 @@
           "environment": {
             "type": "string",
             "enum": [
-              "PUBLIC"
+              "PUBLIC",
+              "LOCAL"
             ]
           },
           "suite": {
@@ -445,7 +446,8 @@
               "API",
               "UI",
               "JOURNEY",
-              "REGRESSION"
+              "REGRESSION",
+              "FIXTURE"
             ]
           }
         },
@@ -463,7 +465,8 @@
           "environment": {
             "type": "string",
             "enum": [
-              "PUBLIC"
+              "PUBLIC",
+              "LOCAL"
             ]
           },
           "suite": {
@@ -473,7 +476,8 @@
               "API",
               "UI",
               "JOURNEY",
-              "REGRESSION"
+              "REGRESSION",
+              "FIXTURE"
             ]
           },
           "status": {
@@ -565,6 +569,9 @@
           "testDisplayName": {
             "type": "string"
           },
+          "stepId": {
+            "type": "string"
+          },
           "type": {
             "type": "string",
             "enum": [
@@ -627,7 +634,8 @@
           "name": {
             "type": "string",
             "enum": [
-              "PUBLIC"
+              "PUBLIC",
+              "LOCAL"
             ]
           },
           "suites": {
@@ -639,7 +647,8 @@
                 "API",
                 "UI",
                 "JOURNEY",
-                "REGRESSION"
+                "REGRESSION",
+                "FIXTURE"
               ]
             }
           }

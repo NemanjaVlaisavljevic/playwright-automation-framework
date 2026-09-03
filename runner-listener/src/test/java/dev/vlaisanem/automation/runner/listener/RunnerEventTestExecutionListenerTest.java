@@ -38,11 +38,11 @@ class RunnerEventTestExecutionListenerTest {
     Launcher launcher =
         LauncherFactory.create(
             LauncherConfig.builder().enableTestExecutionListenerAutoRegistration(false).build());
-    launcher.registerTestExecutionListeners(new RunnerEventTestExecutionListener(runId, tempDir));
+    launcher.registerTestExecutionListeners(new RunnerEventTestExecutionListener(runId));
 
     LauncherDiscoveryRequest request =
         LauncherDiscoveryRequestBuilder.request().selectors(selectClass(Fixture.class)).build();
-    launcher.execute(request);
+    withRawEventsDir(tempDir, () -> launcher.execute(request));
 
     assertThat(Files.exists(tempDir.resolve(runId + ".tests.complete")))
         .as("completion marker should exist once the listener has closed the writer")
@@ -66,7 +66,9 @@ class RunnerEventTestExecutionListenerTest {
     assertThat(failing)
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.TEST_STARTED, EventType.TEST_FAILED);
-    assertThat(failing.get(1).detail()).isEqualTo("boom");
+    // FailureDetailFormatter's shape - exception class + redacted message + application stack
+    // frames - not the bare message alone; see FailureDetailFormatterTest for the format itself.
+    assertThat(failing.get(1).detail()).contains("AssertionFailedError").contains("boom");
 
     List<RunnerEvent> skipped = byDisplayName.get("skipped()");
     assertThat(skipped).extracting(RunnerEvent::type).containsExactly(EventType.TEST_SKIPPED);
@@ -79,13 +81,13 @@ class RunnerEventTestExecutionListenerTest {
     Launcher launcher =
         LauncherFactory.create(
             LauncherConfig.builder().enableTestExecutionListenerAutoRegistration(false).build());
-    launcher.registerTestExecutionListeners(new RunnerEventTestExecutionListener(runId, tempDir));
+    launcher.registerTestExecutionListeners(new RunnerEventTestExecutionListener(runId));
 
     LauncherDiscoveryRequest request =
         LauncherDiscoveryRequestBuilder.request()
             .selectors(selectClass(DisabledFixture.class))
             .build();
-    launcher.execute(request);
+    withRawEventsDir(tempDir, () -> launcher.execute(request));
 
     List<RunnerEvent> events = readEvents(tempDir.resolve(runId + ".tests.jsonl"));
 
@@ -97,6 +99,27 @@ class RunnerEventTestExecutionListenerTest {
     assertThat(events)
         .extracting(RunnerEvent::testDisplayName)
         .containsExactlyInAnyOrder("neverRuns()", "alsoNeverRuns()");
+  }
+
+  /**
+   * Redirects {@link RunnerEventWriterRegistry}'s raw-events directory to {@code tempDir} for the
+   * duration of {@code action}, restoring the previous system property value afterward - the
+   * registry, not the listener itself, now owns this resolution (see {@link
+   * RunnerEventWriterRegistry}), so a test isolates it the same way any other consumer would.
+   */
+  private void withRawEventsDir(Path tempDir, Runnable action) {
+    String property = RunnerEventWriterRegistry.RAW_EVENTS_DIR_PROPERTY;
+    String previous = System.getProperty(property);
+    System.setProperty(property, tempDir.toString());
+    try {
+      action.run();
+    } finally {
+      if (previous == null) {
+        System.clearProperty(property);
+      } else {
+        System.setProperty(property, previous);
+      }
+    }
   }
 
   private List<RunnerEvent> readEvents(Path file) throws IOException {

@@ -32,6 +32,7 @@ class ArtifactManifestWriterTest {
         "run-1",
         "test-id-1",
         "someTest()",
+        null,
         ArtifactType.SCREENSHOT,
         artifact,
         "image/png");
@@ -59,12 +60,20 @@ class ArtifactManifestWriterTest {
     Files.writeString(second, "bb");
 
     ArtifactManifestWriter.record(
-        artifactsRoot, "run-1", "test-1", "test one", ArtifactType.SCREENSHOT, first, "image/png");
+        artifactsRoot,
+        "run-1",
+        "test-1",
+        "test one",
+        null,
+        ArtifactType.SCREENSHOT,
+        first,
+        "image/png");
     ArtifactManifestWriter.record(
         artifactsRoot,
         "run-1",
         "test-1",
         "test one",
+        null,
         ArtifactType.TRACE,
         second,
         "application/zip");
@@ -116,6 +125,7 @@ class ArtifactManifestWriterTest {
                                 "run-1",
                                 "test-" + i,
                                 "test " + i,
+                                null,
                                 ArtifactType.SCREENSHOT,
                                 artifact,
                                 "image/png");

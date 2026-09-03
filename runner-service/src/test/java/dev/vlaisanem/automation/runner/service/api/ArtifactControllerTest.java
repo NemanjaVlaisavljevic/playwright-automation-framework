@@ -153,6 +153,7 @@ class ArtifactControllerTest {
         "run-1",
         "test-1",
         "some test",
+        null,
         type,
         relativePath,
         mediaType,

@@ -28,10 +28,16 @@ const testLevelEventTypes = [
   "TEST_ABORTED",
   "TEST_SKIPPED",
 ] as const;
+const stepLevelEventTypes = [
+  "STEP_STARTED",
+  "STEP_PASSED",
+  "STEP_FAILED",
+] as const;
 
 export const EventType = z.enum([
   ...runLevelEventTypes,
   ...testLevelEventTypes,
+  ...stepLevelEventTypes,
 ]);
 export type EventType = z.infer<typeof EventType>;
 
@@ -115,6 +121,29 @@ const TestSkippedEvent = z
   .object({ ...testLevelFields, type: z.literal("TEST_SKIPPED") })
   .strict();
 
+/**
+ * Additive over the original schema 1.0 `RUN_*`/`TEST_*` vocabulary (see `CURRENT_SCHEMA_VERSION`
+ * below): emitted by the main suite's `Steps` API from inside a running test method, never by the
+ * JUnit listener itself. A test that never uses `Steps` emits none of these - a step-free test and
+ * a step-using one coexist in the same run, but every event either of them produces still carries
+ * the one current `schemaVersion`: schema versions themselves are never mixed in a single stream.
+ */
+const stepLevelFields = {
+  ...testLevelFields,
+  stepId: nonBlankString,
+  stepName: nonBlankString,
+};
+
+const StepStartedEvent = z
+  .object({ ...stepLevelFields, type: z.literal("STEP_STARTED") })
+  .strict();
+const StepPassedEvent = z
+  .object({ ...stepLevelFields, type: z.literal("STEP_PASSED") })
+  .strict();
+const StepFailedEvent = z
+  .object({ ...stepLevelFields, type: z.literal("STEP_FAILED") })
+  .strict();
+
 export const RunnerEvent = z.discriminatedUnion("type", [
   RunQueuedEvent,
   RunStartedEvent,
@@ -124,11 +153,15 @@ export const RunnerEvent = z.discriminatedUnion("type", [
   TestFailedEvent,
   TestAbortedEvent,
   TestSkippedEvent,
+  StepStartedEvent,
+  StepPassedEvent,
+  StepFailedEvent,
 ]);
 export type RunnerEvent = z.infer<typeof RunnerEvent>;
 
 export type RunLevelEventType = (typeof runLevelEventTypes)[number];
 export type TestLevelEventType = (typeof testLevelEventTypes)[number];
+export type StepLevelEventType = (typeof stepLevelEventTypes)[number];
 
 export function isTestLevelEvent(
   event: RunnerEvent,
@@ -136,5 +169,11 @@ export function isTestLevelEvent(
   return (testLevelEventTypes as readonly string[]).includes(event.type);
 }
 
+export function isStepLevelEvent(
+  event: RunnerEvent,
+): event is Extract<RunnerEvent, { type: StepLevelEventType }> {
+  return (stepLevelEventTypes as readonly string[]).includes(event.type);
+}
+
 /** The schema version this frontend build was written against - see `RunnerEvent.CURRENT_SCHEMA_VERSION` in `runner-contract`. */
-export const CURRENT_SCHEMA_VERSION = "1.0";
+export const CURRENT_SCHEMA_VERSION = "1.1";

@@ -11,6 +11,7 @@ import dev.vlaisanem.automation.api.BookingClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.ManagedBooking;
 import dev.vlaisanem.automation.data.ManagedRoom;
 import dev.vlaisanem.automation.model.AuthCredentials;
@@ -41,22 +42,37 @@ class BookingValidationUiTest {
   @Test
   @DisplayName("Guest cannot complete a booking with an empty guest name")
   void guestCannotBookWithEmptyName(
-      Page page, APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
+      Page page,
+      APIRequestContext request,
+      ApiContextFactory apiContexts,
+      TestConfig config,
+      Steps steps) {
     String token =
-        new AuthClient(request)
-            .loginAndReadToken(new AuthCredentials(config.adminUsername(), config.adminPassword()))
-            .token();
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                new AuthClient(request)
+                    .loginAndReadToken(
+                        new AuthCredentials(config.adminUsername(), config.adminPassword()))
+                    .token());
     APIRequestContext adminRequest = apiContexts.withCookie("token", token);
     RoomClient rooms = new RoomClient(adminRequest);
     BookingClient bookings = new BookingClient(adminRequest);
 
-    try (ManagedRoom room = ManagedRoom.create(rooms)) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(rooms))) {
       LocalDate checkin = LocalDate.now().plusDays(180);
       LocalDate checkout = checkin.plusDays(1);
       RoomReservationPage reservation =
-          RoomReservationPage.openFor(page, room.roomId(), checkin, checkout)
-              .startReservation()
-              .fillGuestDetails("", "", "portfolio.guest@example.com", "07123456789");
+          steps.call(
+              "Open booking page for selected stay",
+              () ->
+                  RoomReservationPage.openFor(page, room.roomId(), checkin, checkout)
+                      .startReservation());
+
+      steps.run(
+          "Enter guest details with an empty name",
+          () -> reservation.fillGuestDetails("", "", "portfolio.guest@example.com", "07123456789"));
 
       // Empirically confirmed against the running app (and its source,
       // assets/src/components/reservation/BookingForm.tsx): the reservation form does not block an
@@ -65,7 +81,7 @@ class BookingValidationUiTest {
       // documents at the API level). submitBooking() does not tolerate a missing response - a
       // genuine interaction failure (e.g. the click not firing a request at all) must fail this
       // test, not be silently read as "validation worked".
-      ApiResult response = reservation.submitBooking();
+      ApiResult response = steps.call("Submit the booking", reservation::submitBooking);
 
       // Guards against a validation regression that starts accepting this (201): the same
       // pattern BookingWriteProtectionApiTest already uses for its API-level equivalent. If the
@@ -73,13 +89,17 @@ class BookingValidationUiTest {
       // still cleaned up rather than left behind - trackIfCreated returns null here for the
       // expected 400 case, so close() on a null-tracked resource is simply a no-op.
       try (ManagedBooking unexpected = ManagedBooking.trackIfCreated(bookings, response)) {
-        assertThat(response.status()).isEqualTo(400);
-        assertThat(unexpected).isNull();
-        assertThat(response.bodyAs(ValidationErrorResponse.class).errors())
-            .contains("Firstname should not be blank", "Lastname should not be blank");
-        reservation.assertBookingNotConfirmed();
-        reservation.assertValidationErrors(
-            "Firstname should not be blank", "Lastname should not be blank");
+        steps.run(
+            "Verify booking rejected",
+            () -> {
+              assertThat(response.status()).isEqualTo(400);
+              assertThat(unexpected).isNull();
+              assertThat(response.bodyAs(ValidationErrorResponse.class).errors())
+                  .contains("Firstname should not be blank", "Lastname should not be blank");
+              reservation.assertBookingNotConfirmed();
+              reservation.assertValidationErrors(
+                  "Firstname should not be blank", "Lastname should not be blank");
+            });
       }
     }
   }

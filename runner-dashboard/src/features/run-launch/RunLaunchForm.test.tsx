@@ -86,7 +86,7 @@ describe("RunLaunchForm", () => {
       Array.from(suiteSelect.querySelectorAll("option")).map(
         (option) => option.textContent,
       ),
-    ).toEqual(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION"]);
+    ).toEqual(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"]);
 
     await user.selectOptions(suiteSelect, "API");
     await user.click(screen.getByRole("button", { name: "Run" }));

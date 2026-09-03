@@ -10,6 +10,7 @@ import dev.vlaisanem.automation.api.BookingClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.BookingTestData;
 import dev.vlaisanem.automation.data.ManagedBooking;
 import dev.vlaisanem.automation.data.ManagedRoom;
@@ -36,21 +37,32 @@ class BookingWriteProtectionApiTest {
   @Test
   @DisplayName("Anonymous guest cannot update a test-owned booking")
   void anonymousCannotUpdateBooking(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       CreateBookingRequest original = BookingTestData.uniqueBooking(room.roomId());
       try (ManagedBooking booking =
-          ManagedBooking.create(clients.anonymousBookings(), clients.adminBookings(), original)) {
+          steps.call(
+              "Provision an existing booking",
+              () ->
+                  ManagedBooking.create(
+                      clients.anonymousBookings(), clients.adminBookings(), original))) {
         CreateBookingRequest attemptedUpdate = BookingTestData.uniqueBooking(room.roomId());
 
-        assertThat(
-                clients
-                    .anonymousBookings()
-                    .updateBooking(booking.bookingId(), attemptedUpdate)
-                    .status())
-            .isEqualTo(403);
+        ApiResult response =
+            steps.call(
+                "Attempt an anonymous update",
+                () ->
+                    clients
+                        .anonymousBookings()
+                        .updateBooking(booking.bookingId(), attemptedUpdate));
+
+        steps.run(
+            "Verify anonymous update is rejected",
+            () -> assertThat(response.status()).isEqualTo(403));
       }
     }
   }
@@ -58,17 +70,28 @@ class BookingWriteProtectionApiTest {
   @Test
   @DisplayName("Anonymous guest cannot delete a test-owned booking")
   void anonymousCannotDeleteBooking(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       try (ManagedBooking booking =
-          ManagedBooking.create(
-              clients.anonymousBookings(),
-              clients.adminBookings(),
-              BookingTestData.uniqueBooking(room.roomId()))) {
-        assertThat(clients.anonymousBookings().deleteBooking(booking.bookingId()).status())
-            .isEqualTo(403);
+          steps.call(
+              "Provision an existing booking",
+              () ->
+                  ManagedBooking.create(
+                      clients.anonymousBookings(),
+                      clients.adminBookings(),
+                      BookingTestData.uniqueBooking(room.roomId())))) {
+        ApiResult response =
+            steps.call(
+                "Attempt an anonymous delete",
+                () -> clients.anonymousBookings().deleteBooking(booking.bookingId()));
+
+        steps.run(
+            "Verify anonymous delete is rejected",
+            () -> assertThat(response.status()).isEqualTo(403));
       }
     }
   }
@@ -76,10 +99,12 @@ class BookingWriteProtectionApiTest {
   @Test
   @DisplayName("Creating a booking without a guest name is rejected")
   void createRejectsMissingGuestName(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       CreateBookingRequest valid = BookingTestData.uniqueBooking(room.roomId());
       CreateBookingRequest missingName =
           new CreateBookingRequest(
@@ -90,14 +115,21 @@ class BookingWriteProtectionApiTest {
               valid.bookingDates(),
               valid.email(),
               valid.phone());
-      ApiResult response = clients.anonymousBookings().createBooking(missingName);
+      ApiResult response =
+          steps.call(
+              "Attempt a booking with a missing guest name",
+              () -> clients.anonymousBookings().createBooking(missingName));
 
       try (ManagedBooking unexpected =
           ManagedBooking.trackIfCreated(clients.adminBookings(), response)) {
-        assertThat(response.status()).isEqualTo(400);
-        assertThat(unexpected).isNull();
-        assertThat(response.bodyAs(ValidationErrorResponse.class).errors())
-            .contains("Firstname should not be blank", "Lastname should not be blank");
+        steps.run(
+            "Verify booking rejected",
+            () -> {
+              assertThat(response.status()).isEqualTo(400);
+              assertThat(unexpected).isNull();
+              assertThat(response.bodyAs(ValidationErrorResponse.class).errors())
+                  .contains("Firstname should not be blank", "Lastname should not be blank");
+            });
       }
     }
   }

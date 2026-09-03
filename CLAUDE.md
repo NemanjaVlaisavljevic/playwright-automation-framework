@@ -10,7 +10,7 @@ A Java + Playwright UI/API automation framework testing [Restful Booker Platform
 
 ```bash
 ./gradlew.bat playwrightInstall   # first-time setup; installs the configured browser (chromium by default)
-./gradlew.bat test                # default suite: everything except @Tag("mutation")
+./gradlew.bat test                # default suite: everything except @Tag("mutation") and @Tag("fixture")
 ./gradlew.bat smokeTest           # critical-path subset (@Tag("smoke"))
 ./gradlew.bat apiTest             # read-only API tests only
 ./gradlew.bat uiTest              # read-only UI tests only
@@ -18,13 +18,19 @@ A Java + Playwright UI/API automation framework testing [Restful Booker Platform
 ./gradlew.bat regressionTest      # full read-only regression suite
 ./gradlew.bat mutationTest        # opt-in: writes to the shared public sandbox — refuses to run against it
                                    # unless allowMutationAgainstSharedTarget/ALLOW_MUTATION_AGAINST_SHARED_TARGET=true
+./gradlew.bat fixtureTest         # opt-in: controlled fixtures for exercising runner drill-down/reconciliation —
+                                   # StepDrilldownFixtureTest always fails on purpose; CancelDuringStepFixtureTest
+                                   # deliberately blocks mid-step so a real E2E test can cancel it deterministically;
+                                   # never in CI
 ./gradlew.bat spotlessApply       # auto-format (Google Java Format) — run before finishing any change
 ./gradlew.bat spotlessCheck       # formatting gate, no changes written
 ./gradlew.bat allureReport        # static HTML report from existing build/allure-results
 
 ./gradlew.bat localSutUp          # local Docker SUT: fetch pinned upstream source, build, start all 7 containers
 ./gradlew.bat localSutHealth      # wait for every service's health endpoint (no fixed blind startup delay)
+./gradlew.bat localSutVerifyRunning # fast-fail health check only, no dependsOn on up/build/prepare — precondition for localJourneyTest
 ./gradlew.bat localTest           # run the full regression + mutation suite against the local stack (http://localhost)
+./gradlew.bat localJourneyTest    # journey suite incl. mutation against the local stack — assumes the stack is already up
 ./gradlew.bat stabilityTest       # rerun localTest N times (-PstabilityRuns=N, default 10) to check determinism
 ./gradlew.bat localSutDiagnostics # dump `docker compose ps`/`logs` to build/diagnostics/rbp/; no dependsOn on up/build, safe any time
 ./gradlew.bat localSutDown        # stop the local stack
@@ -32,6 +38,8 @@ A Java + Playwright UI/API automation framework testing [Restful Booker Platform
 ```
 
 `localTest` is the mutation-suite target intended for real use — it points `baseUrl` at the local stack, so the shared-target guard never blocks it. See `infra/rbp/README.md` for the full local-SUT task list; it also documents a small local patch (`infra/rbp/patches/`) needed to work around a build-time env var bug in upstream's own `assets` Dockerfile. `localTest` passes 27/27 and `stabilityTest -PstabilityRuns=10` has passed 10/10.
+
+The runner-service dashboard's `Environment` dropdown offers `LOCAL` (mapped to `Suite.JOURNEY` only, via `RunCatalog`) alongside `PUBLIC` — it launches `localJourneyTest`, which includes `mutation`-tagged journey tests safely (writes only to `http://localhost`, never the shared public target). The runner **never** starts/stops/manages the local stack itself: a developer must run `localSutUp` by hand first, or a `LOCAL` run will reach a real process and fail fast at its `localSutVerifyRunning` precondition instead of running any tests. See `infra/rbp/README.md`'s "Dashboard `LOCAL` runs" section for the full step-by-step flow.
 
 ## CI
 
@@ -65,6 +73,8 @@ Configuration is via system properties (take precedence) or environment variable
 Any test that can mutate shared state — including a negative write expected to be rejected — must be tagged `mutation` and use `@ResourceLock("restful-booker-platform-mutations")` (mutation tests run serialized against each other because the public target's data resets periodically). `mutation` tests are excluded from the default `test` task and CI; they must be run explicitly.
 
 `AutomationExtension` additionally refuses any `mutation`-tagged test at runtime when `baseUrl` equals the shared/public target (`TestConfig#sharedTargetBaseUrl()`, same default as `baseUrl` itself), unless `allowMutationAgainstSharedTarget`/`ALLOW_MUTATION_AGAINST_SHARED_TARGET=true` is explicitly set. Point `baseUrl` at the local Docker SUT (`localTest`) instead of opting into this for routine work.
+
+`fixture` is a separate, additional marker tag (like `smoke`) for controlled, on-demand fixtures that back specific runner/dashboard verifications rather than testing the app under test: `StepDrilldownFixtureTest` deliberately-and-always fails its third step (step/failure/artifact drill-down, Faza B) and `CancelDuringStepFixtureTest` deliberately blocks mid-step (cancellation/`INTERRUPTED`-reconciliation drill-down, Faza C4.1) so `CancelE2eTest` can cancel it deterministically instead of racing an ordinary suite's timing. Each still carries a real layer/feature/effect/`regression` tag set like any other test, but both are excluded from every real Gradle task (`test`, `smokeTest`, `apiTest`, `uiTest`, `journeyTest`, `regressionTest`, `localTest`) the same way `mutation` is, and only `fixtureTest` (or the dashboard's `FIXTURE` suite, which maps to it) includes them — together, in the same run.
 
 ## Architecture
 

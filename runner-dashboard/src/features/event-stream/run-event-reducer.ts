@@ -1,14 +1,29 @@
 import {
   CURRENT_SCHEMA_VERSION,
+  isStepLevelEvent,
   isTestLevelEvent,
   RunnerEvent,
   RunnerEventEnvelope,
   type RunOutcome,
+  type StepLevelEventType,
   type TestLevelEventType,
 } from "../../domain/runner-event";
 
 export type TestExecutionStatus =
   "RUNNING" | "PASSED" | "FAILED" | "ABORTED" | "SKIPPED";
+
+export type StepExecutionStatus = "RUNNING" | "PASSED" | "FAILED";
+
+export interface StepExecution {
+  readonly stepId: string;
+  readonly stepName: string;
+  readonly status: StepExecutionStatus;
+  /** The sequence of the first event seen for this step - for stable display ordering. */
+  readonly firstSequence: number;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly detail?: string;
+}
 
 export interface TestExecution {
   readonly testId: string;
@@ -19,6 +34,12 @@ export interface TestExecution {
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly detail?: string;
+  /**
+   * Keyed by `stepId`, insertion-ordered by first appearance - empty for a test that never used the
+   * `Steps` API. `STEP_*` is purely additive over the original `RUN_*`/`TEST_*` vocabulary (see
+   * `docs/SSE_CONTRACT_V1.md`) - every event still carries the same `schemaVersion` regardless.
+   */
+  readonly steps: ReadonlyMap<string, StepExecution>;
 }
 
 /**
@@ -55,6 +76,15 @@ export interface RunEventStreamState {
    * `GET` happened to catch (`QUEUED`/`STARTING`) for the entire live run.
    */
   readonly runStartedAt?: string;
+  /**
+   * Set once, from `RUN_FINISHED`'s own `timestamp` - the primary terminal-time signal for
+   * reconciling a test/step that never reported its own terminal result (see
+   * `run-details-view-model.ts`). Preferring this over the REST `RunResponse.finishedAt` means
+   * reconciliation does not depend on a REST refetch succeeding or being fresh: the stream already
+   * knows the run is over, and knows exactly when, the instant this event is processed - no round
+   * trip required, and nothing for a failed/stale refetch to strand.
+   */
+  readonly runFinishedAt?: string;
 }
 
 export function createInitialRunEventStreamState(): RunEventStreamState {
@@ -77,6 +107,15 @@ const statusByTestLevelEventType: Record<
   TEST_SKIPPED: "SKIPPED",
 };
 
+const statusByStepLevelEventType: Record<
+  StepLevelEventType,
+  StepExecutionStatus
+> = {
+  STEP_STARTED: "RUNNING",
+  STEP_PASSED: "PASSED",
+  STEP_FAILED: "FAILED",
+};
+
 /**
  * Structural equality for two already-validated `RunnerEvent`s. `JSON.stringify` is safe here
  * specifically because both sides are Zod parse *output*: Zod always builds the parsed object by
@@ -88,24 +127,160 @@ function runnerEventsAreEqual(a: RunnerEvent, b: RunnerEvent): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** `false` only ever means `"protocol-error"` upstream - see the two call sites below. */
+type ApplyResult =
+  | { readonly ok: true; readonly test: TestExecution }
+  | { readonly ok: false; readonly reason: string };
+
+function isTerminalTestStatus(status: TestExecutionStatus): boolean {
+  return status !== "RUNNING";
+}
+
+/**
+ * Rejects a semantically-impossible test-level lifecycle as a protocol error - the ingestor only
+ * checks shape/runId/sequence (see `ListenerEventIngestor`), so a corrupted or hand-crafted stream
+ * can otherwise reach this far looking "valid". The real system's own JUnit-driven lifecycle admits
+ * exactly two shapes for a test (see `RunnerEventTestExecutionListener`): `TEST_STARTED` followed
+ * by exactly one of `TEST_PASSED`/`TEST_FAILED`/`TEST_ABORTED`, or a lone `TEST_SKIPPED` with no
+ * `TEST_STARTED` at all (JUnit Platform never calls `executionStarted` for a test it goes on to
+ * report as skipped) - so:
+ * - `TEST_STARTED` requires the testId not already be known (a repeat is never a legitimate reset).
+ * - `TEST_PASSED`/`TEST_FAILED`/`TEST_ABORTED` require an existing, still-`RUNNING` test.
+ * - `TEST_SKIPPED` requires the testId not already be known (same reasoning as `TEST_STARTED`).
+ * - No event may carry a different `testDisplayName` than the one already known for that testId, or
+ *   finish a test while one of its own steps is still `RUNNING` (impossible in the real system -
+ *   `Steps.run` always completes a step, PASSED or FAILED, before returning).
+ */
 function applyTestEvent(
   existing: TestExecution | undefined,
   event: Extract<RunnerEvent, { type: TestLevelEventType }>,
-): TestExecution {
+): ApplyResult {
+  if (event.type === "TEST_STARTED" || event.type === "TEST_SKIPPED") {
+    if (existing !== undefined) {
+      return {
+        ok: false,
+        reason: `${event.type} at sequence ${event.sequence} repeats already-known test "${event.testId}"`,
+      };
+    }
+  } else if (existing === undefined) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} references test "${event.testId}" that never received TEST_STARTED`,
+    };
+  } else if (isTerminalTestStatus(existing.status)) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} arrived for test "${event.testId}" after it was already terminal (${existing.status})`,
+    };
+  }
+  if (
+    existing !== undefined &&
+    existing.testDisplayName !== event.testDisplayName
+  ) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} changed testDisplayName for test "${event.testId}" from "${existing.testDisplayName}" to "${event.testDisplayName}"`,
+    };
+  }
+  if (event.type !== "TEST_STARTED" && existing !== undefined) {
+    const runningStep = Array.from(existing.steps.values()).find(
+      (step) => step.status === "RUNNING",
+    );
+    if (runningStep !== undefined) {
+      return {
+        ok: false,
+        reason: `${event.type} at sequence ${event.sequence} finished test "${event.testId}" while step "${runningStep.stepId}" ("${runningStep.stepName}") was still RUNNING`,
+      };
+    }
+  }
   const detail = event.detail ?? existing?.detail;
   return {
-    testId: event.testId,
-    testDisplayName: event.testDisplayName,
-    status: statusByTestLevelEventType[event.type],
-    firstSequence: existing?.firstSequence ?? event.sequence,
-    ...(event.type === "TEST_STARTED"
+    ok: true,
+    test: {
+      testId: event.testId,
+      testDisplayName: event.testDisplayName,
+      status: statusByTestLevelEventType[event.type],
+      firstSequence: existing?.firstSequence ?? event.sequence,
+      ...(event.type === "TEST_STARTED"
+        ? { startedAt: event.timestamp }
+        : existing?.startedAt !== undefined
+          ? { startedAt: existing.startedAt }
+          : {}),
+      ...(event.type !== "TEST_STARTED" ? { finishedAt: event.timestamp } : {}),
+      ...(detail !== undefined ? { detail } : {}),
+      steps: existing?.steps ?? new Map(),
+    },
+  };
+}
+
+/**
+ * Rejects a semantically-impossible step-level lifecycle as a protocol error, the step-scoped
+ * counterpart to {@link applyTestEvent}'s own invariants: a `STEP_PASSED`/`STEP_FAILED` for a step
+ * that never received `STEP_STARTED`, a repeated `STEP_STARTED` for an already-known step (never a
+ * legitimate reset), a step whose `stepName` changes mid-stream, or any step-level event arriving
+ * for a test that has already reached a terminal status.
+ */
+function applyStepEvent(
+  existingTest: TestExecution,
+  event: Extract<RunnerEvent, { type: StepLevelEventType }>,
+): ApplyResult {
+  if (isTerminalTestStatus(existingTest.status)) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} arrived for test "${event.testId}" after it was already terminal (${existingTest.status})`,
+    };
+  }
+  if (existingTest.testDisplayName !== event.testDisplayName) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} carries testDisplayName "${event.testDisplayName}" but test "${event.testId}" is already known as "${existingTest.testDisplayName}"`,
+    };
+  }
+  const existingStep = existingTest.steps.get(event.stepId);
+  if (event.type === "STEP_STARTED") {
+    if (existingStep !== undefined) {
+      return {
+        ok: false,
+        reason: `STEP_STARTED at sequence ${event.sequence} repeats already-known step "${event.stepId}"`,
+      };
+    }
+  } else if (existingStep === undefined) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} references step "${event.stepId}" that never received STEP_STARTED`,
+    };
+  } else if (existingStep.status !== "RUNNING") {
+    // A step is terminal (PASSED/FAILED) the instant its own event lands - `Steps.run` never
+    // revisits a step once it has reported an outcome. Without this, a STEP_PASSED followed by a
+    // STEP_FAILED for the same stepId would silently overwrite an already-terminal step's own
+    // outcome instead of being rejected as the impossible transition it is.
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} arrived for step "${event.stepId}" after it was already terminal (${existingStep.status})`,
+    };
+  } else if (existingStep.stepName !== event.stepName) {
+    return {
+      ok: false,
+      reason: `${event.type} at sequence ${event.sequence} changed stepName for step "${event.stepId}" from "${existingStep.stepName}" to "${event.stepName}"`,
+    };
+  }
+  const detail = event.detail ?? existingStep?.detail;
+  const updatedStep: StepExecution = {
+    stepId: event.stepId,
+    stepName: event.stepName,
+    status: statusByStepLevelEventType[event.type],
+    firstSequence: existingStep?.firstSequence ?? event.sequence,
+    ...(event.type === "STEP_STARTED"
       ? { startedAt: event.timestamp }
-      : existing?.startedAt !== undefined
-        ? { startedAt: existing.startedAt }
+      : existingStep?.startedAt !== undefined
+        ? { startedAt: existingStep.startedAt }
         : {}),
-    ...(event.type !== "TEST_STARTED" ? { finishedAt: event.timestamp } : {}),
+    ...(event.type !== "STEP_STARTED" ? { finishedAt: event.timestamp } : {}),
     ...(detail !== undefined ? { detail } : {}),
   };
+  const steps = new Map(existingTest.steps);
+  steps.set(event.stepId, updatedStep);
+  return { ok: true, test: { ...existingTest, steps } };
 }
 
 /**
@@ -224,10 +399,33 @@ export function applyRunnerEventMessage(
 
   const testsById = new Map(state.testsById);
   if (isTestLevelEvent(event)) {
-    testsById.set(
-      event.testId,
-      applyTestEvent(testsById.get(event.testId), event),
-    );
+    const result = applyTestEvent(testsById.get(event.testId), event);
+    if (!result.ok) {
+      return {
+        ...state,
+        status: { kind: "protocol-error", reason: result.reason },
+      };
+    }
+    testsById.set(event.testId, result.test);
+  } else if (isStepLevelEvent(event)) {
+    const existingTest = testsById.get(event.testId);
+    if (existingTest === undefined) {
+      return {
+        ...state,
+        status: {
+          kind: "protocol-error",
+          reason: `${event.type} at sequence ${event.sequence} references unknown testId "${event.testId}"`,
+        },
+      };
+    }
+    const result = applyStepEvent(existingTest, event);
+    if (!result.ok) {
+      return {
+        ...state,
+        status: { kind: "protocol-error", reason: result.reason },
+      };
+    }
+    testsById.set(event.testId, result.test);
   }
 
   return {
@@ -238,7 +436,9 @@ export function applyRunnerEventMessage(
     eventsBySequence,
     testsById,
     lastSequence: event.sequence,
-    ...(event.type === "RUN_FINISHED" ? { runOutcome: event.runOutcome } : {}),
+    ...(event.type === "RUN_FINISHED"
+      ? { runOutcome: event.runOutcome, runFinishedAt: event.timestamp }
+      : {}),
     ...(state.runStartedAt !== undefined
       ? { runStartedAt: state.runStartedAt }
       : event.type === "RUN_STARTED"

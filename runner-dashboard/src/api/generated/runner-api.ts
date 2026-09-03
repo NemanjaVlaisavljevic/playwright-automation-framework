@@ -5,19 +5,19 @@ import type * as __TypedOpenapi from "./runner-api.types.js";
 
 // <Schemas>
 export type CreateRunRequest = __TypedOpenapi.Schemas.CreateRunRequest;
-export const CreateRunRequest = z.object({ environment: z.literal("PUBLIC"), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION"]) }).catchall(z.unknown());
+export const CreateRunRequest = z.object({ environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"]) }).catchall(z.unknown());
 
 export type RunResponse = __TypedOpenapi.Schemas.RunResponse;
-export const RunResponse = z.object({ runId: z.string(), environment: z.literal("PUBLIC"), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION"]), status: z.enum(["QUEUED", "STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "ERROR"]), requestedAt: z.iso.datetime(), startedAt: z.iso.datetime().optional(), finishedAt: z.iso.datetime().optional(), exitCode: z.number().int().optional(), detail: z.string().optional(), processLogUrl: z.string() }).catchall(z.unknown());
+export const RunResponse = z.object({ runId: z.string(), environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"]), status: z.enum(["QUEUED", "STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "ERROR"]), requestedAt: z.iso.datetime(), startedAt: z.iso.datetime().optional(), finishedAt: z.iso.datetime().optional(), exitCode: z.number().int().optional(), detail: z.string().optional(), processLogUrl: z.string() }).catchall(z.unknown());
 
 export type ProblemDetail = __TypedOpenapi.Schemas.ProblemDetail;
 export const ProblemDetail = z.object({ type: z.url().optional(), title: z.string(), status: z.number().int(), detail: z.string(), instance: z.string(), properties: z.record(z.string(), z.unknown()).optional() }).catchall(z.unknown());
 
 export type ArtifactSummaryResponse = __TypedOpenapi.Schemas.ArtifactSummaryResponse;
-export const ArtifactSummaryResponse = z.object({ artifactId: z.string(), testId: z.string(), testDisplayName: z.string(), type: z.enum(["SCREENSHOT", "TRACE", "VIDEO"]), mediaType: z.string(), sizeBytes: z.number().int(), createdAt: z.iso.datetime(), downloadUrl: z.string() }).catchall(z.unknown());
+export const ArtifactSummaryResponse = z.object({ artifactId: z.string(), testId: z.string(), testDisplayName: z.string(), stepId: z.string().optional(), type: z.enum(["SCREENSHOT", "TRACE", "VIDEO"]), mediaType: z.string(), sizeBytes: z.number().int(), createdAt: z.iso.datetime(), downloadUrl: z.string() }).catchall(z.unknown());
 
 export type EnvironmentCapabilities = __TypedOpenapi.Schemas.EnvironmentCapabilities;
-export const EnvironmentCapabilities = z.object({ name: z.literal("PUBLIC"), suites: z.array(z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION"])) }).catchall(z.unknown());
+export const EnvironmentCapabilities = z.object({ name: z.enum(["PUBLIC", "LOCAL"]), suites: z.array(z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"])) }).catchall(z.unknown());
 
 export type CapabilitiesResponse = __TypedOpenapi.Schemas.CapabilitiesResponse;
 export const CapabilitiesResponse = z.object({ apiVersion: z.string(), eventSchemaVersion: z.string(), environments: z.array(EnvironmentCapabilities) }).catchall(z.unknown());

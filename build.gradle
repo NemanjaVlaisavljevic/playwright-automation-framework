@@ -27,7 +27,10 @@ dependencies {
 
     // Auto-discovered via META-INF/services/org.junit.platform.launcher.TestExecutionListener -
     // emits one RunnerEvent JSONL line per test start/finish/skip. See runner-listener module.
-    testRuntimeOnly project(':runner-listener')
+    // testImplementation, not testRuntimeOnly: the Steps API (core.Steps) needs compile-time access
+    // to RunnerEventWriterRegistry, the single shared writer both it and the listener append
+    // through - see that class's own Javadoc for why there can only ever be one per runId.
+    testImplementation project(':runner-listener')
 
     // The ArtifactManifestEntry/ArtifactType record+enum shared with runner-service - the
     // process-boundary contract this framework's own ArtifactManifestWriter writes against. Has no
@@ -85,6 +88,11 @@ def configureAutomationTest = { Test task ->
     task.classpath = sourceSets.test.runtimeClasspath
     task.useJUnitPlatform {
         excludeTags 'mutation'
+        // The controlled step/failure/artifact drill-down fixture (Faza B) deliberately fails on
+        // purpose - it must never be swept into a real suite alongside `mutation`. It still carries
+        // the mandatory `regression` tag AutomationExtension requires unconditionally; this is the
+        // only thing keeping it out of every real suite. Only `fixtureTest` (below) includes it.
+        excludeTags 'fixture'
     }
     task.systemProperty 'file.encoding', 'UTF-8'
     forwardRunnerEventProperties(task)
@@ -170,6 +178,27 @@ tasks.register('mutationTest', Test) {
         events 'passed', 'skipped', 'failed'
         exceptionFormat = 'full'
     }
+    shouldRunAfter tasks.named('test')
+}
+
+// Deliberately excluded from `configureAutomationTest`'s excludeTags 'fixture' guard above - this
+// is the one task allowed to run it, on demand (a Gradle invocation or the runner's FIXTURE suite).
+tasks.register('fixtureTest', Test) {
+    description = 'Runs the controlled step/failure/artifact drill-down fixture (Faza B) - always fails on purpose.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+        includeTags 'fixture'
+    }
+    systemProperty 'file.encoding', 'UTF-8'
+    forwardRunnerEventProperties(delegate)
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+    }
+    reports.junitXml.required = true
+    reports.html.required = true
     shouldRunAfter tasks.named('test')
 }
 
@@ -373,6 +402,91 @@ tasks.register('localSutDiagnostics') {
     }
 }
 
+// Shared by localSutHealth (startup-tolerant, long timeouts, depends on localSutUp) and
+// localSutVerifyRunning (fast-fail precondition for tasks like localJourneyTest, no dependsOn at
+// all - never starts/stops/rebuilds anything). `taskName` is only used to make log/error messages
+// accurately name whichever of the two actually invoked this, not always "localSutHealth".
+def rbpVerifyHealthy = { String taskName, Duration healthTimeout, Duration frontDoorTimeout ->
+    def deadline = System.currentTimeMillis() + healthTimeout.toMillis()
+    def pending = new LinkedHashMap<>(rbpHealthEndpoints)
+    while (!pending.isEmpty() && System.currentTimeMillis() < deadline) {
+        def stillPending = new LinkedHashMap<>()
+        pending.each { name, url ->
+            boolean up = false
+            try {
+                def connection = new URL(url).openConnection()
+                connection.connectTimeout = 2000
+                connection.readTimeout = 2000
+                up = connection.responseCode == 200 && connection.inputStream.text.contains('"UP"')
+            } catch (ignored) {
+                up = false
+            }
+            if (!up) {
+                stillPending[name] = url
+            }
+        }
+        pending = stillPending
+        if (!pending.isEmpty()) {
+            Thread.sleep(2000)
+        }
+    }
+    if (!pending.isEmpty()) {
+        rbpWriteDiagnostics()
+        throw new GradleException(
+            "${taskName}: services not healthy after ${healthTimeout}: ${pending.keySet()}")
+    }
+    logger.lifecycle("${taskName}: all services UP (${rbpHealthEndpoints.keySet()})")
+
+    // HttpURLConnection does not auto-follow 307/308 (unlike Playwright's APIRequestContext,
+    // which the real tests use) - Next.js issues a 308 for its own trailing-slash normalization,
+    // which is not a failure. Follow redirects manually so we assert on the final status.
+    def httpStatusFollowingRedirects = { String startUrl ->
+        String currentUrl = startUrl
+        int code = -1
+        for (int hop = 0; hop <= 5; hop++) {
+            def connection = new URL(currentUrl).openConnection()
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            connection.instanceFollowRedirects = false
+            code = connection.responseCode
+            if (!(code in [301, 302, 303, 307, 308])) {
+                break
+            }
+            def location = connection.getHeaderField('Location')
+            if (!location) {
+                break
+            }
+            currentUrl = new URL(new URL(currentUrl), location).toString()
+        }
+        return code
+    }
+    def frontDoorDeadline = System.currentTimeMillis() + frontDoorTimeout.toMillis()
+    def frontDoorFailures = []
+    while (true) {
+        frontDoorFailures = []
+        rbpFrontDoorEndpoints.each { url ->
+            try {
+                int code = httpStatusFollowingRedirects(url)
+                if (code != 200) {
+                    frontDoorFailures << "${url} -> ${code}"
+                }
+            } catch (Exception exception) {
+                frontDoorFailures << "${url} -> ${exception.message}"
+            }
+        }
+        if (frontDoorFailures.isEmpty() || System.currentTimeMillis() >= frontDoorDeadline) {
+            break
+        }
+        Thread.sleep(2000)
+    }
+    if (!frontDoorFailures.isEmpty()) {
+        rbpWriteDiagnostics()
+        throw new GradleException(
+            "${taskName}: assets front door not healthy: ${frontDoorFailures}")
+    }
+    logger.lifecycle("${taskName}: assets front door OK (${rbpFrontDoorEndpoints})")
+}
+
 tasks.register('localSutHealth') {
     description = 'Polls each RBP Java service actuator endpoint plus the assets front door ' +
         '(list AND by-id, to catch proxy-only failures the actuator endpoints miss) until healthy, ' +
@@ -380,85 +494,22 @@ tasks.register('localSutHealth') {
     group = 'local sut'
     dependsOn 'localSutUp'
     doLast {
-        def timeout = Duration.ofMinutes(5)
-        def deadline = System.currentTimeMillis() + timeout.toMillis()
-        def pending = new LinkedHashMap<>(rbpHealthEndpoints)
-        while (!pending.isEmpty() && System.currentTimeMillis() < deadline) {
-            def stillPending = new LinkedHashMap<>()
-            pending.each { name, url ->
-                boolean up = false
-                try {
-                    def connection = new URL(url).openConnection()
-                    connection.connectTimeout = 2000
-                    connection.readTimeout = 2000
-                    up = connection.responseCode == 200 && connection.inputStream.text.contains('"UP"')
-                } catch (ignored) {
-                    up = false
-                }
-                if (!up) {
-                    stillPending[name] = url
-                }
-            }
-            pending = stillPending
-            if (!pending.isEmpty()) {
-                Thread.sleep(2000)
-            }
-        }
-        if (!pending.isEmpty()) {
-            rbpWriteDiagnostics()
-            throw new GradleException(
-                "localSutHealth: services not healthy after ${timeout}: ${pending.keySet()}")
-        }
-        logger.lifecycle("localSutHealth: all services UP (${rbpHealthEndpoints.keySet()})")
+        rbpVerifyHealthy('localSutHealth', Duration.ofMinutes(5), Duration.ofMinutes(2))
+    }
+}
 
-        // HttpURLConnection does not auto-follow 307/308 (unlike Playwright's APIRequestContext,
-        // which the real tests use) - Next.js issues a 308 for its own trailing-slash normalization,
-        // which is not a failure. Follow redirects manually so we assert on the final status.
-        def httpStatusFollowingRedirects = { String startUrl ->
-            String currentUrl = startUrl
-            int code = -1
-            for (int hop = 0; hop <= 5; hop++) {
-                def connection = new URL(currentUrl).openConnection()
-                connection.connectTimeout = 5000
-                connection.readTimeout = 5000
-                connection.instanceFollowRedirects = false
-                code = connection.responseCode
-                if (!(code in [301, 302, 303, 307, 308])) {
-                    break
-                }
-                def location = connection.getHeaderField('Location')
-                if (!location) {
-                    break
-                }
-                currentUrl = new URL(new URL(currentUrl), location).toString()
-            }
-            return code
-        }
-        def frontDoorDeadline = System.currentTimeMillis() + Duration.ofMinutes(2).toMillis()
-        def frontDoorFailures = []
-        while (true) {
-            frontDoorFailures = []
-            rbpFrontDoorEndpoints.each { url ->
-                try {
-                    int code = httpStatusFollowingRedirects(url)
-                    if (code != 200) {
-                        frontDoorFailures << "${url} -> ${code}"
-                    }
-                } catch (Exception exception) {
-                    frontDoorFailures << "${url} -> ${exception.message}"
-                }
-            }
-            if (frontDoorFailures.isEmpty() || System.currentTimeMillis() >= frontDoorDeadline) {
-                break
-            }
-            Thread.sleep(2000)
-        }
-        if (!frontDoorFailures.isEmpty()) {
-            rbpWriteDiagnostics()
-            throw new GradleException(
-                "localSutHealth: assets front door not healthy: ${frontDoorFailures}")
-        }
-        logger.lifecycle("localSutHealth: assets front door OK (${rbpFrontDoorEndpoints})")
+// Deliberately NOT dependsOn localSutUp/localSutBuild/localSutPrepare - unlike localSutHealth,
+// this is meant as a fast precondition for a task (localJourneyTest) that assumes a developer
+// already brought the stack up by hand with `./gradlew.bat localSutUp`. Never starts, stops, or
+// rebuilds anything itself, and fails fast and clearly (short timeouts) if the stack isn't there,
+// rather than waiting through localSutHealth's full startup-tolerant window.
+tasks.register('localSutVerifyRunning') {
+    description = 'Fails fast if the local RBP stack is not already up and healthy - never starts, ' +
+        'stops, or rebuilds it (see localSutHealth for the startup-tolerant version this shares its ' +
+        'actual check with). Intended as a precondition for tasks like localJourneyTest.'
+    group = 'local sut'
+    doLast {
+        rbpVerifyHealthy('localSutVerifyRunning', Duration.ofSeconds(10), Duration.ofSeconds(10))
     }
 }
 
@@ -486,8 +537,43 @@ tasks.register('localTest', Test) {
     classpath = sourceSets.test.runtimeClasspath
     // Every mutation test also carries the mandatory 'regression' tag (see AutomationExtension),
     // so including 'regression' with no exclusion already pulls in both read-only and mutation tests.
+    // 'fixture' is excluded for the same reason it is everywhere else: it always fails on purpose.
     useJUnitPlatform {
         includeTags 'regression'
+        excludeTags 'fixture'
+    }
+    systemProperty 'file.encoding', 'UTF-8'
+    systemProperty 'baseUrl', rbpLocalBaseUrl
+    forwardRunnerEventProperties(delegate)
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = false
+    }
+    reports.junitXml.required = true
+    reports.html.required = true
+    shouldRunAfter tasks.named('test')
+}
+
+// The Environment.LOCAL + Suite.JOURNEY entry in RunCatalog - lets the dashboard launch a real
+// mutation-tagged journey test (BookingJourneyTest and friends) without ever writing to the shared
+// public target: baseUrl is baked in as localhost, and TestConfig#targetsSharedEnvironment()
+// naturally returns false for that origin, so AutomationExtension's mutation guard passes with no
+// allowMutationAgainstSharedTarget opt-in needed. Deliberately depends on localSutVerifyRunning, not
+// localSutHealth/localSutUp: the runner-service process that will eventually launch this task must
+// never itself start, stop, or rebuild the Docker stack - a developer brings it up by hand first.
+tasks.register('localJourneyTest', Test) {
+    description = 'Runs the journey suite (read-only + mutation) against an already-running local RBP stack.'
+    group = 'verification'
+    dependsOn 'localSutVerifyRunning'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    // No excludeTags 'mutation' here - that is the entire point of this task existing separately
+    // from the public journeyTest one. 'fixture' is still excluded for the same reason as everywhere
+    // else: it always fails on purpose.
+    useJUnitPlatform {
+        includeTags 'journey'
+        excludeTags 'fixture'
     }
     systemProperty 'file.encoding', 'UTF-8'
     systemProperty 'baseUrl', rbpLocalBaseUrl

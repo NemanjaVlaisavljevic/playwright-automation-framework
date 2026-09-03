@@ -40,9 +40,9 @@ data:<JSON-encoded RunnerEvent>
 ```
 
 `EventType` is one of: `RUN_QUEUED`, `RUN_STARTED`, `TEST_STARTED`, `TEST_PASSED`, `TEST_FAILED`,
-`TEST_ABORTED`, `TEST_SKIPPED`, `RUN_FINISHED`. A client **must** register a listener per event
-name (`addEventListener(type, ...)`) - the generic `onmessage` handler never fires for a named SSE
-event.
+`TEST_ABORTED`, `TEST_SKIPPED`, `STEP_STARTED`, `STEP_PASSED`, `STEP_FAILED`, `RUN_FINISHED`. A
+client **must** register a listener per event name (`addEventListener(type, ...)`) - the generic
+`onmessage` handler never fires for a named SSE event.
 
 `data` is the full canonical event, matching `runner-contract`'s `RunnerEvent` record. The service's
 Jackson configuration is `NON_NULL` (see `JacksonConfig`, mirroring `spring.jackson.default-
@@ -52,7 +52,7 @@ model those fields as optional/absent, not nullable. A `TEST_STARTED` event actu
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "runId": "…",
   "sequence": 3,
   "timestamp": "2026-08-31T20:28:52.909407300Z",
@@ -62,15 +62,41 @@ model those fields as optional/absent, not nullable. A `TEST_STARTED` event actu
 }
 ```
 
+A `STEP_FAILED` event - emitted by the main suite's `Steps` API from inside a running test method,
+not by the JUnit listener - additionally carries `stepId`/`stepName`:
+
+```json
+{
+  "schemaVersion": "1.1",
+  "runId": "…",
+  "sequence": 7,
+  "timestamp": "2026-08-31T20:28:53.102407300Z",
+  "type": "STEP_FAILED",
+  "testId": "…",
+  "testDisplayName": "…",
+  "stepId": "8e1682d4-cd2a-4f49-9b20-c875b4acde63",
+  "stepName": "assert the confirmation banner is visible",
+  "detail": "…"
+}
+```
+
 - `schemaVersion`, `runId`, `sequence`, `timestamp`, `type` are always present.
 - `runOutcome` is present only on `RUN_FINISHED` (one of `SUCCEEDED`, `FAILED`, `TIMED_OUT`,
   `CANCELLED`, `ERROR`), absent everywhere else.
-- `testId` / `testDisplayName` are present only for test-level event types, absent for the three
-  run-level types (`RUN_QUEUED`, `RUN_STARTED`, `RUN_FINISHED`).
+- `testId` / `testDisplayName` are present for test-level and step-level event types, absent for the
+  three run-level types (`RUN_QUEUED`, `RUN_STARTED`, `RUN_FINISHED`).
+- `stepId` / `stepName` are present only for step-level event types (`STEP_STARTED`, `STEP_PASSED`,
+  `STEP_FAILED`), absent everywhere else. Every event in a stream carries the same `schemaVersion`
+  (currently `1.1`) - there is no run that mixes `1.0` and `1.1` events, and neither the ingestor nor
+  the dashboard accepts more than one `schemaVersion` at a time. What varies per test is only the
+  *vocabulary* it happens to use: `STEP_*` is additive over the original `RUN_*`/`TEST_*` set, so a
+  test that never calls the `Steps` API simply emits none of it, and a run can (and typically will)
+  mix such tests with one that does, in the same stream, under the one shared `sequence`.
 - `detail` is present only when there is a failure message / skip reason, absent otherwise.
-- `sequence` is contiguous and gapless per `runId`, starting at 1. A client that ever observes a gap
-  should treat it as a protocol error and reconnect from scratch, not try to patch around it - the
-  server's ordered journal is the only source of truth. Forcing that from an `EventSource` means
+- `sequence` is contiguous and gapless per `runId`, starting at 1 - across every event type,
+  including `STEP_*`, since all of them share one canonical sequence. A client that ever observes a
+  gap should treat it as a protocol error and reconnect from scratch, not try to patch around it -
+  the server's ordered journal is the only source of truth. Forcing that from an `EventSource` means
   closing it and opening a new one (see the request-header note above), not setting a header.
 
 ## Replay and resume

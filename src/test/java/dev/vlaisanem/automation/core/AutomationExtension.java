@@ -49,7 +49,8 @@ public final class AutomationExtension
         || type == Page.class
         || type == BrowserContext.class
         || type == APIRequestContext.class
-        || type == ApiContextFactory.class;
+        || type == ApiContextFactory.class
+        || type == Steps.class;
   }
 
   @Override
@@ -72,6 +73,9 @@ public final class AutomationExtension
     }
     if (type == ApiContextFactory.class) {
       return fixture.apiContexts();
+    }
+    if (type == Steps.class) {
+      return fixture.steps(extensionContext);
     }
     throw new IllegalArgumentException("Unsupported parameter type: " + type.getName());
   }

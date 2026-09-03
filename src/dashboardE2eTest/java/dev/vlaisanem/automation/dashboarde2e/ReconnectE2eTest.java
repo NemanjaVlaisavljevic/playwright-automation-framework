@@ -8,6 +8,7 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Route;
 import dev.vlaisanem.automation.dashboarde2e.pages.RunDetailsPage;
 import dev.vlaisanem.automation.dashboarde2e.pages.RunsListPage;
+import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -104,26 +105,27 @@ class ReconnectE2eTest {
 
   private static String runQueuedJson(String runId, int sequence) {
     return """
-        {"schemaVersion":"1.0","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:00Z","type":"RUN_QUEUED"}"""
-        .formatted(runId, sequence);
+        {"schemaVersion":"%s","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:00Z","type":"RUN_QUEUED"}"""
+        .formatted(RunnerEvent.CURRENT_SCHEMA_VERSION, runId, sequence);
   }
 
   private static String runStartedJson(String runId, int sequence) {
     return """
-        {"schemaVersion":"1.0","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:01Z","type":"RUN_STARTED"}"""
-        .formatted(runId, sequence);
+        {"schemaVersion":"%s","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:01Z","type":"RUN_STARTED"}"""
+        .formatted(RunnerEvent.CURRENT_SCHEMA_VERSION, runId, sequence);
   }
 
   private static String testEventJson(
       String runId, int sequence, String type, String testId, String testDisplayName) {
     return """
-        {"schemaVersion":"1.0","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:02Z","type":"%s","testId":"%s","testDisplayName":"%s"}"""
-        .formatted(runId, sequence, type, testId, testDisplayName);
+        {"schemaVersion":"%s","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:02Z","type":"%s","testId":"%s","testDisplayName":"%s"}"""
+        .formatted(
+            RunnerEvent.CURRENT_SCHEMA_VERSION, runId, sequence, type, testId, testDisplayName);
   }
 
   private static String runFinishedJson(String runId, int sequence) {
     return """
-        {"schemaVersion":"1.0","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:03Z","type":"RUN_FINISHED","runOutcome":"SUCCEEDED"}"""
-        .formatted(runId, sequence);
+        {"schemaVersion":"%s","runId":"%s","sequence":%d,"timestamp":"2026-09-01T10:00:03Z","type":"RUN_FINISHED","runOutcome":"SUCCEEDED"}"""
+        .formatted(RunnerEvent.CURRENT_SCHEMA_VERSION, runId, sequence);
   }
 }

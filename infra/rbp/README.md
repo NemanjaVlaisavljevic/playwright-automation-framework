@@ -14,10 +14,12 @@ Everything here integrates the upstream [restful-booker-platform](https://github
 | `localSutBuild` | Builds the 6 Java service jars (`auth`, `booking`, `room`, `report`, `branding`, `message`) inside a throwaway `maven:3.9-eclipse-temurin-26` container. Upstream's own Dockerfiles are copy-only — they `COPY target/*-exec.jar`, they do not build it — so this step has to run first. `assets` needs nothing extra; its own Dockerfile builds it with `npm` in a multi-stage build. |
 | `localSutUp` | Runs `localSutBuild`, then builds and starts all 7 services via `docker compose -f <upstream>/docker-compose.yml -f compose.override.yml up -d --build` |
 | `localSutHealth` | Depends on `localSutUp`. Polls every Java service's Spring Boot Actuator health endpoint (`http://localhost:<port>/<service>/actuator/health`) from the host until all report `UP`, then checks the `assets` front door itself (`GET /`, `GET /api/room/`, `GET /api/room/1`) — the actuator checks alone don't catch a proxy-only failure like the one below. No fixed blind startup delay (it polls on a short interval against a deadline instead); on any failure it dumps `compose ps`/`compose logs` (via the same logic as `localSutDiagnostics`, see below) before failing, to save a manual re-run for diagnosis. |
+| `localSutVerifyRunning` | The same health/front-door check as `localSutHealth`, sharing its actual check logic, but with **no** `dependsOn` on `localSutUp`/`localSutBuild`/`localSutPrepare` at all and much shorter timeouts (10s/10s vs. 5min/2min) — it never starts, stops, or rebuilds the stack, it only fails fast and clearly if the stack isn't already up. Intended as a precondition for `localJourneyTest` (and, via that, for the runner-service dashboard's own `LOCAL` environment), not for interactive/CI use where `localSutHealth`'s startup tolerance is what you actually want. On a failed check it still calls the same read-only `compose ps`/`logs` diagnostics `localSutHealth` does — that is a real Docker call, just never one that mutates the stack's lifecycle. |
 | `localSutDiagnostics` | Dumps `docker compose ps`/`logs` for the running stack to `build/diagnostics/rbp/` (and the console). Deliberately does **not** depend on `localSutUp`/`localSutBuild` — safe to run any time, including right after a CI failure, without rebuilding or restarting the stack it's diagnosing. |
 | `localSutDown` | Stops the stack |
 | `localSutReset` | Stops the stack and removes its containers/volumes (scoped to the `rbp-local-sut` compose project only) |
 | `localTest` | Depends on `localSutHealth` (which transitively brings up and builds the stack), then runs the full regression suite (including `mutation`) against `http://localhost` |
+| `localJourneyTest` | Depends on `localSutVerifyRunning` (**not** `localSutHealth`/`localSutUp` - assumes the stack is already up), runs the `journey` suite (read-only **and** `mutation`, unlike the public `journeyTest` task) against `http://localhost`. This is what the runner-service dashboard's `LOCAL` environment actually launches for `Suite.JOURNEY` - see "Dashboard `LOCAL` runs" below. |
 | `stabilityTest` | Brings the stack up once (via `localSutHealth`), then reruns just the test execution N times (`-PstabilityRuns=N`, default 10) against that same running stack, retaining each run's reports under `build/stability-results/run-<n>/`. Runs every iteration regardless of earlier failures, then reports a pass/fail summary and fails overall if any run failed. |
 
 Requires Docker Desktop (with Compose v2) and `git` on the machine running these tasks. The default `./gradlew test` never touches Docker or this stack — running against the local SUT is always an explicit, separate step.
@@ -39,6 +41,39 @@ Root cause, confirmed by inspecting the running container, not assumed: `assets/
 ### Resolved: the one remaining failure was a wrong test assertion, not a race
 
 The last failure after the patch above (a room-count mismatch between the API and the rendered UI) was first suspected to be a test-isolation race — `junit-platform.properties` runs test classes concurrently, and `mutation`-tagged tests aren't serialized against concurrently-running `read-only` tests observing the same shared room inventory, which sounded like a plausible cause. It wasn't: the homepage (`assets/src/components/home/Availability.tsx`) deliberately does `rooms.slice(0, 3)` — it only ever features the first 3 rooms, by design. The test (`InventoryParityTest`, since renamed `FeaturedRoomParityTest`) was asserting every API room must appear in the UI, which was simply the wrong expectation. Fixed the assertion (`HomePage.assertBookableRooms(List<Room>)`) to check the first-3 subset — count and exact `/reservation/{roomId}` path per room, in order — instead of the full inventory. No locking-model change was needed or made; there was no race to fix.
+
+## Dashboard `LOCAL` runs
+
+The runner-service dashboard's `Environment` dropdown offers `LOCAL` alongside `PUBLIC`, mapped to
+`Suite.JOURNEY` only (see `RunCatalog`). Unlike `PUBLIC`, a `LOCAL` run includes `mutation`-tagged
+journey tests (`BookingJourneyTest` and friends) - safely, because it writes only to this local
+stack, never the shared public target (`TestConfig#targetsSharedEnvironment()` naturally returns
+`false` for `http://localhost`, so `AutomationExtension`'s mutation guard passes with no
+`allowMutationAgainstSharedTarget` opt-in needed).
+
+**The runner-service never starts, stops, or manages this stack itself** - `localJourneyTest` only
+depends on `localSutVerifyRunning`, a fast health check with no `dependsOn` on `localSutUp`. A
+developer must bring the stack up by hand first. The full flow:
+
+1. `./gradlew.bat localSutHealth` - depends on `localSutUp`, so this one command fetches, builds,
+   and starts all 7 containers, then actually waits/polls until every service reports healthy before
+   returning (see the task table above). Slow (several minutes) the first time; the pinned commit's
+   checkout and Java jars are cached afterward. Plain `localSutUp` on its own only starts the
+   containers and returns immediately - it does not wait for them to become healthy, so running it
+   alone and moving straight to step 4 risks the fail-fast outcome described there for no reason.
+2. Start `runner-service` and the dashboard (`./gradlew.bat :runner-service:bootRun`, and
+   `npm run dev`/`npm run preview` in `runner-dashboard/`, or the packaged app once Faza D ships).
+3. In the dashboard, select `LOCAL` in the Environment dropdown - the Suite dropdown automatically
+   narrows to `JOURNEY` (there is no other `LOCAL` combination yet).
+4. Click **Run**. This launches `localJourneyTest` as a child Gradle process. Its own
+   `localSutVerifyRunning` precondition checks the stack's health first - **if the stack isn't
+   actually up (or not yet healthy), the run reaches a real Gradle process but fails fast at that
+   precondition, ending as a `FAILED` run whose process log names exactly which services weren't
+   healthy** (the same message `localSutVerifyRunning` would print on the command line) - this is
+   the expected, correct outcome if step 1 was skipped or the stack hasn't finished starting yet, not
+   a bug to chase.
+5. `./gradlew.bat localSutDown` (or `localSutReset` to also drop volumes) once done - the runner
+   never does this for you either.
 
 ## Public-host mutation guard
 

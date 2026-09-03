@@ -9,6 +9,7 @@ import dev.vlaisanem.automation.api.AuthClient;
 import dev.vlaisanem.automation.api.MessageClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.ManagedMessage;
 import dev.vlaisanem.automation.model.AuthCredentials;
 import dev.vlaisanem.automation.model.MessageRequest;
@@ -42,11 +43,19 @@ class AdminMessageManagementJourneyTest {
   @Test
   @DisplayName("Admin can view and delete a message through the admin UI (local target only)")
   void adminCanViewAndDeleteMessageThroughUi(
-      Page page, APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
+      Page page,
+      APIRequestContext request,
+      ApiContextFactory apiContexts,
+      TestConfig config,
+      Steps steps) {
     String token =
-        new AuthClient(request)
-            .loginAndReadToken(new AuthCredentials(config.adminUsername(), config.adminPassword()))
-            .token();
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                new AuthClient(request)
+                    .loginAndReadToken(
+                        new AuthCredentials(config.adminUsername(), config.adminPassword()))
+                    .token());
     MessageClient messages = new MessageClient(apiContexts.withCookie("token", token));
 
     String suffix = UUID.randomUUID().toString().substring(0, 8);
@@ -58,28 +67,47 @@ class AdminMessageManagementJourneyTest {
             "Portfolio admin message " + suffix,
             "This message was created by the opt-in portfolio automation suite to verify the"
                 + " admin message view/delete UI flow against the local target.");
-    try (ManagedMessage message = ManagedMessage.create(messages, requested)) {
-      new AdminLoginPage(page).open().loginAs(config.adminUsername(), config.adminPassword());
-      new AdminRoomsPage(page).assertLoaded();
-      AdminMessagesPage messagesPage = new AdminMessagesPage(page).open();
-      messagesPage.assertListed(requested.subject());
-      messagesPage
-          .open(requested.subject())
-          .assertMatches(
-              requested.name(),
-              requested.phone(),
-              requested.email(),
-              requested.subject(),
-              requested.description())
-          .close();
+    try (ManagedMessage message =
+        steps.call("Provision a message", () -> ManagedMessage.create(messages, requested))) {
+      steps.run(
+          "Log in to the admin UI",
+          () -> {
+            new AdminLoginPage(page).open().loginAs(config.adminUsername(), config.adminPassword());
+            new AdminRoomsPage(page).assertLoaded();
+          });
 
-      messagesPage.delete(requested.subject());
-      messagesPage.assertNotListed(requested.subject());
-      // Empirically confirmed against the running app (not assumed): GET on a deleted message
-      // returns 500, not 404 - same behavior already found and documented for rooms in
-      // AdminRoomManagementJourneyTest. Asserting the actual observed status, not the "should be"
-      // one, per this project's rule against hardening unverified assumptions.
-      assertThat(messages.getMessage(message.messageId()).status()).isEqualTo(500);
+      AdminMessagesPage messagesPage =
+          steps.call("Open the messages page", () -> new AdminMessagesPage(page).open());
+
+      steps.run("Verify message listed", () -> messagesPage.assertListed(requested.subject()));
+
+      steps.run(
+          "View and verify message detail",
+          () ->
+              messagesPage
+                  .open(requested.subject())
+                  .assertMatches(
+                      requested.name(),
+                      requested.phone(),
+                      requested.email(),
+                      requested.subject(),
+                      requested.description())
+                  .close());
+
+      steps.run(
+          "Delete the message through the admin UI",
+          () -> messagesPage.delete(requested.subject()));
+
+      steps.run(
+          "Verify message deletion",
+          () -> {
+            messagesPage.assertNotListed(requested.subject());
+            // Empirically confirmed against the running app (not assumed): GET on a deleted message
+            // returns 500, not 404 - same behavior already found and documented for rooms in
+            // AdminRoomManagementJourneyTest. Asserting the actual observed status, not the "should
+            // be" one, per this project's rule against hardening unverified assumptions.
+            assertThat(messages.getMessage(message.messageId()).status()).isEqualTo(500);
+          });
 
       message.release();
     }

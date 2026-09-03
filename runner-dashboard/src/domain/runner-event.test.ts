@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isTestLevelEvent, RunnerEvent } from "./runner-event";
+import {
+  CURRENT_SCHEMA_VERSION,
+  isTestLevelEvent,
+  RunnerEvent,
+} from "./runner-event";
 
 const runQueued = {
-  schemaVersion: "1.0",
+  schemaVersion: CURRENT_SCHEMA_VERSION,
   runId: "run-1",
   sequence: 1,
   timestamp: "2026-08-31T20:28:52.909407300Z",
@@ -10,7 +14,7 @@ const runQueued = {
 };
 
 const testStarted = {
-  schemaVersion: "1.0",
+  schemaVersion: CURRENT_SCHEMA_VERSION,
   runId: "run-1",
   sequence: 3,
   timestamp: "2026-08-31T20:28:53Z",

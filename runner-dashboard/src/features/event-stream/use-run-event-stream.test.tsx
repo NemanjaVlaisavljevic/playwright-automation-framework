@@ -4,6 +4,7 @@ import { StrictMode, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { createQueryClient } from "../../app/query-client";
 import { queryKeys } from "../../api/query-keys";
+import { CURRENT_SCHEMA_VERSION } from "../../domain/runner-event";
 import { FakeEventStreamClient } from "./fake-event-stream-client";
 import {
   applyRunnerEventMessage,
@@ -15,7 +16,7 @@ const RUN_ID = "run-1";
 
 function event(overrides: Record<string, unknown>): string {
   return JSON.stringify({
-    schemaVersion: "1.0",
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     runId: RUN_ID,
     timestamp: "2026-08-31T20:28:52Z",
     ...overrides,

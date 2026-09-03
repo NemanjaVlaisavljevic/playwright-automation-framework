@@ -1,11 +1,11 @@
 
   export namespace Schemas {
     // <Schemas>
-  export type CreateRunRequest = ({ environment: "PUBLIC", suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION") } & Record<string, unknown>)
-export type RunResponse = ({ runId: string, environment: "PUBLIC", suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string } & Record<string, unknown>)
+  export type CreateRunRequest = ({ environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE") } & Record<string, unknown>)
+export type RunResponse = ({ runId: string, environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string } & Record<string, unknown>)
 export type ProblemDetail = ({ type?: string, title: string, status: number, detail: string, instance: string, properties?: Record<string, unknown> } & Record<string, unknown>)
-export type ArtifactSummaryResponse = ({ artifactId: string, testId: string, testDisplayName: string, type: ("SCREENSHOT" | "TRACE" | "VIDEO"), mediaType: string, sizeBytes: number, createdAt: string, downloadUrl: string } & Record<string, unknown>)
-export type EnvironmentCapabilities = ({ name: "PUBLIC", suites: Array<("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION")> } & Record<string, unknown>)
+export type ArtifactSummaryResponse = ({ artifactId: string, testId: string, testDisplayName: string, stepId?: string, type: ("SCREENSHOT" | "TRACE" | "VIDEO"), mediaType: string, sizeBytes: number, createdAt: string, downloadUrl: string } & Record<string, unknown>)
+export type EnvironmentCapabilities = ({ name: ("PUBLIC" | "LOCAL"), suites: Array<("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE")> } & Record<string, unknown>)
 export type CapabilitiesResponse = ({ apiVersion: string, eventSchemaVersion: string, environments: Array<EnvironmentCapabilities> } & Record<string, unknown>)
 
     // </Schemas>

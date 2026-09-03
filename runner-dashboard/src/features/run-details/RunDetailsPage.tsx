@@ -1,37 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
-import {
-  cancelRun,
-  getRun,
-  listRunArtifacts,
-  type ArtifactSummaryResponse,
-} from "../../api/runner-api";
+import { cancelRun, getRun, listRunArtifacts } from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
 import { RunnerApiError } from "../../api/problem-detail";
 import { Alert } from "../../components/ui/Alert";
 import { Button } from "../../components/ui/Button";
 import { cx } from "../../components/ui/cx";
-import { EmptyState } from "../../components/ui/EmptyState";
 import { LoadingSkeleton } from "../../components/ui/LoadingSkeleton";
-import { MetricCard } from "../../components/ui/MetricCard";
 import { PageHeader } from "../../components/ui/PageHeader";
-import { ProgressBar } from "../../components/ui/ProgressBar";
-import { StatusBadge } from "../../components/ui/StatusBadge";
-import { formatBytes } from "../../domain/bytes";
-import { formatLocalDateTime } from "../../domain/datetime";
-import { formatDuration, runDurationMs } from "../../domain/duration";
+import { runDurationMs } from "../../domain/duration";
 import { isTerminalRunStatus } from "../../domain/run";
 import type { EventStreamClient } from "../event-stream/event-stream-client";
-import type {
-  RunEventStreamStatus,
-  TestExecution,
-  TestExecutionStatus,
-} from "../event-stream/run-event-reducer";
+import type { RunEventStreamStatus } from "../event-stream/run-event-reducer";
 import {
   type ConnectionState,
   useRunEventStream,
 } from "../event-stream/use-run-event-stream";
+import { ArtifactsSection } from "./ArtifactsSection";
+import { CopyRunIdButton } from "./CopyRunIdButton";
+import { RunProgress } from "./RunProgress";
+import { RunSummary } from "./RunSummary";
+import { buildRunDetailsViewModel } from "./run-details-view-model";
+import { TestResultsTable } from "./TestResultsTable";
 import styles from "./RunDetailsPage.module.css";
 
 export interface RunDetailsPageProps {
@@ -130,16 +121,46 @@ function RunDetails({
     enabled: run.isSuccess,
   });
   const runIsTerminal = run.isSuccess && isTerminalRunStatus(run.data.status);
-  // Faza A ships REST-only artifact retrieval, with no ARTIFACT_CREATED live event yet (deferred to
-  // the Step API / Event V2 phase) - so a fresh capture during a still-running test can't be pushed
-  // to the dashboard. Two distinct, non-exclusive signals both mean "every artifact for this run is
-  // now guaranteed to have been captured and manifested" - the normal path (`RUN_FINISHED` arrived
-  // over SSE, `connectionState` reaches `"CLOSED"`) and the REST fallback path above (a stream that
-  // broke before ever reaching `RUN_FINISHED`, `runIsTerminal` instead). Kept as two separate
+
+  // The SSE stream itself already knows a run is over, and exactly when, the instant it processes
+  // RUN_FINISHED - preferred over the REST `RunResponse` here so reconciliation (a test/step still
+  // RUNNING once the run is terminal - see `run-details-view-model.ts`) does not depend on a REST
+  // refetch succeeding or being fresh. `run.data` is the fallback for when the stream itself never
+  // reached RUN_FINISHED (e.g. it broke into a permanent PROTOCOL_ERROR beforehand), which is
+  // exactly the situation the REST-polling `refetchInterval` above exists to recover from anyway.
+  const viewModel = buildRunDetailsViewModel({
+    testsById: streamState.testsById,
+    artifacts: artifacts.isSuccess ? artifacts.data : [],
+    runStatus: streamState.runOutcome ?? run.data?.status,
+    runFinishedAt: streamState.runFinishedAt ?? run.data?.finishedAt,
+  });
+  const tests = viewModel.tests;
+
+  // There is still no live ARTIFACT_CREATED event (that remains a real future-phase concern - a
+  // manifest write racing an in-flight listRunArtifacts response, precise per-artifact timing -
+  // deliberately not solved here) - so this can't push a fresh capture the instant it's written.
+  // But `AutomationExtension`'s `captureFailure` already runs (and finishes writing the manifest)
+  // before the JUnit listener emits that same test's own terminal `TEST_*` event, so a `TEST_FAILED`
+  // or `TEST_ABORTED` arriving over SSE is itself a reliable "this test's own artifacts, if any, are
+  // now on disk" signal - good enough to stop making a viewer wait for the whole run to finish
+  // before seeing a screenshot/trace for a test that already failed. Three distinct, non-exclusive
+  // signals now trigger a refetch: the normal path (`RUN_FINISHED` arrived over SSE, `connectionState`
+  // reaches `"CLOSED"`), the REST fallback path (a stream that broke before ever reaching
+  // `RUN_FINISHED`, `runIsTerminal` instead), and this early per-test-failure path. Kept as separate
   // effects, each gated on its own path being the one actually responsible - `connectionState`
   // trivially implies `runIsTerminal` will *also* eventually become true once the resulting
   // invalidate's refetch resolves, and a single combined effect would then fire the same
   // invalidation twice (once from each signal) for the one normal-path finish, wasting a request.
+  const failedOrAbortedTestCount = tests.filter(
+    (test) => test.status === "FAILED" || test.status === "ABORTED",
+  ).length;
+  useEffect(() => {
+    if (failedOrAbortedTestCount > 0) {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.runArtifacts(runId),
+      });
+    }
+  }, [failedOrAbortedTestCount, runId, queryClient]);
   useEffect(() => {
     if (connectionState === "CLOSED") {
       void queryClient.invalidateQueries({
@@ -155,13 +176,7 @@ function RunDetails({
     }
   }, [connectionState, runIsTerminal, runId, queryClient]);
 
-  const tests = Array.from(streamState.testsById.values()).sort(
-    (a, b) => a.firstSequence - b.firstSequence,
-  );
-  const counts = countByStatus(tests.map((test) => test.status));
-  const completed = tests.length - counts.RUNNING;
   const runDuration = run.isSuccess ? runDurationMs(run.data) : undefined;
-
   const canCancel = run.isSuccess && !isTerminalRunStatus(run.data.status);
 
   return (
@@ -173,15 +188,18 @@ function RunDetails({
           </>
         }
         actions={
-          canCancel ? (
-            <Button
-              variant="danger"
-              onClick={() => cancel.mutate()}
-              disabled={cancel.isPending}
-            >
-              Cancel
-            </Button>
-          ) : undefined
+          <>
+            <CopyRunIdButton runId={runId} />
+            {canCancel && (
+              <Button
+                variant="danger"
+                onClick={() => cancel.mutate()}
+                disabled={cancel.isPending}
+              >
+                Cancel
+              </Button>
+            )}
+          </>
         }
       />
 
@@ -211,90 +229,25 @@ function RunDetails({
         </div>
       )}
       {run.isSuccess && (
-        <div className={styles.section}>
-          <dl className={styles.details}>
-            <dt>Status</dt>
-            <dd>
-              <StatusBadge status={run.data.status} />
-            </dd>
-            <dt>Suite</dt>
-            <dd>{run.data.suite}</dd>
-            <dt>Environment</dt>
-            <dd>{run.data.environment}</dd>
-            <dt>Requested</dt>
-            <dd>{formatLocalDateTime(run.data.requestedAt)}</dd>
-            {run.data.finishedAt !== undefined && (
-              <>
-                <dt>Finished</dt>
-                <dd>{formatLocalDateTime(run.data.finishedAt)}</dd>
-              </>
-            )}
-            {runDuration !== undefined && (
-              <>
-                <dt>Duration</dt>
-                <dd>{formatDuration(runDuration)}</dd>
-              </>
-            )}
-          </dl>
-          {cancel.isError && (
-            <Alert>
-              Could not cancel run: {describeApiError(cancel.error)}
-            </Alert>
-          )}
-          {run.data.startedAt !== undefined && (
-            <a className={styles.downloadLink} href={run.data.processLogUrl}>
-              Download log
-            </a>
-          )}
-        </div>
+        <RunSummary
+          run={run.data}
+          runDuration={runDuration}
+          cancelErrorMessage={
+            cancel.isError ? describeApiError(cancel.error) : undefined
+          }
+          hasIntegrityWarning={viewModel.hasIncompleteTestsDespiteSucceededRun}
+        />
       )}
 
-      <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>Progress</h2>
-        <div className={styles.metrics}>
-          <MetricCard label="Total" value={tests.length} />
-          <MetricCard label="Running" value={counts.RUNNING} tone="info" />
-          <MetricCard label="Passed" value={counts.PASSED} tone="success" />
-          <MetricCard label="Failed" value={counts.FAILED} tone="danger" />
-          <MetricCard label="Skipped" value={counts.SKIPPED} />
-          <MetricCard label="Aborted" value={counts.ABORTED} tone="warning" />
-        </div>
-        {tests.length > 0 && (
-          <div className={styles.progress}>
-            <ProgressBar
-              value={(completed / tests.length) * 100}
-              label={`${completed} of ${tests.length} tests complete`}
-            />
-          </div>
-        )}
-      </div>
+      <RunProgress
+        totalCount={tests.length}
+        completedCount={viewModel.completedCount}
+        counts={viewModel.counts}
+      />
 
       <div className={styles.section}>
         <h2 className={styles.sectionTitle}>Tests</h2>
-        {tests.length === 0 ? (
-          <EmptyState title="No tests started yet." />
-        ) : (
-          <div className={styles.tableScroll}>
-            <table className={styles.table}>
-              <caption className="visually-hidden">
-                Tests for run {runId}
-              </caption>
-              <thead>
-                <tr>
-                  <th>Status</th>
-                  <th>Test</th>
-                  <th>Duration</th>
-                  <th>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tests.map((test) => (
-                  <TestRow key={test.testId} test={test} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <TestResultsTable runId={runId} tests={tests} />
       </div>
 
       {artifacts.isError && (
@@ -307,107 +260,11 @@ function RunDetails({
       {artifacts.isSuccess && artifacts.data.length > 0 && (
         <div className={styles.section}>
           <h2 className={styles.sectionTitle}>Artifacts</h2>
-          <div className={styles.tableScroll}>
-            <table className={styles.table}>
-              <caption className="visually-hidden">
-                Artifacts for run {runId}
-              </caption>
-              <thead>
-                <tr>
-                  <th>Test</th>
-                  <th>Type</th>
-                  <th>Size</th>
-                  <th>Artifact</th>
-                </tr>
-              </thead>
-              <tbody>
-                {artifacts.data.map((artifact) => (
-                  <ArtifactRow key={artifact.artifactId} artifact={artifact} />
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ArtifactsSection runId={runId} artifacts={artifacts.data} />
         </div>
       )}
     </>
   );
-}
-
-function ArtifactRow({ artifact }: { artifact: ArtifactSummaryResponse }) {
-  return (
-    <tr>
-      <td>{artifact.testDisplayName}</td>
-      <td>{artifactTypeLabel(artifact.type)}</td>
-      <td>{formatBytes(artifact.sizeBytes)}</td>
-      <td>
-        {artifact.type === "SCREENSHOT" ? (
-          <a href={artifact.downloadUrl} target="_blank" rel="noreferrer">
-            <img
-              src={artifact.downloadUrl}
-              alt={`Screenshot for ${artifact.testDisplayName}`}
-              className={styles.artifactThumbnail}
-              loading="lazy"
-              decoding="async"
-            />
-          </a>
-        ) : (
-          <a className={styles.downloadLink} href={artifact.downloadUrl}>
-            Download {artifactTypeLabel(artifact.type).toLowerCase()}
-          </a>
-        )}
-      </td>
-    </tr>
-  );
-}
-
-function artifactTypeLabel(type: ArtifactSummaryResponse["type"]): string {
-  switch (type) {
-    case "SCREENSHOT":
-      return "Screenshot";
-    case "TRACE":
-      return "Trace";
-    case "VIDEO":
-      return "Video";
-  }
-}
-
-function TestRow({ test }: { test: TestExecution }) {
-  const durationMs = runDurationMs(test);
-  return (
-    <tr className={test.status === "FAILED" ? styles.failedRow : undefined}>
-      <td>
-        <StatusBadge status={test.status} />
-      </td>
-      <td>{test.testDisplayName}</td>
-      <td>{durationMs !== undefined ? formatDuration(durationMs) : "—"}</td>
-      <td>
-        {test.detail !== undefined ? (
-          <details>
-            <summary>Detail</summary>
-            <pre className={styles.detailText}>{test.detail}</pre>
-          </details>
-        ) : (
-          "—"
-        )}
-      </td>
-    </tr>
-  );
-}
-
-function countByStatus(
-  statuses: TestExecutionStatus[],
-): Record<TestExecutionStatus, number> {
-  const counts: Record<TestExecutionStatus, number> = {
-    RUNNING: 0,
-    PASSED: 0,
-    FAILED: 0,
-    ABORTED: 0,
-    SKIPPED: 0,
-  };
-  for (const status of statuses) {
-    counts[status] += 1;
-  }
-  return counts;
 }
 
 function connectionTone(

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.microsoft.playwright.Page;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.ui.pages.HomePage;
 import io.qameta.allure.Epic;
 import io.qameta.allure.Feature;
@@ -23,9 +24,11 @@ class HomePageTest {
 
   @Test
   @DisplayName("Guest can see at least one bookable room")
-  void guestCanDiscoverBookableRooms(Page page) {
-    HomePage homePage = new HomePage(page).open().assertLoaded();
+  void guestCanDiscoverBookableRooms(Page page, Steps steps) {
+    HomePage homePage = steps.call("Open homepage", () -> new HomePage(page).open().assertLoaded());
 
-    assertThat(homePage.bookableRoomCount()).isPositive();
+    steps.run(
+        "Verify at least one bookable room",
+        () -> assertThat(homePage.bookableRoomCount()).isPositive());
   }
 }

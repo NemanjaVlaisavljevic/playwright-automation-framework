@@ -10,6 +10,7 @@ import dev.vlaisanem.automation.api.BookingClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.BookingTestData;
 import dev.vlaisanem.automation.data.ManagedBooking;
 import dev.vlaisanem.automation.data.ManagedRoom;
@@ -38,28 +39,45 @@ class BookingCrudApiTest {
   @Test
   @DisplayName("Admin can create, read, update, and delete an isolated booking")
   void adminCanManageBookingLifecycle(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
     AuthClient auth = new AuthClient(request);
     String token =
-        auth.loginAndReadToken(new AuthCredentials(config.adminUsername(), config.adminPassword()))
-            .token();
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                auth.loginAndReadToken(
+                        new AuthCredentials(config.adminUsername(), config.adminPassword()))
+                    .token());
     BookingClient anonymousBookings = new BookingClient(request);
     APIRequestContext adminRequest = apiContexts.withCookie("token", token);
     BookingClient authBookings = new BookingClient(adminRequest);
     RoomClient rooms = new RoomClient(adminRequest);
 
-    try (ManagedRoom room = ManagedRoom.create(rooms)) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(rooms))) {
       CreateBookingRequest requested = BookingTestData.uniqueBooking(room.roomId());
       try (ManagedBooking booking =
-          ManagedBooking.create(anonymousBookings, authBookings, requested)) {
-        BookingResponse created = booking.created();
-        assertThat(created.roomId()).isEqualTo(room.roomId());
-        assertThat(created.lastName()).isEqualTo(requested.lastName());
-        assertThat(created.bookingDates()).isEqualTo(requested.bookingDates());
+          steps.call(
+              "Provision an existing booking",
+              () -> ManagedBooking.create(anonymousBookings, authBookings, requested))) {
+        steps.run(
+            "Verify created booking",
+            () -> {
+              BookingResponse created = booking.created();
+              assertThat(created.roomId()).isEqualTo(room.roomId());
+              assertThat(created.lastName()).isEqualTo(requested.lastName());
+              assertThat(created.bookingDates()).isEqualTo(requested.bookingDates());
+            });
 
-        ApiResult read = authBookings.getBooking(booking.bookingId());
-        assertThat(read.status()).isEqualTo(200);
-        assertThat(read.bodyAs(BookingResponse.class).firstName()).isEqualTo(requested.firstName());
+        ApiResult read =
+            steps.call("Read the booking", () -> authBookings.getBooking(booking.bookingId()));
+        steps.run(
+            "Verify read booking",
+            () -> {
+              assertThat(read.status()).isEqualTo(200);
+              assertThat(read.bodyAs(BookingResponse.class).firstName())
+                  .isEqualTo(requested.firstName());
+            });
 
         BookingDates newDates =
             new BookingDates(
@@ -75,18 +93,28 @@ class BookingCrudApiTest {
                 requested.email(),
                 requested.phone());
 
-        ApiResult update = authBookings.updateBooking(booking.bookingId(), updateRequest);
-        assertThat(update.status()).isEqualTo(200);
-        UpdatedBookingResponse updated = update.bodyAs(UpdatedBookingResponse.class);
-        assertThat(updated.booking().lastName()).isEqualTo(updateRequest.lastName());
-        assertThat(updated.booking().bookingDates()).isEqualTo(newDates);
+        ApiResult update =
+            steps.call(
+                "Update the booking",
+                () -> authBookings.updateBooking(booking.bookingId(), updateRequest));
+        steps.run(
+            "Verify updated booking",
+            () -> {
+              assertThat(update.status()).isEqualTo(200);
+              UpdatedBookingResponse updated = update.bodyAs(UpdatedBookingResponse.class);
+              assertThat(updated.booking().lastName()).isEqualTo(updateRequest.lastName());
+              assertThat(updated.booking().bookingDates()).isEqualTo(newDates);
+            });
 
-        assertThat(
-                authBookings
-                    .getBooking(booking.bookingId())
-                    .bodyAs(BookingResponse.class)
-                    .lastName())
-            .isEqualTo(updateRequest.lastName());
+        steps.run(
+            "Verify updated booking persists on re-read",
+            () ->
+                assertThat(
+                        authBookings
+                            .getBooking(booking.bookingId())
+                            .bodyAs(BookingResponse.class)
+                            .lastName())
+                    .isEqualTo(updateRequest.lastName()));
       }
     }
   }

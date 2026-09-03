@@ -10,6 +10,7 @@ import dev.vlaisanem.automation.api.BookingClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.ManagedBooking;
 import dev.vlaisanem.automation.data.ManagedRoom;
 import dev.vlaisanem.automation.model.AuthCredentials;
@@ -40,33 +41,54 @@ class BookingDateRulesApiTest {
   @Test
   @DisplayName("A checkout date before the checkin date is rejected")
   void checkoutBeforeCheckinIsRejected(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       LocalDate checkout = futureDate(0);
       LocalDate checkin = checkout.plusDays(5);
       ApiResult response =
-          clients.anonymousBookings().createBooking(booking(room.roomId(), checkin, checkout));
+          steps.call(
+              "Attempt a booking with checkout before checkin",
+              () ->
+                  clients
+                      .anonymousBookings()
+                      .createBooking(booking(room.roomId(), checkin, checkout)));
 
-      assertRejectedAndCleanUpIfNecessary(response, clients.adminBookings());
-      assertThat(response.bodyAs(BookingFailureResponse.class).error())
-          .isEqualTo("Failed to create booking");
+      steps.run(
+          "Verify booking rejected",
+          () -> assertRejectedAndCleanUpIfNecessary(response, clients.adminBookings()));
+      steps.run(
+          "Verify rejection reason",
+          () ->
+              assertThat(response.bodyAs(BookingFailureResponse.class).error())
+                  .isEqualTo("Failed to create booking"));
     }
   }
 
   @Test
   @DisplayName("A zero-night stay is rejected")
   void zeroNightStayIsRejected(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       LocalDate sameDay = futureDate(10);
       ApiResult response =
-          clients.anonymousBookings().createBooking(booking(room.roomId(), sameDay, sameDay));
+          steps.call(
+              "Attempt a zero-night booking",
+              () ->
+                  clients
+                      .anonymousBookings()
+                      .createBooking(booking(room.roomId(), sameDay, sameDay)));
 
-      assertRejectedAndCleanUpIfNecessary(response, clients.adminBookings());
+      steps.run(
+          "Verify booking rejected",
+          () -> assertRejectedAndCleanUpIfNecessary(response, clients.adminBookings()));
     }
   }
 
@@ -75,18 +97,27 @@ class BookingDateRulesApiTest {
       "Known gap: the API accepts a booking dated entirely in the past instead of rejecting it")
   @Tag("known-defect")
   void pastDatedBookingIsAcceptedInsteadOfRejected(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       LocalDate checkin = LocalDate.now(ZoneOffset.UTC).minusYears(5);
       CreateBookingRequest pastBooking = booking(room.roomId(), checkin, checkin.plusDays(1));
-      ApiResult response = clients.anonymousBookings().createBooking(pastBooking);
+      ApiResult response =
+          steps.call(
+              "Create a booking dated entirely in the past",
+              () -> clients.anonymousBookings().createBooking(pastBooking));
 
       try (ManagedBooking created =
           ManagedBooking.trackIfCreated(clients.adminBookings(), response)) {
-        assertThat(response.status()).isEqualTo(201);
-        assertThat(created).isNotNull();
+        steps.run(
+            "Verify booking was accepted instead of rejected (known gap)",
+            () -> {
+              assertThat(response.status()).isEqualTo(201);
+              assertThat(created).isNotNull();
+            });
       }
     }
   }
@@ -94,27 +125,47 @@ class BookingDateRulesApiTest {
   @Test
   @DisplayName("Overlapping date ranges for the same room are rejected")
   void overlappingBookingsAreRejected(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       LocalDate originalCheckin = futureDate(20);
       CreateBookingRequest original =
           booking(room.roomId(), originalCheckin, originalCheckin.plusDays(5));
       try (ManagedBooking existing =
-          ManagedBooking.create(clients.anonymousBookings(), clients.adminBookings(), original)) {
-        assertThat(existing.bookingId()).isPositive();
-        ApiResult exactOverlap = clients.anonymousBookings().createBooking(original);
-        assertRejectedAndCleanUpIfNecessary(exactOverlap, clients.adminBookings());
+          steps.call(
+              "Provision an existing booking",
+              () ->
+                  ManagedBooking.create(
+                      clients.anonymousBookings(), clients.adminBookings(), original))) {
+        steps.run(
+            "Verify existing booking created", () -> assertThat(existing.bookingId()).isPositive());
+
+        ApiResult exactOverlap =
+            steps.call(
+                "Attempt an exact-overlap booking",
+                () -> clients.anonymousBookings().createBooking(original));
+        steps.run(
+            "Verify exact overlap rejected",
+            () -> assertRejectedAndCleanUpIfNecessary(exactOverlap, clients.adminBookings()));
 
         ApiResult partialOverlap =
-            clients
-                .anonymousBookings()
-                .createBooking(
-                    booking(
-                        room.roomId(), originalCheckin.plusDays(2), originalCheckin.plusDays(8)));
+            steps.call(
+                "Attempt a partial-overlap booking",
+                () ->
+                    clients
+                        .anonymousBookings()
+                        .createBooking(
+                            booking(
+                                room.roomId(),
+                                originalCheckin.plusDays(2),
+                                originalCheckin.plusDays(8))));
 
-        assertRejectedAndCleanUpIfNecessary(partialOverlap, clients.adminBookings());
+        steps.run(
+            "Verify partial overlap rejected",
+            () -> assertRejectedAndCleanUpIfNecessary(partialOverlap, clients.adminBookings()));
       }
     }
   }
@@ -122,23 +173,39 @@ class BookingDateRulesApiTest {
   @Test
   @DisplayName("Adjacent bookings sharing a checkout/checkin boundary day are both accepted")
   void adjacentBookingsShareBoundaryDay(
-      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
-    TestClients clients = clients(request, apiContexts, config);
+      APIRequestContext request, ApiContextFactory apiContexts, TestConfig config, Steps steps) {
+    TestClients clients =
+        steps.call("Authenticate as admin", () -> clients(request, apiContexts, config));
 
-    try (ManagedRoom room = ManagedRoom.create(clients.rooms())) {
+    try (ManagedRoom room =
+        steps.call("Provision an available room", () -> ManagedRoom.create(clients.rooms()))) {
       LocalDate firstCheckin = futureDate(40);
       CreateBookingRequest first = booking(room.roomId(), firstCheckin, firstCheckin.plusDays(5));
       try (ManagedBooking firstBooking =
-          ManagedBooking.create(clients.anonymousBookings(), clients.adminBookings(), first)) {
-        assertThat(firstBooking.bookingId()).isPositive();
+          steps.call(
+              "Provision the first booking",
+              () ->
+                  ManagedBooking.create(
+                      clients.anonymousBookings(), clients.adminBookings(), first))) {
+        steps.run(
+            "Verify first booking created",
+            () -> assertThat(firstBooking.bookingId()).isPositive());
+
         CreateBookingRequest adjacent =
             booking(room.roomId(), firstCheckin.plusDays(5), firstCheckin.plusDays(10));
-        ApiResult adjacentResponse = clients.anonymousBookings().createBooking(adjacent);
+        ApiResult adjacentResponse =
+            steps.call(
+                "Create the adjacent booking",
+                () -> clients.anonymousBookings().createBooking(adjacent));
 
         try (ManagedBooking adjacentBooking =
             ManagedBooking.trackIfCreated(clients.adminBookings(), adjacentResponse)) {
-          assertThat(adjacentResponse.status()).isEqualTo(201);
-          assertThat(adjacentBooking).isNotNull();
+          steps.run(
+              "Verify adjacent booking accepted",
+              () -> {
+                assertThat(adjacentResponse.status()).isEqualTo(201);
+                assertThat(adjacentBooking).isNotNull();
+              });
         }
       }
     }

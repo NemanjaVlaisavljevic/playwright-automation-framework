@@ -4,18 +4,23 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * V1 event envelope shared between the JUnit listener and runner service. The runner service owns
- * run-level lifecycle events; the listener owns test-level execution events. The contract is
- * deliberately framework-agnostic (no serialization annotations), so each side configures its own
- * JSON mapper.
+ * Event envelope shared between the JUnit listener, the {@code Steps} API, and the runner service,
+ * schema version 1.1. The runner service owns run-level lifecycle events; the listener owns
+ * test-level execution events; the {@code Steps} API (main automation suite) owns step-level
+ * events. The contract is deliberately framework-agnostic (no serialization annotations), so each
+ * side configures its own JSON mapper.
  *
  * @param runOutcome terminal process outcome; required for {@link EventType#RUN_FINISHED} and
  *     absent for every other event type.
- * @param testId JUnit's {@code TestIdentifier.getUniqueId()}; required for test-level types, absent
- *     for every run-level type ({@link EventType#RUN_QUEUED}, {@link EventType#RUN_STARTED}, {@link
- *     EventType#RUN_FINISHED}).
- * @param testDisplayName {@code TestIdentifier.getDisplayName()}; required for test-level types and
- *     absent for run-level types.
+ * @param testId JUnit's {@code TestIdentifier.getUniqueId()}; required for test-level and
+ *     step-level types, absent for every run-level type ({@link EventType#RUN_QUEUED}, {@link
+ *     EventType#RUN_STARTED}, {@link EventType#RUN_FINISHED}).
+ * @param testDisplayName {@code TestIdentifier.getDisplayName()}; required for test-level and
+ *     step-level types, absent for run-level types.
+ * @param stepId opaque identifier for one step within a test, scoped to that test; required for
+ *     step-level types, absent for every other event type.
+ * @param stepName human-readable step name; required for step-level types, absent for every other
+ *     event type.
  * @param detail failure message, skip reason, or {@code null} when not applicable.
  */
 public record RunnerEvent(
@@ -27,9 +32,11 @@ public record RunnerEvent(
     RunOutcome runOutcome,
     String testId,
     String testDisplayName,
+    String stepId,
+    String stepName,
     String detail) {
 
-  public static final String CURRENT_SCHEMA_VERSION = "1.0";
+  public static final String CURRENT_SCHEMA_VERSION = "1.1";
 
   public RunnerEvent {
     if (schemaVersion == null || schemaVersion.isBlank()) {
@@ -48,15 +55,36 @@ public record RunnerEvent(
     } else if (runOutcome != null) {
       throw new IllegalArgumentException(type + " must not carry a runOutcome");
     }
-    if (type.isTestLevel()) {
+    if (type.isStepLevel()) {
       if (testId == null || testId.isBlank()) {
         throw new IllegalArgumentException(type + " requires a non-blank testId");
       }
       if (testDisplayName == null || testDisplayName.isBlank()) {
         throw new IllegalArgumentException(type + " requires a non-blank testDisplayName");
       }
-    } else if (testId != null || testDisplayName != null) {
-      throw new IllegalArgumentException(type + " must not carry a test identifier");
+      if (stepId == null || stepId.isBlank()) {
+        throw new IllegalArgumentException(type + " requires a non-blank stepId");
+      }
+      if (stepName == null || stepName.isBlank()) {
+        throw new IllegalArgumentException(type + " requires a non-blank stepName");
+      }
+    } else if (type.isTestLevel()) {
+      if (testId == null || testId.isBlank()) {
+        throw new IllegalArgumentException(type + " requires a non-blank testId");
+      }
+      if (testDisplayName == null || testDisplayName.isBlank()) {
+        throw new IllegalArgumentException(type + " requires a non-blank testDisplayName");
+      }
+      if (stepId != null || stepName != null) {
+        throw new IllegalArgumentException(type + " must not carry a step identifier");
+      }
+    } else {
+      if (testId != null || testDisplayName != null) {
+        throw new IllegalArgumentException(type + " must not carry a test identifier");
+      }
+      if (stepId != null || stepName != null) {
+        throw new IllegalArgumentException(type + " must not carry a step identifier");
+      }
     }
   }
 
@@ -70,6 +98,8 @@ public record RunnerEvent(
         null,
         null,
         null,
+        null,
+        null,
         null);
   }
 
@@ -80,6 +110,8 @@ public record RunnerEvent(
         sequence,
         timestamp,
         EventType.RUN_STARTED,
+        null,
+        null,
         null,
         null,
         null,
@@ -97,6 +129,8 @@ public record RunnerEvent(
         runOutcome,
         null,
         null,
+        null,
+        null,
         detail);
   }
 
@@ -111,6 +145,8 @@ public record RunnerEvent(
         null,
         testId,
         testDisplayName,
+        null,
+        null,
         null);
   }
 
@@ -125,6 +161,8 @@ public record RunnerEvent(
         null,
         testId,
         testDisplayName,
+        null,
+        null,
         null);
   }
 
@@ -144,6 +182,8 @@ public record RunnerEvent(
         null,
         testId,
         testDisplayName,
+        null,
+        null,
         failureMessage);
   }
 
@@ -163,6 +203,8 @@ public record RunnerEvent(
         null,
         testId,
         testDisplayName,
+        null,
+        null,
         reason);
   }
 
@@ -182,6 +224,75 @@ public record RunnerEvent(
         null,
         testId,
         testDisplayName,
+        null,
+        null,
         reason);
+  }
+
+  public static RunnerEvent stepStarted(
+      String runId,
+      long sequence,
+      Instant timestamp,
+      String testId,
+      String testDisplayName,
+      String stepId,
+      String stepName) {
+    return new RunnerEvent(
+        CURRENT_SCHEMA_VERSION,
+        runId,
+        sequence,
+        timestamp,
+        EventType.STEP_STARTED,
+        null,
+        testId,
+        testDisplayName,
+        stepId,
+        stepName,
+        null);
+  }
+
+  public static RunnerEvent stepPassed(
+      String runId,
+      long sequence,
+      Instant timestamp,
+      String testId,
+      String testDisplayName,
+      String stepId,
+      String stepName) {
+    return new RunnerEvent(
+        CURRENT_SCHEMA_VERSION,
+        runId,
+        sequence,
+        timestamp,
+        EventType.STEP_PASSED,
+        null,
+        testId,
+        testDisplayName,
+        stepId,
+        stepName,
+        null);
+  }
+
+  public static RunnerEvent stepFailed(
+      String runId,
+      long sequence,
+      Instant timestamp,
+      String testId,
+      String testDisplayName,
+      String stepId,
+      String stepName,
+      String failureMessage) {
+    return new RunnerEvent(
+        CURRENT_SCHEMA_VERSION,
+        runId,
+        sequence,
+        timestamp,
+        EventType.STEP_FAILED,
+        null,
+        testId,
+        testDisplayName,
+        stepId,
+        stepName,
+        failureMessage);
   }
 }

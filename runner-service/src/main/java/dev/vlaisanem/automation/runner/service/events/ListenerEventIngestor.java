@@ -58,10 +58,11 @@ import java.util.concurrent.atomic.AtomicReference;
  * finalizing the run.
  *
  * <p>A malformed line, a source-sequence gap or duplicate, an event for the wrong runId or of a
- * non-{@code TEST_*} type, an unsupported {@code schemaVersion}, or one of the marker-consistency
- * violations above instead stops ingestion immediately with {@link IngestionResult#valid() valid()
- * == false}: once the raw stream's own internal consistency cannot be trusted, forwarding anything
- * further into the canonical journal would just be propagating corruption.
+ * type that is neither {@code TEST_*} nor {@code STEP_*}, an unsupported {@code schemaVersion}, or
+ * one of the marker-consistency violations above instead stops ingestion immediately with {@link
+ * IngestionResult#valid() valid() == false}: once the raw stream's own internal consistency cannot
+ * be trusted, forwarding anything further into the canonical journal would just be propagating
+ * corruption.
  */
 public final class ListenerEventIngestor {
 
@@ -317,14 +318,14 @@ public final class ListenerEventIngestor {
               event.sequence(),
               "runId mismatch: expected " + runId + " but was " + event.runId()));
     }
-    if (!event.type().isTestLevel()) {
+    if (!event.type().isTestLevel() && !event.type().isStepLevel()) {
       throw new RawEventValidationException(
           diagnostic(
               lineNumber,
               lineStartOffset,
               lastSourceSequence + 1,
               event.sequence(),
-              "unexpected non-test-level event type " + event.type()));
+              "unexpected non-test-level, non-step-level event type " + event.type()));
     }
     long expectedSequence = lastSourceSequence + 1;
     if (event.sequence() != expectedSequence) {
@@ -431,6 +432,8 @@ public final class ListenerEventIngestor {
         raw.runOutcome(),
         raw.testId(),
         raw.testDisplayName(),
+        raw.stepId(),
+        raw.stepName(),
         raw.detail());
   }
 

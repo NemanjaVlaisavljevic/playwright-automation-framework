@@ -9,6 +9,7 @@ import dev.vlaisanem.automation.api.AuthClient;
 import dev.vlaisanem.automation.api.RoomClient;
 import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
+import dev.vlaisanem.automation.core.Steps;
 import dev.vlaisanem.automation.data.ManagedRoom;
 import dev.vlaisanem.automation.data.RoomTestData;
 import dev.vlaisanem.automation.model.AuthCredentials;
@@ -37,49 +38,94 @@ class AdminRoomManagementJourneyTest {
   @Test
   @DisplayName("Admin can create, edit, and delete a room through the admin UI")
   void adminCanManageRoomLifecycleThroughUi(
-      Page page, APIRequestContext request, ApiContextFactory apiContexts, TestConfig config) {
+      Page page,
+      APIRequestContext request,
+      ApiContextFactory apiContexts,
+      TestConfig config,
+      Steps steps) {
     String token =
-        new AuthClient(request)
-            .loginAndReadToken(new AuthCredentials(config.adminUsername(), config.adminPassword()))
-            .token();
+        steps.call(
+            "Authenticate as admin",
+            () ->
+                new AuthClient(request)
+                    .loginAndReadToken(
+                        new AuthCredentials(config.adminUsername(), config.adminPassword()))
+                    .token());
     RoomClient rooms = new RoomClient(apiContexts.withCookie("token", token));
     CreateRoomRequest requested = RoomTestData.uniqueRoom();
 
-    new AdminLoginPage(page).open().loginAs(config.adminUsername(), config.adminPassword());
-    AdminRoomsPage roomsPage = new AdminRoomsPage(page).assertLoaded();
+    AdminRoomsPage roomsPage =
+        steps.call(
+            "Log in to the admin UI",
+            () -> {
+              new AdminLoginPage(page)
+                  .open()
+                  .loginAs(config.adminUsername(), config.adminPassword());
+              return new AdminRoomsPage(page).assertLoaded();
+            });
 
     // createVia() protects the create action AND the lookup together: if the room was actually
     // created server-side but something after that (the lookup, a network blip) throws, it still
     // finds and deletes the room by name before rethrowing - the try-with-resources below only
     // starts once a ManagedRoom is safely in hand, so it can't cover this earlier window itself.
     try (ManagedRoom managedRoom =
-        ManagedRoom.createVia(rooms, requested, () -> roomsPage.createRoom(requested))) {
-      Room createdRoom = rooms.getRoom(managedRoom.roomId()).bodyAs(Room.class);
-      roomsPage.assertRoomListed(requested.roomName());
-      assertThat(createdRoom.type()).isEqualTo(requested.type());
-      assertThat(createdRoom.accessible()).isEqualTo(requested.accessible());
-      assertThat(createdRoom.roomPrice()).isEqualTo(requested.roomPrice());
+        steps.call(
+            "Create a room through the admin UI",
+            () -> ManagedRoom.createVia(rooms, requested, () -> roomsPage.createRoom(requested)))) {
+      steps.run(
+          "Verify room creation",
+          () -> {
+            Room createdRoom = rooms.getRoom(managedRoom.roomId()).bodyAs(Room.class);
+            roomsPage.assertRoomListed(requested.roomName());
+            assertThat(createdRoom.type()).isEqualTo(requested.type());
+            assertThat(createdRoom.accessible()).isEqualTo(requested.accessible());
+            assertThat(createdRoom.roomPrice()).isEqualTo(requested.roomPrice());
+          });
 
-      AdminRoomDetailPage detailPage = roomsPage.openRoom(requested.roomName());
-      detailPage.assertLoaded(requested.roomName());
+      AdminRoomDetailPage detailPage =
+          steps.call(
+              "Open room detail page",
+              () -> {
+                AdminRoomDetailPage opened = roomsPage.openRoom(requested.roomName());
+                opened.assertLoaded(requested.roomName());
+                return opened;
+              });
 
       int updatedPrice = requested.roomPrice() + 50;
-      detailPage.clickEdit().updatePrice(updatedPrice).submitUpdate();
-      detailPage.assertPrice(updatedPrice);
-      assertThat(rooms.getRoom(managedRoom.roomId()).bodyAs(Room.class).roomPrice())
-          .isEqualTo(updatedPrice);
+      steps.run(
+          "Edit the room price",
+          () -> detailPage.clickEdit().updatePrice(updatedPrice).submitUpdate());
 
-      page.navigate("/admin/rooms");
-      AdminRoomsPage roomsPageAgain = new AdminRoomsPage(page).assertLoaded();
-      roomsPageAgain.assertRoomListed(requested.roomName());
-      roomsPageAgain.deleteRoom(requested.roomName());
-      roomsPageAgain.assertRoomNotListed(requested.roomName());
-      // Empirically confirmed against the running app (not assumed): GET on a deleted room
-      // returns 500, not 404 - the room API does not treat "room not found" as a client error the
-      // way the booking API does (ManagedBooking.close() verifies a real 404 there). Asserting the
-      // actual observed behavior rather than the "should be" status, per this project's rule
-      // against hardening unverified assumptions.
-      assertThat(rooms.getRoom(managedRoom.roomId()).status()).isEqualTo(500);
+      steps.run(
+          "Verify updated price",
+          () -> {
+            detailPage.assertPrice(updatedPrice);
+            assertThat(rooms.getRoom(managedRoom.roomId()).bodyAs(Room.class).roomPrice())
+                .isEqualTo(updatedPrice);
+          });
+
+      AdminRoomsPage roomsPageAgain =
+          steps.call(
+              "Delete the room through the admin UI",
+              () -> {
+                page.navigate("/admin/rooms");
+                AdminRoomsPage reopened = new AdminRoomsPage(page).assertLoaded();
+                reopened.assertRoomListed(requested.roomName());
+                reopened.deleteRoom(requested.roomName());
+                return reopened;
+              });
+
+      steps.run(
+          "Verify room deletion",
+          () -> {
+            roomsPageAgain.assertRoomNotListed(requested.roomName());
+            // Empirically confirmed against the running app (not assumed): GET on a deleted room
+            // returns 500, not 404 - the room API does not treat "room not found" as a client error
+            // the way the booking API does (ManagedBooking.close() verifies a real 404 there).
+            // Asserting the actual observed behavior rather than the "should be" status, per this
+            // project's rule against hardening unverified assumptions.
+            assertThat(rooms.getRoom(managedRoom.roomId()).status()).isEqualTo(500);
+          });
 
       managedRoom.release();
     }
