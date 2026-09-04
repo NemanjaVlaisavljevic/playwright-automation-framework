@@ -1,31 +1,157 @@
-# Playwright Java Automation Framework
+# Playwright Test Runner & Live Dashboard
 
 [![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk)](https://openjdk.org/projects/jdk/21/)
 [![Playwright](https://img.shields.io/badge/Playwright-1.62-2EAD33?logo=playwright)](https://playwright.dev/java/)
 [![JUnit](https://img.shields.io/badge/JUnit-6.0-25A162?logo=junit5)](https://junit.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.1-6DB33F?logo=springboot)](https://spring.io/projects/spring-boot)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev/)
+[![Node](https://img.shields.io/badge/Node-24_LTS-339933?logo=node.js)](https://nodejs.org/)
 
-A portfolio-grade UI and API automation framework built with Java, Playwright, JUnit, Gradle, AssertJ, JSON Schema, and Allure.
+![Real-time step and failure drill-down in the runner dashboard](docs/screenshots/dashboard-step-failure-artifact-drilldown.jpg)
 
-The system under test is [Restful Booker Platform](https://automationintesting.online/), a public Bed & Breakfast application intentionally built for automation practice. It offers a React UI, Spring Boot APIs, authentication, room and booking workflows, and a shared sandbox that resets periodically. Its [source code is public](https://github.com/mwinteringham/restful-booker-platform), so the tests can be based on documented behavior instead of probing an unrelated production website.
+A test suite is only as useful as the feedback loop around it. This project starts from a
+portfolio-grade Java/Playwright automation suite and builds a real, self-hosted **runner service
+and live dashboard** on top of it - so instead of reading a Gradle console or a static HTML report
+after the fact, you launch a suite from a web UI and watch it execute test by test, step by step, in
+real time, with failures, screenshots, and traces surfacing the moment they happen.
 
-## What this project demonstrates
+## What it does
 
-- One Playwright stack for browser and HTTP testing.
-- JUnit 6 extension-based lifecycle with parameter injection.
-- Browser reuse per parallel worker and an isolated browser context per test.
-- Web-first assertions and accessibility-oriented locators; no implicit waits or sleeps.
-- Typed API clients and Java records separated from test intent.
-- Anonymous and cookie-authenticated API sessions isolated through Playwright storage state.
-- JSON Schema and semantic contract assertions.
-- Secret redaction from API evidence and logs.
-- Screenshot and Playwright trace capture on UI failure.
-- Allure metadata/results plus standard JUnit XML and HTML reports.
-- Read-only default CI and explicitly opt-in tests that mutate the shared sandbox.
-- Reproducible Gradle wrapper, formatting gate, dependency updates, and artifact upload.
+- **REST-triggered runs** - pick an environment and suite from an allowlist, launch a real Gradle
+  test process through a small Spring Boot service, no SSH/CI-console round trip required.
+- **Live progress over Server-Sent Events** - every `RUN_*`/`TEST_*`/`STEP_*` event streams to the
+  browser as it happens, replayed from a durable on-disk journal on reconnect so a dropped
+  connection never loses history.
+- **Step-level reporting** - a `Steps` API instrumented directly in the test code reports
+  step-by-step progress inside each test, not just a pass/fail at the end - see it live in the
+  dashboard's "Live Focus" panel and, after the fact, as a per-test drill-down.
+- **Artifacts wired to the exact failure** - a failing step's screenshot and Playwright trace are
+  attributed to that step specifically (not just "the test failed somewhere"), downloadable straight
+  from the failure it belongs to.
+- **Cancellation** - stop a run mid-flight; the active test and step are reconciled to `INTERRUPTED`
+  rather than left in a misleading `RUNNING` state forever.
+- **Transport recovery** - a dropped SSE connection reconnects and replays cleanly from the last
+  acknowledged event; a genuinely gapped stream triggers a full fresh replay instead of silently
+  desyncing.
 
-## Quick start
+## Architecture
 
-Prerequisites: JDK 21. The Gradle wrapper supplies Gradle itself.
+```mermaid
+flowchart TD
+    A["React dashboard"] -->|"REST + SSE"| B["Spring Boot runner"]
+    B -->|"ProcessBuilder"| C["Gradle / JUnit / Playwright"]
+    C -->|"JSONL events + manifest"| D["Journal, logs and artifacts"]
+```
+
+The dashboard never talks to Gradle/JUnit directly - it only ever sees the runner's REST/SSE
+surface. The runner launches the real test suite as a child process and tails the JSONL event
+journal that process writes as it runs (via a JUnit extension, not log-scraping), so the dashboard's
+live view is built from the same durable record that survives a dropped connection or a service
+restart. See [Architecture](docs/ARCHITECTURE.md) for the automation suite's own internal lifecycle,
+and [`runner-dashboard/README.md`](runner-dashboard/README.md#architecture-current) for the
+frontend's state model in more depth.
+
+## Run it locally in 5 minutes
+
+Prerequisites: **JDK 21**, **Node 24** (`runner-dashboard/.nvmrc` pins this), and - only for the
+`LOCAL` scenario below - **Docker Desktop**.
+
+**Terminal 1 - backend:**
+
+```bash
+./gradlew.bat :runner-service:bootRun
+```
+
+**Terminal 2 - dashboard:**
+
+```bash
+cd runner-dashboard
+npm ci
+npm run dev
+```
+
+Open `http://localhost:5173/runs`. Two scenarios are available out of the box:
+
+| Environment | Suite | What it does |
+|---|---|---|
+| `PUBLIC` | `SMOKE` (or any of the other public suites) | Runs against the public read-only [Restful Booker Platform](https://automationintesting.online/) sandbox - nothing extra to set up. |
+| `LOCAL` | `JOURNEY` | Runs the same journey suite, including mutation-tagged tests, against a local Docker Compose copy of the same app - safe to write to, never touches the shared public target. Bring the stack up first: `./gradlew.bat localSutUp && ./gradlew.bat localSutHealth`. |
+
+Want the failure/artifact drill-down specifically, without waiting on a real defect? Pick the
+`FIXTURE` suite under `PUBLIC` - it deliberately fails one step on purpose, on demand, so you can
+see the full step/failure/screenshot/trace path immediately. More screenshots of all of this in
+[`docs/screenshots/`](docs/screenshots/).
+
+## Test strategy and CI
+
+The automation suite itself follows a strict, JUnit-extension-enforced tag taxonomy (exactly one
+layer, one feature, one effect tag per test - see [Test Strategy](docs/TEST_STRATEGY.md) for the
+risk-based reasoning) so a runner or CI pipeline can filter safely without guessing intent from a
+test's name. Four GitHub Actions workflows gate this repository, each proven green together on the
+same commit as part of this project's own release-candidate process (full detail, run links, and
+every acceptance criterion checked in [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md)):
+
+| Workflow | Gate |
+|---|---|
+| `quality-gate.yml` | Formatting + the default read-only Java suite, on every push/PR. |
+| `dashboard-quality.yml` | Frontend quality (lint, types, coverage, build) + OpenAPI contract drift, on every push/PR. |
+| `dashboard-e2e.yml` | The complete real-browser dashboard E2E suite (Playwright, real backend + real dashboard build), weekly + on demand. |
+| `local-sut.yml` | Full read-only + mutation regression against the local Docker stack, weekly + on demand. |
+
+The dashboard's own E2E suite (`dashboardE2eTest`) is itself the largest single test class in this
+repository - real-browser coverage of accessibility (axe-core + a dedicated keyboard-operability
+gate), responsive layout at 320/768/1440px, long/unbroken content, a 100-test/400-step synthetic
+run, and measured render/filter performance, on top of the functional run-lifecycle/cancel/
+recovery/deep-link scenarios. See [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md)'s
+acceptance matrix for exactly which test proves which scenario.
+
+## Current limitations
+
+This is a working release candidate, not a production deployment - the boundaries below are
+deliberate scope decisions for this stage, not hidden defects, and Faza D (packaging, persistence,
+security, deployment) is where each of them gets addressed:
+
+- **Run history and the artifact/event journal are in-memory and on local disk** - nothing is
+  persisted to a database; restarting `runner-service` loses in-flight run state and its history
+  list (the raw JSONL event/artifact files on disk survive, but nothing currently re-indexes them
+  on startup).
+- **Single-instance only** - one `runner-service` process, one in-process run queue. There is no
+  clustering, leader election, or horizontal scaling.
+- **No authentication or authorization** - anyone who can reach the dashboard/API can launch,
+  cancel, and read every run. Fine for a local/demo deployment; not fine exposed on the open
+  internet as-is.
+- **No artifact retention policy** - screenshots, traces, and logs accumulate under
+  `build/runner-artifacts/<runId>/` indefinitely; nothing currently prunes old runs.
+- **No deployment packaging yet** - no Dockerfile/image for `runner-service` or the dashboard, no
+  same-origin production serving setup. Today this runs as two separate local dev processes (as
+  shown above), not a single deployable unit.
+
+## Automation suite
+
+The runner drives the same Java + Playwright + JUnit automation suite this repository started as -
+a portfolio-grade UI and API test suite against
+[Restful Booker Platform](https://automationintesting.online/), a public Bed & Breakfast application
+built for automation practice, with a [public source repo](https://github.com/mwinteringham/restful-booker-platform)
+so tests can be based on documented behavior rather than probing an unfamiliar production site.
+
+### What this suite demonstrates
+
+- One Playwright stack for browser and HTTP testing, with a JUnit extension-based lifecycle and
+  parameter injection - no generic `BasePage`, page/component objects own their own domain behavior.
+- Browser reuse per parallel worker, an isolated browser context per test, no implicit waits.
+- Typed API clients and Java records kept separate from test intent; anonymous and
+  cookie-authenticated API sessions isolated through Playwright storage state.
+- JSON Schema and semantic contract assertions; secret redaction from API evidence and logs.
+- Screenshot and Playwright trace capture on UI failure; Allure metadata alongside standard JUnit
+  XML/HTML reports.
+- A step-reporting API (`Steps`) instrumented directly in test methods, feeding the runner's
+  step-level SSE events described above - the same mechanism, used by both the CLI/CI run and the
+  live dashboard.
+- Read-only default CI with explicitly opt-in tests that mutate the shared public sandbox, guarded
+  by a runtime check that refuses to run a mutation test against the shared target unless
+  explicitly overridden.
+
+### Quick start (suite only, no dashboard)
 
 ```powershell
 # Windows PowerShell
@@ -54,7 +180,7 @@ Useful suites:
 
 The default `test` task excludes the `mutation` tag. This is deliberate: a professional test suite should not silently alter a shared public environment. Every executable test has exactly one effect tag (`read-only` or `mutation`), one layer tag (`api`, `ui`, or `journey`), one feature tag, and `regression`; the JUnit extension fails fast when that taxonomy is violated. As a second line of defense, the extension also refuses to run any `mutation`-tagged test against the configured shared target (see `sharedTargetBaseUrl` below) unless `allowMutationAgainstSharedTarget` is explicitly set.
 
-## Local Docker target
+### Local Docker target
 
 `mutationTest` and the shared-target guard above exist because the default target is a public, shared sandbox. For unrestricted write/mutation testing, `infra/rbp/` runs the same [Restful Booker Platform](https://github.com/mwinteringham/restful-booker-platform) application locally via Docker Compose, pinned to a fixed upstream commit:
 
@@ -69,21 +195,17 @@ The default `test` task excludes the `mutation` tag. This is deliberate: a profe
 
 Requires Docker Desktop (with Compose) and `git`; no other toolchain needs to be installed on the host — the Java build runs inside a throwaway Maven container. `localSutPrepare` applies a small local patch on top of the pinned upstream source to fix a build-time env var ordering bug in the `assets` service's own Dockerfile (details, including why it's a patch and not a fork, in `infra/rbp/README.md`). With that patch, `localTest` passes 27/27, and `stabilityTest -PstabilityRuns=10` has passed 10/10.
 
-## Dashboard end-to-end tests
+### Dashboard end-to-end tests
 
-`dashboardE2eTest` proves the `runner-service` (Spring Boot, SSE-based test runner) and `runner-dashboard` (React/Vite frontend) actually work together, end to end, through a real headless Chromium — not just their own unit/component suites in isolation.
+`dashboardE2eTest` proves the `runner-service` and `runner-dashboard` actually work together, end to end, through a real headless Chromium - not just their own unit/component suites in isolation.
 
 ```bash
-./gradlew.bat dashboardE2eTest   # one command: builds everything it needs and runs all 7 scenarios
+./gradlew.bat dashboardE2eTest   # one command: builds everything it needs and runs the complete suite
 ```
 
 That single command already depends on everything else it needs — `:runner-service:bootJar` and `dashboardBuild` (the dashboard's production bundle, built once via `npm run build` and cached by normal Gradle up-to-date checking) — so no separate build step is required. `dashboardBuild` can still be run on its own (`./gradlew.bat dashboardBuild`) to just produce/refresh `runner-dashboard/dist` without running any tests.
 
-Prerequisites beyond the base [Quick start](#quick-start) ones: Node 24 (see `runner-dashboard/.nvmrc`) and npm on `PATH`, and the Chromium browser installed via `./gradlew.bat playwrightInstall` (the same Playwright browser cache the main suite uses — no separate install step).
-
-What it actually starts: one real `runner-service` process (`java -jar`, the real backend), one real `runner-dashboard` served via `vite preview` against the production bundle (not `vite dev` — this is what proves the shipped artifact works, not just its dev-mode transform pipeline), and one real headless Chromium driving it via Playwright — shared across six of the seven scenarios (each still gets its own fresh browser context/page). The backend-unavailable/recovery scenario deliberately gets its own fully isolated backend+dashboard pair on separate ports instead, since it needs to actually kill "the backend" without affecting the other six. The run-lifecycle scenario launches a real SMOKE-suite run through the dashboard's own UI and follows it live over SSE against this repo's public read-only target (`automationintesting.online`); the Cancel scenario does the same with the REGRESSION suite specifically, so it runs long enough to reliably observe the run still `RUNNING` before clicking Cancel — both are genuine cross-process, cross-network integration tests, not a mock.
-
-The 7 scenarios: run lifecycle (launch → live SSE updates → terminal status, with numeric Total/Passed metric checks), a 404 for a non-existent run, downloading a run's log, a strict Cancel that must actually reach `CANCELLED` (not merely stop updating), an SSE gap-replay scenario, a native-reconnect scenario, and an isolated backend-unavailable/recovery pair that kills and restarts its own backend on separate ports so it can never affect the other 6. The gap-replay and native-reconnect scenarios are honestly labeled as browser-level SSE transport/recovery integration tests (built with Playwright network routing) rather than full backend-failure E2E — see their own test-class Javadoc for the distinction.
+Prerequisites beyond the base [Quick start](#quick-start-suite-only-no-dashboard) ones: Node 24 (see `runner-dashboard/.nvmrc`) and npm on `PATH`, and the Chromium browser installed via `./gradlew.bat playwrightInstall` (the same Playwright browser cache the main suite uses — no separate install step).
 
 Where results land:
 
@@ -96,7 +218,7 @@ Where results land:
 
 Every test gets a Playwright trace and video running the whole time, but only a **failed** test's are actually kept — open `trace.zip` with `npx playwright show-trace` for a timeline replay of exactly what the browser saw.
 
-## Configuration
+### Configuration
 
 System properties take precedence over environment variables.
 
@@ -124,25 +246,30 @@ Example cross-browser run:
 ./gradlew uiTest -Dbrowser=firefox -Dheadless=false
 ```
 
-## Project structure
+### Project structure
 
 ```text
 src/test/java/dev/vlaisanem/automation
 ├── api/          HTTP clients, evidence capture, response abstraction
 ├── config/       validated environment/system-property configuration
-├── core/         JUnit extension and Playwright lifecycle
+├── core/         JUnit extension, Playwright lifecycle, and the Steps API
 ├── data/         isolated test-data factories
 ├── model/        immutable API contracts
 ├── support/      JSON, redaction, and schema validation
 ├── tests/        API, UI, journey, and opt-in mutation checks
 └── ui/           page and component objects
+
+runner-contract/    shared event/artifact schema (Java records) used by both the suite and the runner
+runner-listener/    JUnit ServiceLoader listener that writes the JSONL event journal
+runner-service/     Spring Boot REST + SSE backend that launches Gradle and tails that journal
+runner-dashboard/   React/Vite frontend
 ```
 
 Framework code lives in the test source set because this repository is an executable test product, not a library shipped to production. There is intentionally no generic `BasePage`: page/component objects expose domain behavior and keep assertions close to the contract they understand.
 
 See [Architecture](docs/ARCHITECTURE.md), [Test Strategy](docs/TEST_STRATEGY.md), and [Contributing](CONTRIBUTING.md) for the engineering rationale and roadmap.
 
-## Current executable coverage
+### Current executable coverage
 
 | Layer | Check | Default run |
 |---|---|---|
@@ -162,9 +289,9 @@ See [Architecture](docs/ARCHITECTURE.md), [Test Strategy](docs/TEST_STRATEGY.md)
 | UI journey | Guest completes a booking end to end and it is cleaned up afterward | No, `mutation` opt-in |
 | UI | Guest submits the contact form and the API accepts it | No, `mutation` opt-in (no delete endpoint exists) |
 
-The explicit layer, feature, suite, and effect tags allow the future runner UI to discover and safely filter tests without depending on Allure metadata or interpreting the absence of a tag.
+The explicit layer, feature, suite, and effect tags allow the runner to discover and safely filter tests without depending on Allure metadata or interpreting the absence of a tag.
 
-This is a strong foundation, not a claim of exhaustive coverage. The next valuable additions are accessibility scanning, OpenAPI-driven contract checks, and timezone-focused booking cases.
+This is a strong foundation, not a claim of exhaustive coverage. The next valuable additions are OpenAPI-driven contract checks against the application under test itself and timezone-focused booking cases.
 
 ### Known application issues found by this suite
 

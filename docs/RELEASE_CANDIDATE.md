@@ -7,8 +7,8 @@ the living record of that proof, filled in section by section as each C5 sub-pha
 - **C5.1 — Acceptance matrix** (this file, below): does real evidence already exist for every
   scenario an RC needs, or is there a real gap?
 - **C5.2 — Clean-environment reproducibility** (this file, below): done.
-- **C5.3 — Three CI proofs on one commit**: not yet started.
-- **C5.4 — Portfolio README**: not yet started.
+- **C5.3 — Three CI proofs on one commit** (this file, below): done.
+- **C5.4 — Portfolio README**: done - see the root [`README.md`](../README.md).
 - **C5.5 — Portfolio demo script**: not yet started.
 - **C5.6 — RC sign-off**: not yet started.
 
@@ -262,3 +262,133 @@ No fixes were needed - every step passed on the first attempt. **C5.2 is now clo
 4. ~~[P3] One paragraph said "22-scenario suite run" while the table says 21/21~~ **Fixed** - the
    real count is 21 (confirmed against both the source `@Test` methods and the JUnit XML results);
    changed to "21-scenario."
+
+## C5.3 — Three CI proofs on one commit (2026-09-04)
+
+All three named workflows run green on the exact same commit,
+**`a9dd6120d3b74ae45ef427752b781777254595b4`** ("Finishing Faze C5.2") - independently confirmed via
+GitHub's public REST API (`GET /repos/.../actions/runs/{id}` and its `/jobs` sub-resource,
+unauthenticated, read-only), not just eyeballed in the UI. `quality-gate.yml` triggers on `push` to
+`master` and fired automatically from this commit. `dashboard-e2e.yml` and `local-sut.yml` both
+*also* have a weekly `schedule` trigger alongside `workflow_dispatch` (Thursday 05:43 UTC and Monday
+04:17 UTC respectively) - they are not dispatch-only workflows, they just weren't due to fire on
+their own yet. These two specific runs were triggered manually via `workflow_dispatch` on `master`
+(which, since nothing else was pushed in between, dispatched against this same SHA) - confirmed by
+checking each run's own `head_sha` via the API rather than assuming the dispatch landed on the
+intended commit.
+
+**A fourth gate is also green on this exact commit, without a new run being needed**:
+`dashboard-quality.yml` (Dashboard Quality Gate) auto-triggered on the same `push` as
+`quality-gate.yml` and completed successfully - both its `frontend-quality` job (coverage, lint,
+build) and its `openapi-contract` job (snapshot check + live-backend contract check) passed. Since
+C5.1's acceptance matrix already cites this exact workflow as the Contract row's own CI evidence,
+it belongs alongside the three the user named, not left out of this section.
+
+| Workflow | Run | Trigger | Conclusion | Artifact(s) |
+|---|---|---|---|---|
+| `quality-gate.yml` (Quality Gate) | [`33913557307`](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33913557307) | `push`, attempt 1 | success | `automation-evidence-33913557307-1` |
+| `dashboard-quality.yml` (Dashboard Quality Gate) | [`33913557312`](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33913557312) | `push`, attempt 1 | success | none - both jobs' upload steps (`Upload coverage and test report`, `Upload backend log`) are `if: failure()` and correctly show `skipped`, since nothing failed |
+| `dashboard-e2e.yml` (Dashboard E2E) | [`33913907723`](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33913907723) | `workflow_dispatch`, attempt 1 | success | `dashboard-e2e-junit-33913907723-1`, `dashboard-e2e-html-report-33913907723-1`, `dashboard-e2e-process-logs-33913907723-1` |
+| `local-sut.yml` (Local SUT Regression) | [`33913918735`](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33913918735) | `workflow_dispatch`, attempt 1 | success | `local-sut-evidence-33913918735-1` |
+
+**`dashboard-e2e.yml` and `local-sut.yml` ran concurrently, deliberately** - both were dispatched at
+the same time. Each declares its own distinct `concurrency` group (`dashboard-e2e-${{ github.ref }}`
+vs. `local-sut-${{ github.ref }}`) and GitHub Actions runs each on its own isolated, ephemeral
+`ubuntu-latest` VM, so there is no shared port/state/resource between them - confirmed by both
+completing successfully in parallel with no interference.
+
+**Every stated acceptance criterion checked against the real API response, not assumed:**
+- **All three (four, counting the Contract gate) green**: confirmed above via each run's own
+  `conclusion: success`.
+- **JUnit/HTML reports uploaded**: `dashboard-e2e.yml`'s `Upload JUnit report` and `Upload Gradle
+  HTML report` steps both `success`, producing the `-junit-`/`-html-report-` artifacts above;
+  `local-sut.yml`'s single `local-sut-evidence-*` artifact bundles its own equivalent reports.
+- **Process logs uploaded**: `dashboard-e2e.yml`'s `Upload process logs` step `success`
+  (`dashboard-e2e-process-logs-*`).
+- **Failure-artifacts step runs with `if: always()`**: `dashboard-e2e.yml`'s `Upload failure
+  artifacts (screenshots, traces, videos)` step reported `success` even though nothing failed (0
+  scenarios failed, so it legitimately had nothing to upload - the same "no files found, not a
+  failure" behavior documented in `RELEASE_EVIDENCE.md` for the equivalent Faza 9 run) - it is not
+  in this run's artifact list for that reason, not because the step was skipped.
+- **Cleanup safety-net step ran successfully** - `dashboard-e2e.yml`'s dedicated `Clean up any
+  leftover processes` step reported `success`, but that alone does not prove no process actually
+  survived: its commands are `pkill -f '...' || true` and the step itself carries
+  `continue-on-error: true`, so it reports green regardless of whether termination fully succeeded.
+  The real proof that nothing was left running comes from the E2E suite's own green result instead:
+  `DashboardProcess.stop()` (called from `DashboardE2eEnvironment`'s teardown on every test) throws
+  `IllegalStateException` and fails the build if any of its own known backend/dashboard processes
+  survive termination - since `dashboard-e2e.yml` completed successfully, those specific processes
+  are confirmed gone. This does not amount to a strict "no leftover process of any kind exists on
+  the runner" guarantee (that would need a final `pgrep` verifier step that fails the job if
+  anything matching survives after cleanup) - worth adding if a stronger CI-level claim is ever
+  needed, not implemented here.
+- **LOCAL stack always shuts down**: `local-sut.yml`'s `Stop local SUT stack` step `success`; its
+  `Dump local SUT diagnostics` step correctly shows `skipped` (that step is failure-only, and
+  nothing failed).
+- **Artifact names contain `run_id` + `run_attempt`**: every artifact listed above follows
+  `<name>-<run_id>-<run_attempt>` - including `automation-evidence-33913557307-1`, the first real
+  CI confirmation that the C5.1 review round's `quality-gate.yml` naming fix actually works, not
+  just that it reads correctly.
+
+No fixes were needed - all four workflows passed on their first run against this commit.
+**C5.3 is now closed.**
+
+### Review round on this section (2026-09-04) - 4 P2/P3, all fixed
+
+1. ~~[P2] Left out the fourth green gate on this same commit~~ **Fixed** - added
+   `dashboard-quality.yml` (`run 33913557312`) as a fourth row; no new run was needed since it had
+   already gone green on the same `push`.
+2. ~~[P2] Described `dashboard-e2e.yml`/`local-sut.yml` as "workflow_dispatch-only"~~ **Fixed** -
+   both also carry a weekly `schedule` trigger; reworded to say these *specific runs* were manually
+   dispatched, not that the workflows are dispatch-only.
+3. ~~[P2] "No leftover processes" overclaimed what the cleanup step's own success actually proves~~
+   **Fixed** - reworded to "cleanup safety-net step ran successfully" (verified its commands really
+   are `pkill ... || true` under `continue-on-error: true`, so a green result doesn't by itself
+   prove termination succeeded) and added the real proof instead: `DashboardProcess.stop()`
+   verified to throw on any survivor, making the E2E suite's own green result the actual evidence.
+   Noted a stricter `pgrep`-verifier step as a possible future addition, not implemented now.
+4. ~~[P3] `dashboard-e2e.yml`'s own header comment still said "7 scenarios"~~ **Fixed** - reworded
+   to "the complete dashboard E2E suite" (no fixed number) so it can't go stale again as tests are
+   added; the historical "7 scenarios" mentions in `docs/RELEASE_EVIDENCE.md` were left as-is since
+   that file is an explicitly point-in-time record of a specific past release, not a living claim.
+
+## C5.4 — Portfolio README (2026-09-04)
+
+Rewrote the root `README.md` to lead with the runner/dashboard system rather than treating it as an
+appendix to the original Playwright suite - the differentiator this whole C-phase roadmap has been
+building toward. Every fact stated in it was verified against real source before being written, not
+assumed:
+
+- **Hero image**: `docs/screenshots/dashboard-step-failure-artifact-drilldown.jpg` (the C4.6.6
+  portfolio shot showing the full step/failure/artifact drill-down in one frame).
+- **Feature list** (REST-triggered runs, SSE live progress, step-level reporting, artifact-to-step
+  attribution, cancellation, transport recovery) - each phrased to match what the acceptance matrix
+  above already proves, not aspirational.
+- **Architecture diagram** - the user's own React → Spring Boot → Gradle/JUnit/Playwright → Journal
+  pipeline, rendered as a GitHub-native Mermaid `flowchart` rather than a plain-text box diagram.
+- **"Run locally in 5 minutes"** - the exact `:runner-service:bootRun` + `npm run dev` two-terminal
+  flow, with a table naming both the `PUBLIC`/`SMOKE` and `LOCAL`/`JOURNEY` scenarios and the
+  `FIXTURE` suite as the fastest path to seeing the failure/artifact drill-down on demand.
+- **Test strategy and CI**: names and briefly describes all four workflows (adding
+  `dashboard-quality.yml`, the fourth gate the C5.3 review round added), and links to this document's
+  own acceptance matrix rather than re-deriving it.
+- **Requirements**: JDK 21, Node 24, Docker (LOCAL scenario only) - stated once, up front.
+- **Current limitations**: all five items the user named, each verified against real source
+  immediately before writing, not carried over from memory - `RunService.activeRuns` really is a
+  bare `ConcurrentHashMap` (in-memory, confirmed by reading the field declaration), no
+  `spring-boot-starter-security`/`SecurityFilterChain` exists anywhere in `runner-service` (grepped),
+  and no `Dockerfile` exists anywhere in the repository (searched) - framed explicitly as RC-stage
+  scope decisions Faza D addresses, per the user's own instruction, not hidden defects.
+
+The prior suite-focused content (quick start, local Docker target, dashboard E2E test docs,
+configuration table, project structure, executable-coverage table, known application issues, build
+tooling backlog) was preserved in full, not deleted - relocated under a new "Automation suite"
+section beneath the portfolio-facing material, since it's still accurate and valuable, just no
+longer the document's own headline.
+
+Verified: `./gradlew.bat spotlessCheck` clean (caught and fixed one real formatting violation on the
+first pass - `spotlessMisc` also lints Markdown, not just source, and flagged this file; a plain
+`spotlessApply` fixed it with no content change), `git diff --check` clean, and every internal link/
+anchor checked against the doc's own real heading text (`#quick-start-suite-only-no-dashboard` for
+this file's own relocated section, `#architecture-current` for `runner-dashboard/README.md`'s
+existing heading) rather than assumed. **C5.4 is now closed.**

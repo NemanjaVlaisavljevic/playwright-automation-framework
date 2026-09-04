@@ -1,8 +1,9 @@
 name: Dashboard E2E
 
 # Real-browser Playwright E2E against a real runner-service + real runner-dashboard (see
-# dashboardE2eTest in the root build.gradle) - 7 scenarios, one of them driving a real regression
-# run through the dashboard's own UI against the public read-only target. Not wired to push/pull_request
+# dashboardE2eTest in the root build.gradle) - the complete dashboard E2E suite, one of its
+# scenarios driving a real regression run through the dashboard's own UI against the public
+# read-only target. Not wired to push/pull_request
 # - it builds two full stacks and drives them through a real Chromium browser, which is too slow/
 # expensive for every PR (mirrors local-sut.yml's own reasoning for the same tradeoff). Scheduled
 # weekly as a determinism canary, plus manual dispatch on demand.
