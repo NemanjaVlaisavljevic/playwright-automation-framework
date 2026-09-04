@@ -14,13 +14,24 @@
   --color-text-muted: #5b6472;
   --color-text-inverse: #ffffff;
 
-  /* Accent (links, primary actions, active nav) */
-  --color-accent: #2f6fed;
-  --color-accent-hover: #1d54c4;
+  /*
+   * Accent (links, primary actions, active nav). Deliberately darker than a typical "brand blue"
+   * default (#2f6fed, kept only as a comment here for history) - that shade cleared WCAG 2 AA's
+   * 4.5:1 minimum text contrast ratio against white but fell to ~3.96-4.21:1 against this app's own
+   * light tinted backgrounds (--color-accent-muted, --color-bg, --color-danger-bg,
+   * --color-surface-muted) - a real `axe-core` violation caught once C4.6 added an automated a11y
+   * gate (see AccessibilityE2eTest). #1d54c4 clears 5.88:1+ against every one of those; the former
+   * hover shade slid down to a new, still-clearly-differentiated #15408f (8.48:1+ everywhere).
+   */
+  --color-accent: #1d54c4;
+  --color-accent-hover: #15408f;
   --color-accent-muted: #e8f0fe;
 
   /* Status tones - always paired with a text label or icon in components, never color alone */
-  --color-success: #15803d;
+  /* #15803d (kept only as a comment for history) cleared white/most surfaces but fell to
+     4.43-4.49:1 against --color-success-bg/--color-surface-muted - the same real axe-core finding
+     as --color-accent above. #137238 clears 5.31:1+ against every background it's actually used on. */
+  --color-success: #137238;
   --color-success-bg: #e7f6ec;
   --color-warning: #9a5b00;
   --color-warning-bg: #fef3e2;

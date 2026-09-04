@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { cancelRun, getRun, listRunArtifacts } from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
 import { RunnerApiError } from "../../api/problem-detail";
@@ -19,10 +19,20 @@ import {
 } from "../event-stream/use-run-event-stream";
 import { ArtifactsSection } from "./ArtifactsSection";
 import { CopyRunIdButton } from "./CopyRunIdButton";
+import { LiveFocusPanel } from "./LiveFocusPanel";
 import { RunProgress } from "./RunProgress";
 import { RunSummary } from "./RunSummary";
 import { buildRunDetailsViewModel } from "./run-details-view-model";
-import { TestResultsTable } from "./TestResultsTable";
+import {
+  computeDeepLinkStatus,
+  describeDeepLinkStatus,
+  parseRunResultTarget,
+  runResultTargetKey,
+} from "./run-result-target";
+import {
+  TestResultsSection,
+  type TestResultsSectionHandle,
+} from "./TestResultsSection";
 import styles from "./RunDetailsPage.module.css";
 
 export interface RunDetailsPageProps {
@@ -66,6 +76,25 @@ function RunDetails({
     runId,
     eventStreamClient,
   );
+  const testResultsRef = useRef<TestResultsSectionHandle>(null);
+  // `?testId=&stepId=` (see run-result-target.ts) - the URL is only ever the *initial* target,
+  // never a continuously-synced UI state: re-parsed once from whatever the URL happened to be on
+  // this render, but a target already revealed is never re-revealed just because a later render
+  // still carries the same query string (see `deepLinkHandledKeyRef` below).
+  const [searchParams] = useSearchParams();
+  const parsedDeepLink = parseRunResultTarget(searchParams);
+  const deepLinkTarget =
+    parsedDeepLink.kind === "valid" ? parsedDeepLink.target : undefined;
+  const deepLinkHandledKeyRef = useRef<string | undefined>(undefined);
+  // A target that disappears from the URL (or becomes malformed) must be treated as genuinely gone,
+  // not "already handled forever" - otherwise navigating away and then back to the very same target
+  // (e.g. browser Back/Forward) would silently stay stuck refusing to reveal/focus it again, since
+  // the key it left behind never gets cleared on its own - a real review finding.
+  useEffect(() => {
+    if (deepLinkTarget === undefined) {
+      deepLinkHandledKeyRef.current = undefined;
+    }
+  }, [deepLinkTarget]);
 
   const run = useQuery({
     queryKey: queryKeys.run(runId),
@@ -136,6 +165,34 @@ function RunDetails({
   });
   const tests = viewModel.tests;
 
+  // The same "prefer the SSE stream's own signal, fall back to REST" preference
+  // `buildRunDetailsViewModel` itself uses (see its own doc comment) - `LiveFocusPanel` must not
+  // keep showing itself once the run is over just because the *live connection* alone hasn't
+  // reached `CLOSED` yet (e.g. it dropped mid-flight and the REST fallback already confirmed the
+  // run finished) - see that component's own `runStatus` prop.
+  const overallRunStatus = streamState.runOutcome ?? run.data?.status;
+  const deepLinkStatus = useMemo(
+    () =>
+      parsedDeepLink.kind === "invalid"
+        ? ({ kind: "invalid" } as const)
+        : computeDeepLinkStatus(deepLinkTarget, tests, connectionState),
+    [parsedDeepLink.kind, deepLinkTarget, tests, connectionState],
+  );
+  // Fires at most once per distinct target (see `runResultTargetKey`) - a later SSE-driven
+  // re-render with the same still-"found" target must not call `reveal` again, which is exactly
+  // why this doesn't just gate on `deepLinkTarget !== undefined` alone.
+  useEffect(() => {
+    if (deepLinkTarget === undefined || deepLinkStatus.kind !== "found") {
+      return;
+    }
+    const key = runResultTargetKey(deepLinkTarget);
+    if (deepLinkHandledKeyRef.current === key) {
+      return;
+    }
+    testResultsRef.current?.reveal(deepLinkTarget);
+    deepLinkHandledKeyRef.current = key;
+  }, [deepLinkTarget, deepLinkStatus]);
+
   // There is still no live ARTIFACT_CREATED event (that remains a real future-phase concern - a
   // manifest write racing an in-flight listRunArtifacts response, precise per-artifact timing -
   // deliberately not solved here) - so this can't push a fresh capture the instant it's written.
@@ -178,6 +235,12 @@ function RunDetails({
 
   const runDuration = run.isSuccess ? runDurationMs(run.data) : undefined;
   const canCancel = run.isSuccess && !isTerminalRunStatus(run.data.status);
+  // Scoped to each failing test's own failure panel (see `FailureDetail.tsx`), not just the generic
+  // banner below - a broken artifacts fetch is otherwise easy to miss as belonging to any specific
+  // test result.
+  const artifactsErrorMessage = artifacts.isError
+    ? describeApiError(artifacts.error)
+    : undefined;
 
   return (
     <>
@@ -245,9 +308,38 @@ function RunDetails({
         counts={viewModel.counts}
       />
 
+      <LiveFocusPanel
+        tests={tests}
+        connectionState={connectionState}
+        runStatus={overallRunStatus}
+        onSelectTest={(testId) =>
+          testResultsRef.current?.reveal({ kind: "test", testId })
+        }
+      />
+
+      {deepLinkStatus.kind === "waiting" && (
+        <p className="visually-hidden" aria-live="polite">
+          {describeDeepLinkStatus(deepLinkStatus)}
+        </p>
+      )}
+      {(deepLinkStatus.kind === "invalid" ||
+        deepLinkStatus.kind === "test-not-found" ||
+        deepLinkStatus.kind === "step-not-found" ||
+        deepLinkStatus.kind === "unavailable") && (
+        <div className={styles.section}>
+          <Alert>{describeDeepLinkStatus(deepLinkStatus)}</Alert>
+        </div>
+      )}
+
       <div className={styles.section}>
-        <h2 className={styles.sectionTitle}>Tests</h2>
-        <TestResultsTable runId={runId} tests={tests} />
+        <TestResultsSection
+          ref={testResultsRef}
+          runId={runId}
+          tests={tests}
+          {...(artifactsErrorMessage !== undefined
+            ? { artifactsErrorMessage }
+            : {})}
+        />
       </div>
 
       {artifacts.isError && (

@@ -5,6 +5,7 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.assertions.LocatorAssertions;
+import com.microsoft.playwright.options.AriaRole;
 import dev.vlaisanem.automation.dashboarde2e.pages.RunDetailsPage;
 import dev.vlaisanem.automation.dashboarde2e.pages.RunsListPage;
 import java.time.Duration;
@@ -58,6 +59,11 @@ class CancelE2eTest {
    * RUNNING before clicking Cancel, then prove all three DoD requirements: the parent test itself
    * shows INTERRUPTED, the step that was actually still running shows INTERRUPTED, and the step
    * that had already finished keeps its real terminal status.
+   *
+   * <p>Also doubles as the C4.2 live-focus-panel E2E proof the plan calls for: this same
+   * deterministic blocked-step fixture is exactly what lets a real browser test observe the panel
+   * showing one specific, known test+step (rather than racing real journey-test timing), and then
+   * confirm it disappears once the run reaches its terminal {@code CANCELLED} status.
    */
   @Test
   @Timeout(90)
@@ -76,8 +82,27 @@ class CancelE2eTest {
         .isVisible(
             new LocatorAssertions.IsVisibleOptions().setTimeout(Duration.ofSeconds(30).toMillis()));
 
+    // The live-focus panel independently shows the same test and its currently-blocked step, before
+    // cancellation - scoped to the panel's own clickable item (by role, not `getByText`): the panel
+    // also carries a visually-hidden aria-live paragraph announcing the very same text for screen
+    // readers, which a plain text search would match too, a real strict-mode violation this
+    // project's own E2E run caught.
+    Locator activeTestItem =
+        details
+            .liveFocusPanel()
+            .getByRole(AriaRole.BUTTON, new Locator.GetByRoleOptions().setName(testDisplayName));
+    assertThat(activeTestItem).isVisible();
+    assertThat(
+            activeTestItem.getByText(
+                "block until cancelled", new Locator.GetByTextOptions().setExact(true)))
+        .isVisible();
+
     details.cancelButton().click();
     details.waitForStatus("CANCELLED", Duration.ofSeconds(30));
+
+    // The run is now terminal - the live-focus panel disappears entirely (not just visually hidden;
+    // LiveFocusPanel.tsx stops rendering it), not merely "no longer showing this specific test".
+    assertThat(details.liveFocusPanel()).hasCount(0);
 
     // INTERRUPTED is a terminal display status like any other - the row that was auto-expanded
     // while RUNNING correctly auto-collapses once it stops being RUNNING (see the "auto-expand must

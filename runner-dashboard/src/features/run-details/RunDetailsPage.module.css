@@ -88,6 +88,24 @@
   color: var(--color-accent);
 }
 
+/* Same look as `.downloadLink`, but for a real `<button>` ("Jump to first failure" - see C4.5's
+   own migration off a raw hash link) - resets native button chrome so it still reads as a link. */
+.linkButton {
+  display: inline-block;
+  margin-top: var(--space-2);
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.linkButton:hover {
+  text-decoration: underline;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
@@ -101,6 +119,14 @@
 
 .tableScroll {
   overflow-x: auto;
+  /* Without this, Chrome/WebKit still count the wide `.table` inside toward
+   * `document.documentElement.scrollWidth` even though this element's own box (and its
+   * client/scrollWidth) are correctly clamped to the viewport - letting a viewer drag the whole
+   * page sideways at narrow widths instead of just this one table. `contain: paint` tells the
+   * browser this element's own overflow is fully self-contained, which is exactly what an
+   * `overflow-x: auto` wrapper is supposed to guarantee (a real C4.6 finding, caught by
+   * ResponsiveE2eTest at 320px on the run details page's Tests table). */
+  contain: paint;
 }
 
 .table {
@@ -116,6 +142,9 @@
   text-align: left;
   border-bottom: 1px solid var(--color-border);
   font-size: var(--font-size-sm);
+  /* A step-less test's own name renders as plain cell text (no .testNameToggle wrapper) - same
+   * long-unbroken-name risk as .testNameToggle above, so every cell gets the same protection. */
+  overflow-wrap: anywhere;
 }
 
 .table thead th {
@@ -130,6 +159,22 @@
 
 .failedRow {
   background: var(--color-danger-bg);
+}
+
+/* Keeps a scrolled-to row clear of the sticky LiveFocusPanel above it - without this, native
+   scroll-into-view would tuck the row's top edge right under (or behind) the panel. */
+.focusableRow {
+  scroll-margin-top: var(--space-4);
+}
+
+/* `:focus`, not the app-wide `:focus-visible` convention (see global.css) - LiveFocusPanel's own
+   click deliberately moves focus here as its whole point, so the highlight must show regardless of
+   a browser's own focus-visible heuristics for a programmatically-focused, mouse-triggered target.
+   A background color, not `--focus-ring`'s own box-shadow - `box-shadow` is unreliable on `<tr>`
+   across browsers' table rendering models, `background` is not (`.failedRow` already relies on it). */
+.focusableRow:focus {
+  outline: none;
+  background: var(--color-accent-muted);
 }
 
 .artifactThumbnail {
@@ -162,6 +207,12 @@
   color: inherit;
   text-align: left;
   cursor: pointer;
+  /* A JUnit default display name for a no-args method (e.g. `aVeryLongDescriptiveTestMethodName()`)
+   * is one long unbroken "word" with no spaces - without this, it forces the whole Tests table
+   * (and its own horizontal scrollbar) far wider than the viewport instead of wrapping onto
+   * multiple lines (a real C4.6.3 finding: a real Chromium render showed a 140-char name alone
+   * stretching the table to ~1600px inside an ~1150px-wide scroll container). */
+  overflow-wrap: anywhere;
 }
 
 .testNameToggle:hover {
@@ -197,11 +248,169 @@
 
 .stepName {
   font-size: var(--font-size-sm);
+  /* Same reasoning as .testNameToggle above - a long step name with no natural break points must
+   * wrap rather than stretch the step list (and the Tests table it's nested inside) wider. */
+  overflow-wrap: anywhere;
 }
 
 .stepDuration {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
+}
+
+.sectionHeaderRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.sectionHeaderRow .sectionTitle {
+  margin-bottom: 0;
+}
+
+.failurePreviewLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+}
+
+/* `flex-basis: 100%` inside `.stepItem`'s own `flex-wrap` row forces this onto its own line below
+   the badge/name/duration, rather than trying to share their line. */
+.failureDetail {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.failureSummary {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-danger);
+  overflow-wrap: anywhere;
+}
+
+.failureActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.failureArtifacts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.failureArtifactsError {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-danger);
+}
+
+.liveFocusPanel {
+  position: sticky;
+  top: var(--space-3);
+  z-index: 1;
+  margin-bottom: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.liveFocusPanel .sectionTitle {
+  margin-bottom: var(--space-2);
+}
+
+.liveFocusEmpty {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.liveFocusList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.liveFocusItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.liveFocusItem:hover {
+  border-color: var(--color-border-strong);
+}
+
+.liveFocusTestName {
+  font-weight: var(--font-weight-medium);
+}
+
+.liveFocusStepName {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.filtersBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.filterField label {
+  color: var(--color-text-muted);
+}
+
+.filterField input,
+.filterField select {
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.filterCount {
+  margin: 0 0 var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  /* Pins the count to the toolbar's own baseline, not stretched to the row's full height by the
+     flex container's default `align-items: flex-end` (the fields above it size their own height
+     via label + input). */
+  align-self: center;
 }
 
 @media (max-width: 640px) {
@@ -211,5 +420,12 @@
 
   .details dt {
     margin-top: var(--space-2);
+  }
+
+  /* Stays in normal page flow on mobile, per the C4.2 spec - a narrow viewport has much less
+     vertical room to spare, and a sticky panel there would cover more of the Tests table than it
+     saves the user from scrolling for. */
+  .liveFocusPanel {
+    position: static;
   }
 }

@@ -24,6 +24,14 @@
 
 .tableScroll {
   overflow-x: auto;
+  /* Without this, Chrome/WebKit still count the wide `.table` inside toward
+   * `document.documentElement.scrollWidth` even though this element's own box (and its
+   * client/scrollWidth) are correctly clamped to the viewport - letting a viewer drag the whole
+   * page sideways at narrow widths instead of just this one table. `contain: paint` tells the
+   * browser this element's own overflow is fully self-contained, which is exactly what an
+   * `overflow-x: auto` wrapper is supposed to guarantee (see RunDetailsPage.module.css's identical
+   * fix, caught by C4.6's ResponsiveE2eTest at 320px). */
+  contain: paint;
 }
 
 .table {

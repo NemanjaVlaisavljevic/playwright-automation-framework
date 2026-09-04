@@ -65,15 +65,22 @@ class StepDrilldownE2eTest {
     assertThat(details.stepRow("open the homepage").getByRole(AriaRole.LINK)).hasCount(0);
     assertThat(details.stepRow("assert the homepage loaded").getByRole(AriaRole.LINK)).hasCount(0);
 
-    Locator screenshotLink = details.stepArtifactLink("intentionally fail this step", "Screenshot");
+    // Screenshot has two distinct affordances in the same step - a thumbnail and a separate "Open
+    // screenshot" text link - both must exist and both must point at the very same artifact.
+    Locator screenshotThumbnailLink =
+        details.stepScreenshotThumbnailLink("intentionally fail this step");
+    Locator openScreenshotLink = details.stepOpenScreenshotLink("intentionally fail this step");
     Locator traceLink = details.stepArtifactLink("intentionally fail this step", "Trace");
-    assertThat(screenshotLink).isVisible();
+    assertThat(screenshotThumbnailLink).isVisible();
+    assertThat(openScreenshotLink).isVisible();
     assertThat(traceLink).isVisible();
+    assertThat(openScreenshotLink.getAttribute("href"))
+        .isEqualTo(screenshotThumbnailLink.getAttribute("href"));
 
     // The links must not just exist in the DOM - they must actually resolve to the real captured
     // files through the real backend + Vite proxy, with the content type the download endpoint
     // itself derives from the artifact's own type (see ArtifactController).
-    assertArtifactDownloads(page, screenshotLink.getAttribute("href"), "image/png");
+    assertArtifactDownloads(page, screenshotThumbnailLink.getAttribute("href"), "image/png");
     assertArtifactDownloads(page, traceLink.getAttribute("href"), "application/zip");
   }
 

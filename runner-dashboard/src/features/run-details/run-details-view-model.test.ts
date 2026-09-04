@@ -4,7 +4,10 @@ import type {
   StepExecution,
   TestExecution,
 } from "../event-stream/run-event-reducer";
-import { buildRunDetailsViewModel } from "./run-details-view-model";
+import {
+  buildRunDetailsViewModel,
+  stepRowElementId,
+} from "./run-details-view-model";
 
 function test(overrides: Partial<TestExecution> = {}): TestExecution {
   return {
@@ -282,5 +285,116 @@ describe("buildRunDetailsViewModel", () => {
     const [testA, testB] = model.tests;
     expect(testA!.steps[0]!.artifacts).toHaveLength(1);
     expect(testB!.steps[0]!.artifacts).toHaveLength(0);
+  });
+
+  it("hasArtifacts is true when a test-level (no-stepId) artifact belongs to it", () => {
+    const testsById = new Map([
+      ["test-1", test({ testId: "test-1", status: "FAILED" })],
+    ]);
+    const artifacts: ArtifactSummaryResponse[] = [
+      {
+        artifactId: "screenshot-1",
+        testId: "test-1",
+        testDisplayName: "aTest()",
+        type: "SCREENSHOT",
+        mediaType: "image/png",
+        sizeBytes: 512,
+        createdAt: RUN_FINISHED_AT,
+        downloadUrl: "/artifacts/screenshot-1",
+      },
+    ];
+
+    const model = buildRunDetailsViewModel({
+      testsById,
+      artifacts,
+      runStatus: "FAILED",
+      runFinishedAt: RUN_FINISHED_AT,
+    });
+
+    expect(model.tests[0]!.hasArtifacts).toBe(true);
+  });
+
+  it("hasArtifacts is true when only a step's own artifact belongs to it", () => {
+    const testsById = new Map([
+      [
+        "test-1",
+        test({
+          testId: "test-1",
+          status: "FAILED",
+          steps: new Map([["step-1", step({ stepId: "step-1" })]]),
+        }),
+      ],
+    ]);
+    const artifacts: ArtifactSummaryResponse[] = [
+      {
+        artifactId: "trace-1",
+        testId: "test-1",
+        testDisplayName: "aTest()",
+        stepId: "step-1",
+        type: "TRACE",
+        mediaType: "application/zip",
+        sizeBytes: 1024,
+        createdAt: RUN_FINISHED_AT,
+        downloadUrl: "/artifacts/trace-1",
+      },
+    ];
+
+    const model = buildRunDetailsViewModel({
+      testsById,
+      artifacts,
+      runStatus: "FAILED",
+      runFinishedAt: RUN_FINISHED_AT,
+    });
+
+    expect(model.tests[0]!.hasArtifacts).toBe(true);
+  });
+
+  it("hasArtifacts is false for a test with no artifacts of its own or its steps'", () => {
+    const testsById = new Map([
+      [
+        "test-1",
+        test({
+          testId: "test-1",
+          status: "PASSED",
+          steps: new Map([["step-1", step({ stepId: "step-1" })]]),
+        }),
+      ],
+    ]);
+    // Belongs to a different test entirely - must not leak into test-1's own hasArtifacts.
+    const artifacts: ArtifactSummaryResponse[] = [
+      {
+        artifactId: "trace-1",
+        testId: "test-2",
+        testDisplayName: "bTest()",
+        type: "TRACE",
+        mediaType: "application/zip",
+        sizeBytes: 1024,
+        createdAt: RUN_FINISHED_AT,
+        downloadUrl: "/artifacts/trace-1",
+      },
+    ];
+
+    const model = buildRunDetailsViewModel({
+      testsById,
+      artifacts,
+      runStatus: "SUCCEEDED",
+      runFinishedAt: RUN_FINISHED_AT,
+    });
+
+    expect(model.tests[0]!.hasArtifacts).toBe(false);
+  });
+});
+
+describe("stepRowElementId", () => {
+  it("never collides across two different (testId, stepId) pairs that a naive delimiter join would", () => {
+    // "a-b" + "c" vs "a" + "b-c": a bare "-" join would produce the identical string "a-b-c" for
+    // both, since "-" survives encodeURIComponent unescaped.
+    expect(stepRowElementId("a-b", "c")).not.toBe(stepRowElementId("a", "b-c"));
+  });
+
+  it("never collides between two different tests sharing the same stepId", () => {
+    expect(stepRowElementId("test-a", "shared")).not.toBe(
+      stepRowElementId("test-b", "shared"),
+    );
   });
 });

@@ -37,6 +37,31 @@ export interface DisplayStep {
   readonly artifacts: readonly ArtifactSummaryResponse[];
 }
 
+/**
+ * The one failure a viewer should see without hunting the rest of the page: the failed step's own
+ * detail/artifacts if one exists (`scope: "step"`), or the test's own when no step explains it
+ * (`scope: "test"` - a test that never used the `Steps` API, or whose `TEST_FAILED`/`TEST_ABORTED`
+ * arrived without any step reporting `STEP_FAILED` first, e.g. a failure during cleanup after every
+ * step already passed). The two scopes matter beyond just which fields are present: a `"step"`
+ * failure is also rendered richly by that step's own row once the test is expanded, so a caller
+ * showing this as a collapsed-row preview should hide it once expanded to avoid double-rendering the
+ * same content - a `"test"` failure has nowhere else to appear, expanded or not, and must stay
+ * visible regardless of the row's expand state.
+ */
+export type DisplayTestFailure =
+  | {
+      readonly scope: "step";
+      readonly stepId: string;
+      readonly stepName: string;
+      readonly detail?: string;
+      readonly artifacts: readonly ArtifactSummaryResponse[];
+    }
+  | {
+      readonly scope: "test";
+      readonly detail?: string;
+      readonly artifacts: readonly ArtifactSummaryResponse[];
+    };
+
 export interface DisplayTest {
   readonly testId: string;
   readonly testDisplayName: string;
@@ -47,6 +72,36 @@ export interface DisplayTest {
   readonly detail?: string;
   readonly interrupted: boolean;
   readonly steps: readonly DisplayStep[];
+  /** Present only when `status` is `FAILED` or `ABORTED` - see {@link DisplayTestFailure}. */
+  readonly primaryFailure?: DisplayTestFailure;
+  /**
+   * `true` if this test's own (no-`stepId`) artifacts or any of its steps' own artifacts are
+   * non-empty - the C4.4 evidence filter's whole basis. Computed here, not re-derived per caller,
+   * so "has evidence" means the exact same thing everywhere it's asked (the filter, and any future
+   * caller) rather than each reimplementing "test-level or any step" themselves.
+   */
+  readonly hasArtifacts: boolean;
+}
+
+/** A stable, valid DOM id for "Jump to first failure" - also reused as-is by C4.5's deep links. */
+export function testRowElementId(testId: string): string {
+  return `test-${encodeURIComponent(testId)}`;
+}
+
+/**
+ * A stable, valid DOM id for one step's own row - `stepId` alone is not unique run-wide (two
+ * different tests may legitimately reuse the same one, see `RunnerEvent`'s own contract), so both
+ * ids must be encoded together. Length-prefixed, not joined with a bare delimiter: `-` (like most
+ * URL-safe punctuation) survives `encodeURIComponent` unescaped, so a naive `${testId}-${stepId}`
+ * join could let two different (testId, stepId) pairs collide on the same string (e.g. testId
+ * `"a-b"` + stepId `"c"` vs. testId `"a"` + stepId `"b-c"`). Prefixing the encoded testId with its
+ * own length removes that ambiguity regardless of what characters end up inside either segment -
+ * this id is only ever used opaquely via `document.getElementById`, never parsed back apart, so
+ * only collision-freedom matters, not reversibility.
+ */
+export function stepRowElementId(testId: string, stepId: string): string {
+  const encodedTestId = encodeURIComponent(testId);
+  return `step-${encodedTestId.length}-${encodedTestId}-${encodeURIComponent(stepId)}`;
 }
 
 export interface RunDetailsViewModel {
@@ -73,11 +128,18 @@ export function buildRunDetailsViewModel(params: {
   const runIsTerminal =
     runStatus !== undefined && isTerminalRunStatus(runStatus);
   const artifactsByStepKey = groupArtifactsByStepKey(artifacts);
+  const testLevelArtifactsByTestId = groupTestLevelArtifactsByTestId(artifacts);
 
   const tests = Array.from(testsById.values())
     .sort((a, b) => a.firstSequence - b.firstSequence)
     .map((test) =>
-      toDisplayTest(test, runIsTerminal, runFinishedAt, artifactsByStepKey),
+      toDisplayTest(
+        test,
+        runIsTerminal,
+        runFinishedAt,
+        artifactsByStepKey,
+        testLevelArtifactsByTestId.get(test.testId) ?? [],
+      ),
     );
 
   const counts = countByDisplayStatus(tests.map((test) => test.status));
@@ -98,6 +160,7 @@ function toDisplayTest(
   runIsTerminal: boolean,
   runFinishedAt: string | undefined,
   artifactsByStepKey: ReadonlyMap<string, readonly ArtifactSummaryResponse[]>,
+  testLevelArtifacts: readonly ArtifactSummaryResponse[],
 ): DisplayTest {
   const interrupted = runIsTerminal && test.status === "RUNNING";
   const steps = Array.from(test.steps.values())
@@ -116,19 +179,65 @@ function toDisplayTest(
   const detail = interrupted
     ? (test.detail ?? INTERRUPTED_TEST_DETAIL)
     : test.detail;
+  const status = interrupted ? "INTERRUPTED" : test.status;
+  const primaryFailure = computePrimaryFailure(
+    status,
+    steps,
+    detail,
+    testLevelArtifacts,
+  );
+  const hasArtifacts =
+    testLevelArtifacts.length > 0 ||
+    steps.some((step) => step.artifacts.length > 0);
   return {
     testId: test.testId,
     testDisplayName: test.testDisplayName,
     firstSequence: test.firstSequence,
-    status: interrupted ? "INTERRUPTED" : test.status,
+    status,
     interrupted,
     steps,
+    hasArtifacts,
     ...(test.startedAt !== undefined ? { startedAt: test.startedAt } : {}),
     // A still-RUNNING test/step never has its own finishedAt - using the run's own finishedAt as
     // the display end point means its duration stops advancing once shown, rather than continuing
     // to tick against `Date.now()` (`runDurationMs`'s default) forever after the run is long over.
     ...(finishedAt !== undefined ? { finishedAt } : {}),
     ...(detail !== undefined ? { detail } : {}),
+    ...(primaryFailure !== undefined ? { primaryFailure } : {}),
+  };
+}
+
+/**
+ * Prefers the one step whose own `FAILED` outcome most plausibly explains a `FAILED`/`ABORTED`
+ * test (the reducer's own lifecycle guarantees a test cannot finish while a step is still
+ * `RUNNING`, so any failed step is already terminal by the time this runs) - falls back to the
+ * test's own detail/artifacts for a test that never used the `Steps` API, or whose failure wasn't
+ * attributed to any single step. `undefined` for anything else (`PASSED`/`SKIPPED`/`RUNNING`/
+ * `INTERRUPTED`) - there is nothing to show a dedicated failure panel for.
+ */
+function computePrimaryFailure(
+  status: DisplayTestStatus,
+  steps: readonly DisplayStep[],
+  testDetail: string | undefined,
+  testLevelArtifacts: readonly ArtifactSummaryResponse[],
+): DisplayTestFailure | undefined {
+  if (status !== "FAILED" && status !== "ABORTED") {
+    return undefined;
+  }
+  const failedStep = steps.find((step) => step.status === "FAILED");
+  if (failedStep !== undefined) {
+    return {
+      scope: "step",
+      stepId: failedStep.stepId,
+      stepName: failedStep.stepName,
+      artifacts: failedStep.artifacts,
+      ...(failedStep.detail !== undefined ? { detail: failedStep.detail } : {}),
+    };
+  }
+  return {
+    scope: "test",
+    artifacts: testLevelArtifacts,
+    ...(testDetail !== undefined ? { detail: testDetail } : {}),
   };
 }
 
@@ -201,6 +310,29 @@ function groupArtifactsByStepKey(
       existing.push(artifact);
     } else {
       map.set(key, [artifact]);
+    }
+  }
+  return map;
+}
+
+/**
+ * An artifact with no `stepId` - a test that never used the `Steps` API, so its own top-level
+ * failure is the only thing to attribute a captured screenshot/trace to. Grouped by `testId` alone;
+ * unlike a step's `stepId`, `testId` (a JUnit unique ID) already is unique run-wide.
+ */
+function groupTestLevelArtifactsByTestId(
+  artifacts: readonly ArtifactSummaryResponse[],
+): ReadonlyMap<string, ArtifactSummaryResponse[]> {
+  const map = new Map<string, ArtifactSummaryResponse[]>();
+  for (const artifact of artifacts) {
+    if (artifact.stepId !== undefined) {
+      continue;
+    }
+    const existing = map.get(artifact.testId);
+    if (existing !== undefined) {
+      existing.push(artifact);
+    } else {
+      map.set(artifact.testId, [artifact]);
     }
   }
   return map;

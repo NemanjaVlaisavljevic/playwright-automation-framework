@@ -20,3 +20,12 @@ class NoopEventSource {
   close(): void {}
 }
 globalThis.EventSource ??= NoopEventSource as unknown as typeof EventSource;
+
+/**
+ * jsdom does not implement `Element.prototype.scrollIntoView` - stubbed as a no-op so
+ * `LiveFocusPanel`'s click-to-focus behavior doesn't throw. Assigned as a real function (not left
+ * undefined) specifically so a test can `vi.spyOn(Element.prototype, "scrollIntoView")` to assert
+ * it was called with the expected row, the same way any other browser-only side effect in this
+ * suite is verified.
+ */
+Element.prototype.scrollIntoView ??= () => {};
