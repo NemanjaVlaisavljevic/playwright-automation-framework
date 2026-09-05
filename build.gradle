@@ -53,7 +53,7 @@ dependencies {
     // artifact needed) is also what makes mocking the static io.qameta.allure.Allure.addAttachment
     // possible there.
     testImplementation 'org.mockito:mockito-core:5.23.0'
-    testRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+    testRuntimeOnly 'ch.qos.logback:logback-classic:1.6.3'
 }
 
 // The runner-listener module writes one JSONL file per runId (see RunnerEventTestExecutionListener)
@@ -686,7 +686,7 @@ configurations {
 // needs to execute JUnit Platform tests at all.
 dependencies {
     dashboardE2eTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+    dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.6.3'
 }
 
 // Builds the dashboard's production bundle once, ahead of the whole dashboardE2eTest run - shared
