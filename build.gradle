@@ -44,7 +44,7 @@ dependencies {
     testImplementation 'org.assertj:assertj-core:3.27.6'
     testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
     testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.2'
-    testImplementation 'com.networknt:json-schema-validator:2.0.4'
+    testImplementation 'com.networknt:json-schema-validator:3.0.7'
     testImplementation 'io.qameta.allure:allure-jupiter:2.35.4'
     testImplementation 'org.slf4j:slf4j-api:2.0.18'
     // Playwright's Page/BrowserContext/Tracing are interfaces specifically to allow this - used
