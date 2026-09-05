@@ -18,13 +18,13 @@ java {
 dependencies {
     implementation project(':runner-contract')
 
-    implementation platform('org.junit:junit-bom:6.0.1')
+    implementation platform('org.junit:junit-bom:6.1.3')
     implementation 'org.junit.platform:junit-platform-launcher'
 
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.2'
 
-    testImplementation platform('org.junit:junit-bom:6.0.1')
+    testImplementation platform('org.junit:junit-bom:6.1.3')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.assertj:assertj-core:3.27.6'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
