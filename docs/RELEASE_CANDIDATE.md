@@ -10,7 +10,8 @@ the living record of that proof, filled in section by section as each C5 sub-pha
 - **C5.3 — Three CI proofs on one commit** (this file, below): done.
 - **C5.4 — Portfolio README**: done - see the root [`README.md`](../README.md).
 - **C5.5 — Portfolio demo script**: done - see [`docs/PORTFOLIO_DEMO.md`](PORTFOLIO_DEMO.md).
-- **C5.6 — RC sign-off**: not yet started.
+- **C5.6 — RC sign-off**: done - see below. **Decision: GO for portfolio release candidate**, no
+  `v1.0.0-rc.1` tag yet (deferred to Phase D, see below).
 
 ## C5.1 — Acceptance matrix
 
@@ -528,3 +529,101 @@ Verified after all four: re-ran the corrected step 5 live (two real runs via the
 `QUEUED` -> `RUNNING` transition screenshotted in both the run's own detail page and the `/runs`
 history table), `./gradlew.bat spotlessApply` clean, `git diff --check` clean. **C5.5 is now
 closed.**
+
+## C5.6 — RC sign-off (2026-09-05)
+
+**Candidate commit: [`a43c88030d9829519cec237d6319d87ec82aed8c`](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/commit/a43c88030d9829519cec237d6319d87ec82aed8c)**
+("Finishing Faze C5.6" - adds `.gitattributes`, see below; the C5.5 work itself is
+[`2272ef710f3a670ed2b9718264121de6abdd57b6`](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/commit/2272ef710f3a670ed2b9718264121de6abdd57b6),
+one commit earlier).
+
+### Local gate (this commit's tree, verified fresh - not carried over from an earlier session)
+
+| Check | Result |
+|---|---|
+| `./gradlew.bat spotlessCheck test :runner-contract:test :runner-listener:test :runner-service:test --rerun` (cold daemon, `PUBLIC`) | ✅ green |
+| `npm run check` (`runner-dashboard`: format/lint/boundaries/typecheck/coverage/build) | ✅ green - 97.33%/94.74%/97.2%/97.55% stmt/branch/func/line coverage, unchanged from prior sessions |
+| `npm run api:check:snapshot` | ✅ clean |
+| `npm run api:check:contract` (against a real, freshly-started `runner-service`) | ✅ clean |
+| `./gradlew.bat dashboardE2eTest --rerun` (cold, real backend+dashboard+Chromium) | ✅ 21/21 |
+| `./gradlew.bat localSutHealth` then `./gradlew.bat localTest` (fresh local Docker RBP stack) | ✅ 32/32 |
+| Orphan processes after the whole gate | ✅ none - only the Gradle daemon remained (itself stopped afterward); confirmed via `Get-CimInstance Win32_Process` that no leftover `runner-service`/`vite`/Chromium process survived |
+| `git status`/`git diff --check` | ✅ clean, no stray `build/`/log/artifact files tracked (checked via `git ls-files` against `.log`/`build/`/`node_modules/`/`dist/`/`coverage/`/`allure-results`/`test-results` patterns - the only two hits were legitimately-named source files, `test-results-filter.ts`/`.test.ts`) |
+| README/`docs/RELEASE_CANDIDATE.md` render correctly on GitHub | ✅ checked the real rendered pages (not just local preview) - hero image loads, all anchor links and relative doc links (`PORTFOLIO_DEMO.md` included) resolve, no broken-image placeholders or unrendered markdown |
+
+**A real, fixed defect found along the way, not just a clean pass**: `npm run check`'s
+`format:check` and both `api:check:snapshot`/`api:check:contract` initially reported ~102 files and
+the regenerated OpenAPI client as "dirty," but every one was verified via `git hash-object` (worktree)
+vs. `git rev-parse HEAD:<path>` (committed blob) to be **byte-identical to `HEAD`** - a real false
+positive, not a real drift. Root cause: this machine's `core.autocrlf=true` checks tracked text files
+out as CRLF, which Prettier's default `endOfLine:"lf"` then flags, while `git status` itself also
+misreports these files as modified due to the same CRLF/LF mismatch (confirmed via
+`git add --renormalize`, which cleared the false "M" flags without changing a single byte of tracked
+content). Fixed at the root, not by reformatting-and-hoping: added `.gitattributes`
+(`* text=auto eol=lf`, plus explicit `binary` for `jpg`/`jpeg`/`png`/`ico`/`jar`) so every future
+checkout on any contributor's machine gets LF regardless of their local `core.autocrlf` - this is the
+one code change C5.6 itself introduced, and it is the commit this sign-off targets.
+
+### CI proof - all four workflows green on commit `a43c880`
+
+Each verified against the real GitHub Actions API (`GET .../actions/runs/{id}` and `.../jobs`), not
+assumed from a UI screenshot - every job and every step within it (including the failure-only
+upload/diagnostic steps, correctly `skipped` since nothing failed) came back `success`:
+
+| Workflow | Run | Conclusion |
+|---|---|---|
+| `quality-gate.yml` | [33960747887](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33960747887) | ✅ success (auto-triggered on push) |
+| `dashboard-quality.yml` | [33960849138](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33960849138) | ✅ success (both `frontend-quality` and `openapi-contract` jobs) |
+| `dashboard-e2e.yml` | [33960912594](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33960912594) | ✅ success |
+| `local-sut.yml` | [33961215952](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33961215952) | ✅ success |
+
+**Not a clean first try, and that's part of the real evidence, not swept under the rug**:
+`quality-gate.yml` failed twice in a row on the prior commit (`2272ef7`) before this one - once on
+`RoomApiContractTest` (the shared `PUBLIC` target briefly had rooms 4-6 missing `image`/
+`description`), once on `BookingAuthorizationApiTest` (the shared target briefly returned `500`
+instead of `403` for an anonymous booking read). Both were root-caused against the real, live public
+target (not guessed): `git blame`/log confirmed our own suite never creates rooms in a `read-only`
+run, and a direct `curl` against `https://automationintesting.online/api/room` and `/api/booking/1`
+at investigation time showed clean, schema-valid data and the correct `403` - proving both failures
+were transient third-party state on the shared sandbox, not a regression in this repository. Per the
+user's own explicit choice, no code was changed to chase these - the job was simply re-run, and it
+passed. This is exactly the accepted, documented nature of the `PUBLIC` canary (see the root
+README's "Current limitations" and this project's own long-standing classification discipline:
+public-target failures are `application`/`infrastructure` noise, not proof the framework itself
+regressed) - not a gap C5.6 needed to paper over.
+
+### Portfolio demo
+
+Already proven live end-to-end this same day, in C5.5's own review round (see above) - all nine
+script steps walked through for real against a real `runner-service` + dashboard + local Docker RBP
+stack, including the corrected `QUEUED` -> `RUNNING` step 5. Not independently re-run a third time
+for C5.6 itself; re-verifying the exact same script a second time in the same session would have
+added nothing beyond what C5.5's own review round already proved.
+
+### Known limitations (carried into the RC, not hidden)
+
+Unchanged from the root README's own "Current limitations" section, all reconfirmed accurate at
+this commit: in-memory/on-local-disk-only run history and event journal (no restart recovery), a
+single-instance runner with one global single-worker run queue (see C5.5's own corrected finding -
+there is no per-environment concurrency), no authentication/authorization, no artifact retention
+policy, and no deployment packaging (no Dockerfile, no same-origin production serving). Each is an
+explicit RC-stage scope decision this whole C5 gate exists to hand off cleanly to Phase D, not a
+defect discovered late.
+
+### Versioning decision
+
+Per the user's own explicit choice between the two options C5.6 was scoped to decide between:
+**close C5.6 as a portfolio RC without a real semantic-version tag.** The Java modules are still
+`1.0.0-SNAPSHOT` and `runner-dashboard/package.json` is still `0.0.0` - a real `v1.0.0-rc.1` tag
+would overclaim readiness before any of that is actually reconciled, and before a deployable package
+(Phase D) exists to be a release candidate *of*. Versioning gets decided and aligned once Phase D's
+packaging work is underway, not now.
+
+### Final decision
+
+**GO for portfolio release candidate**, at commit `a43c88030d9829519cec237d6319d87ec82aed8c`. All
+automated tests green, all four CI workflows green on this exact commit, local gate green including
+a fresh `dashboardE2eTest`/`localTest` run, no accidentally-tracked build/log/artifact files, `git
+diff --check` clean, README/docs render correctly on GitHub, OpenAPI snapshot fresh, and the
+portfolio demo script proven live end-to-end. **C5 is now fully closed.** Next: Faza D, starting
+with a D0 deployment-architecture spike before any Dockerfile is written.
