@@ -1,0 +1,12 @@
+# Force LF line endings for text files on checkout, regardless of a contributor's local
+# core.autocrlf setting. Without this, core.autocrlf=true on Windows checks these files out as
+# CRLF, which Prettier's default endOfLine:"lf" then flags as a formatting violation - exactly
+# what broke `npm run check`'s format:check locally during the C5.6 gate (2026-09-05), even though
+# the committed content itself was already LF and CI (Linux runners) never sees this.
+* text=auto eol=lf
+
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.ico binary
+*.jar binary
