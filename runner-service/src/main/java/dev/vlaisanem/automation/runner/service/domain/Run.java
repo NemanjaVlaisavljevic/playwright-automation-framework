@@ -1,7 +1,10 @@
 package dev.vlaisanem.automation.runner.service.domain;
 
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Immutable snapshot of one run's state at a point in time. A new snapshot is produced by {@link
@@ -22,7 +25,8 @@ public record Run(
     Instant startedAt,
     Instant finishedAt,
     Integer exitCode,
-    String detail) {
+    String detail,
+    List<SelectedTestSnapshot> selectedTests) {
 
   public Run {
     if (runId == null || runId.isBlank()) {
@@ -32,6 +36,23 @@ public record Run(
     Objects.requireNonNull(suite, "suite must not be null");
     Objects.requireNonNull(status, "status must not be null");
     Objects.requireNonNull(requestedAt, "requestedAt must not be null");
+    Objects.requireNonNull(selectedTests, "selectedTests must not be null");
+    selectedTests = List.copyOf(selectedTests);
+
+    boolean isCustom = suite == Suite.CUSTOM;
+    if (isCustom && selectedTests.isEmpty()) {
+      throw new IllegalArgumentException("CUSTOM requires a non-empty selectedTests");
+    }
+    if (!isCustom && !selectedTests.isEmpty()) {
+      throw new IllegalArgumentException(suite + " must not carry selectedTests");
+    }
+    Set<String> seenKeys = new HashSet<>();
+    for (SelectedTestSnapshot selected : selectedTests) {
+      if (!seenKeys.add(selected.testKey())) {
+        throw new IllegalArgumentException(
+            "Duplicate testKey in selectedTests: " + selected.testKey());
+      }
+    }
 
     boolean queuedOrStarting = status == RunStatus.QUEUED || status == RunStatus.STARTING;
     boolean requiresStartedAt =
@@ -65,10 +86,29 @@ public record Run(
     }
   }
 
+  /** Convenience for every non-{@code CUSTOM} suite, which never carries a test selection. */
   public static Run queued(
       String runId, Environment environment, Suite suite, Instant requestedAt) {
+    return queued(runId, environment, suite, requestedAt, List.of());
+  }
+
+  public static Run queued(
+      String runId,
+      Environment environment,
+      Suite suite,
+      Instant requestedAt,
+      List<SelectedTestSnapshot> selectedTests) {
     return new Run(
-        runId, environment, suite, RunStatus.QUEUED, requestedAt, null, null, null, null);
+        runId,
+        environment,
+        suite,
+        RunStatus.QUEUED,
+        requestedAt,
+        null,
+        null,
+        null,
+        null,
+        selectedTests);
   }
 
   /** Moves to a non-terminal status ({@code STARTING}/{@code RUNNING}); no result to record yet. */
@@ -92,6 +132,7 @@ public record Run(
         newStatus == RunStatus.RUNNING ? now : startedAt,
         newStatus.isTerminal() ? now : finishedAt,
         exitCode != null ? exitCode : this.exitCode,
-        detail != null ? detail : this.detail);
+        detail != null ? detail : this.detail,
+        selectedTests);
   }
 }

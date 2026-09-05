@@ -1,0 +1,17 @@
+# Local/D0-spike-only override - publishes host ports so the stack is actually reachable from
+# outside the Compose network without a real domain/TLS setup. Never use this in a real deployment;
+# the base docker-compose.yml alone publishes nothing.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml \
+#     --env-file deploy/.env up --build
+services:
+  web:
+    ports:
+      - "${WEB_PORT:-8081}:80"
+
+  runner-service:
+    # Direct, loopback-only access to runner-service for measurement/debugging without going
+    # through Caddy - e.g. `docker stats`/curl during a resource-measurement pass. Never published
+    # on anything but loopback, even here.
+    ports:
+      - "127.0.0.1:${RUNNER_SERVICE_DEBUG_PORT:-8080}:8080"

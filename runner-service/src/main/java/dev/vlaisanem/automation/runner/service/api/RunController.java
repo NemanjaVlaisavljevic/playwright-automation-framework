@@ -74,7 +74,7 @@ public class RunController {
   })
   @PostMapping
   public ResponseEntity<RunResponse> create(@Valid @RequestBody CreateRunRequest request) {
-    Run run = runService.submit(request.environment(), request.suite());
+    Run run = runService.submit(request.environment(), request.suite(), request.testKeys());
     return ResponseEntity.status(HttpStatus.ACCEPTED).body(RunResponse.from(run));
   }
 

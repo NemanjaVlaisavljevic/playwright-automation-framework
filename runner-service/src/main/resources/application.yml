@@ -29,6 +29,7 @@ runner:
   raw-events-dir: build/runner-events/raw
   journal-dir: build/runner-events/journal
   logs-dir: build/runner-logs
+  test-catalog-path: src/test/resources/catalog/public-test-catalog.json
   artifacts-dir: build/runner-artifacts
   process-log-max-bytes: 10485760
   termination-grace-period: PT5S

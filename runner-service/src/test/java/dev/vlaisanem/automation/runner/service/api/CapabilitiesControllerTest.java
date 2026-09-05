@@ -26,6 +26,7 @@ class CapabilitiesControllerTest {
         .andExpect(jsonPath("$.environments[0].suites[0]").value("SMOKE"))
         .andExpect(jsonPath("$.environments[0].suites[4]").value("REGRESSION"))
         .andExpect(jsonPath("$.environments[0].suites[5]").value("FIXTURE"))
+        .andExpect(jsonPath("$.environments[0].suites[6]").value("CUSTOM"))
         .andExpect(jsonPath("$.environments[1].name").value("LOCAL"))
         .andExpect(jsonPath("$.environments[1].suites[0]").value("JOURNEY"))
         .andExpect(jsonPath("$.environments[1].suites.length()").value(1));

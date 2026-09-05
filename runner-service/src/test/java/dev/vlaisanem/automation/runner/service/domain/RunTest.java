@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class RunTest {
@@ -75,7 +76,8 @@ class RunTest {
                     null,
                     null,
                     null,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("RUNNING requires startedAt");
   }
@@ -93,7 +95,8 @@ class RunTest {
                     T0,
                     null,
                     null,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("must not carry startedAt");
   }
@@ -111,7 +114,8 @@ class RunTest {
                     T0,
                     null,
                     null,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("requires finishedAt");
   }
@@ -129,7 +133,8 @@ class RunTest {
                     null,
                     T0,
                     null,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("must not carry finishedAt");
   }
@@ -147,7 +152,8 @@ class RunTest {
                     T0,
                     null,
                     0,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("must not carry a result");
   }
@@ -165,7 +171,8 @@ class RunTest {
                     null,
                     T0.plusSeconds(2),
                     0,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("SUCCEEDED requires startedAt");
   }
@@ -183,7 +190,8 @@ class RunTest {
                     T0.minusSeconds(1),
                     null,
                     null,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("startedAt must not be before requestedAt");
   }
@@ -201,7 +209,8 @@ class RunTest {
                     T0.plusSeconds(2),
                     T0.plusSeconds(1),
                     1,
-                    null))
+                    null,
+                    List.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("finishedAt must not be before startedAt");
   }
@@ -213,5 +222,50 @@ class RunTest {
     assertThatThrownBy(() -> queued.transitionTo(RunStatus.STARTING, null))
         .isInstanceOf(NullPointerException.class)
         .hasMessageContaining("now must not be null");
+  }
+
+  @Test
+  void customRequiresANonEmptySelection() {
+    assertThatThrownBy(() -> Run.queued("run-1", Environment.PUBLIC, Suite.CUSTOM, T0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("CUSTOM requires a non-empty selectedTests");
+  }
+
+  @Test
+  void nonCustomMustNotCarryASelection() {
+    SelectedTestSnapshot selected =
+        new SelectedTestSnapshot("some.Test#method", "Some test", TestLayer.API);
+
+    assertThatThrownBy(
+            () -> Run.queued("run-1", Environment.PUBLIC, Suite.SMOKE, T0, List.of(selected)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("SMOKE must not carry selectedTests");
+  }
+
+  @Test
+  void customRejectsDuplicateTestKeys() {
+    SelectedTestSnapshot selected =
+        new SelectedTestSnapshot("some.Test#method", "Some test", TestLayer.API);
+
+    assertThatThrownBy(
+            () ->
+                Run.queued(
+                    "run-1", Environment.PUBLIC, Suite.CUSTOM, T0, List.of(selected, selected)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Duplicate testKey");
+  }
+
+  @Test
+  void customSelectionSurvivesLifecycleTransitionsUnchanged() {
+    SelectedTestSnapshot selected =
+        new SelectedTestSnapshot("some.Test#method", "Some test", TestLayer.API);
+
+    Run run =
+        Run.queued("run-1", Environment.PUBLIC, Suite.CUSTOM, T0, List.of(selected))
+            .transitionTo(RunStatus.STARTING, T0.plusSeconds(1))
+            .transitionTo(RunStatus.RUNNING, T0.plusSeconds(2))
+            .transitionTo(RunStatus.SUCCEEDED, T0.plusSeconds(3), 0, null);
+
+    assertThat(run.selectedTests()).containsExactly(selected);
   }
 }

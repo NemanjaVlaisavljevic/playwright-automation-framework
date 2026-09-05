@@ -1,0 +1,53 @@
+{
+  "tests" : [ {
+    "testKey" : "dev.vlaisanem.automation.tests.api.AuthenticationApiTest#adminCanAuthenticate",
+    "displayName" : "Admin can obtain a non-empty session token",
+    "category" : "API",
+    "tags" : [ "api", "auth", "read-only", "regression", "smoke" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.api.BookingAuthorizationApiTest#anonymousCannotListBookings",
+    "displayName" : "Anonymous guest cannot list bookings for a room",
+    "category" : "API",
+    "tags" : [ "api", "booking", "read-only", "regression" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.api.BookingAuthorizationApiTest#anonymousCannotReadBooking",
+    "displayName" : "Anonymous guest cannot read a booking by id",
+    "category" : "API",
+    "tags" : [ "api", "booking", "read-only", "regression" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.api.MessageAuthorizationApiTest#anonymousCanListAllMessages",
+    "displayName" : "Known gap: an anonymous guest can list every contact message",
+    "category" : "API",
+    "tags" : [ "api", "known-defect", "message", "read-only", "regression" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.api.MessageAuthorizationApiTest#anonymousCanReadAnyMessagesPersonalDetails",
+    "displayName" : "Known gap: an anonymous guest can read another guest's email and phone number",
+    "category" : "API",
+    "tags" : [ "api", "known-defect", "message", "read-only", "regression" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.api.RoomApiContractTest#roomInventoryMatchesContract",
+    "displayName" : "GET /api/room returns a usable room inventory",
+    "category" : "API",
+    "tags" : [ "api", "read-only", "regression", "room", "smoke" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.journey.FeaturedRoomParityTest#homepageRendersFirstThreeApiRoomsAsBookingActions",
+    "displayName" : "Homepage renders the first three API rooms as booking actions",
+    "category" : "JOURNEY",
+    "tags" : [ "journey", "read-only", "regression", "room" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.ui.AdminLoginTest#invalidCredentialsShowError",
+    "displayName" : "Admin with an invalid password stays on the login screen",
+    "category" : "UI",
+    "tags" : [ "auth", "read-only", "regression", "smoke", "ui" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.ui.AdminLoginTest#validCredentialsReachAdminRooms",
+    "displayName" : "Admin with valid credentials reaches the room management screen",
+    "category" : "UI",
+    "tags" : [ "auth", "read-only", "regression", "smoke", "ui" ]
+  }, {
+    "testKey" : "dev.vlaisanem.automation.tests.ui.HomePageTest#guestCanDiscoverBookableRooms",
+    "displayName" : "Guest can see at least one bookable room",
+    "category" : "UI",
+    "tags" : [ "read-only", "regression", "room", "smoke", "ui" ]
+  } ]
+}

@@ -1,0 +1,24 @@
+# Both deploy/ Dockerfiles use the repo root as their build context (COPY paths reach across the
+# whole repo). Without this, `COPY runner-dashboard/ ./` in deploy/web/Dockerfile would overwrite
+# the Linux-native node_modules `npm ci` just installed with whatever node_modules happens to exist
+# on the host (Windows/macOS binaries the same npm ci call would never produce) - a real risk, not
+# hypothetical, caught during D0's own review round on a machine that actually had node_modules
+# checked out. This also keeps the build context Docker actually has to transfer to a sane size.
+.git
+.gradle
+.idea
+**/build
+runner-dashboard/node_modules
+runner-dashboard/dist
+runner-dashboard/coverage
+deploy/.env
+
+# Runtime events/logs/artifacts a real run produces under the repo root when *not* running in a
+# container (e.g. this repo's own default `runner.*-dir` values in application.yml) - irrelevant to
+# either image and occasionally large.
+build/runner-events
+build/runner-logs
+build/runner-artifacts
+allure-results
+test-results
+*.log

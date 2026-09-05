@@ -1,11 +1,14 @@
 
   export namespace Schemas {
     // <Schemas>
-  export type CreateRunRequest = ({ environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE") } & Record<string, unknown>)
-export type RunResponse = ({ runId: string, environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string } & Record<string, unknown>)
+  export type CreateRunRequest = ({ environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE" | "CUSTOM"), testKeys?: Array<string> } & Record<string, unknown>)
+export type SelectedTestResponse = ({ testKey: string, displayName: string, layer: ("API" | "UI" | "JOURNEY") } & Record<string, unknown>)
+export type RunResponse = ({ runId: string, environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE" | "CUSTOM"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string, selectedTests: Array<SelectedTestResponse> } & Record<string, unknown>)
 export type ProblemDetail = ({ type?: string, title: string, status: number, detail: string, instance: string, properties?: Record<string, unknown> } & Record<string, unknown>)
+export type TestCatalogEntry = ({ testKey: string, displayName: string, category: ("API" | "UI" | "JOURNEY"), tags: Array<string> } & Record<string, unknown>)
+export type TestCatalogResponse = ({ tests: Array<TestCatalogEntry> } & Record<string, unknown>)
 export type ArtifactSummaryResponse = ({ artifactId: string, testId: string, testDisplayName: string, stepId?: string, type: ("SCREENSHOT" | "TRACE" | "VIDEO"), mediaType: string, sizeBytes: number, createdAt: string, downloadUrl: string } & Record<string, unknown>)
-export type EnvironmentCapabilities = ({ name: ("PUBLIC" | "LOCAL"), suites: Array<("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE")> } & Record<string, unknown>)
+export type EnvironmentCapabilities = ({ name: ("PUBLIC" | "LOCAL"), suites: Array<("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE" | "CUSTOM")> } & Record<string, unknown>)
 export type CapabilitiesResponse = ({ apiVersion: string, eventSchemaVersion: string, environments: Array<EnvironmentCapabilities> } & Record<string, unknown>)
 
     // </Schemas>
@@ -58,6 +61,25 @@ export type post_CancelRun = {
           }
       responses: {200: Schemas.RunResponse,
 404: Schemas.ProblemDetail,
+500: Schemas.ProblemDetail,
+503: Schemas.ProblemDetail,
+},
+
+    }
+export type get_ListPublicTests = {
+      method: "GET",
+      path: "/api/v1/tests",
+      requestFormat: "json",
+      responseFormat: "json",
+      parameters: {
+            query:  { environment: ("PUBLIC" | "LOCAL") },
+
+
+
+
+          }
+      responses: {200: Schemas.TestCatalogResponse,
+400: Schemas.ProblemDetail,
 500: Schemas.ProblemDetail,
 503: Schemas.ProblemDetail,
 },
@@ -155,6 +177,7 @@ export type get_GetRunnerCapabilities = {
      export type EndpointByMethod = {
      get: {
            "/api/v1/runs": Endpoints.get_ListRuns,
+"/api/v1/tests": Endpoints.get_ListPublicTests,
 "/api/v1/runs/{runId}": Endpoints.get_GetRun,
 "/api/v1/runs/{runId}/log": Endpoints.get_DownloadRunLog,
 "/api/v1/runs/{runId}/artifacts": Endpoints.get_ListRunArtifacts,

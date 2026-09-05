@@ -627,3 +627,104 @@ a fresh `dashboardE2eTest`/`localTest` run, no accidentally-tracked build/log/ar
 diff --check` clean, README/docs render correctly on GitHub, OpenAPI snapshot fresh, and the
 portfolio demo script proven live end-to-end. **C5 is now fully closed.** Next: Faza D, starting
 with a D0 deployment-architecture spike before any Dockerfile is written.
+
+## Post-RC — Faza D0.5: Custom PUBLIC runs (2026-09-05)
+
+**C5.6's sign-off above is unchanged and remains the locked, accurate RC baseline** at commit
+`a43c88030d9829519cec237d6319d87ec82aed8c` - nothing in this section retroactively edits or
+re-litigates that gate. D0.5 is a new functional increment layered on top of it, built after the
+RC closed and before Faza D1 (production packaging): it lets a dashboard user hand-pick individual
+`PUBLIC`, read-only tests from a server-generated catalog and launch exactly those as a new
+`Suite.CUSTOM`, without the client ever being able to send a Gradle task name, tag, class, method,
+or arbitrary `--tests` expression - only a `testKey` chosen from, and validated against, a
+server-side catalog the server itself generates and re-validates.
+
+### What was built
+
+- `TestCatalogGenerator` (main suite `tooling` package): JUnit Platform discovery-only generator
+  producing the committed `src/test/resources/catalog/public-test-catalog.json` allowlist -
+  fail-fast on a non-unique/non-canonical `testKey`, a missing `read-only` tag, a present
+  `mutation`/`fixture` tag, or anything but exactly one `api`/`ui`/`journey` layer tag; tags sorted
+  via `TreeSet` so the committed snapshot never drifts on `Set`-iteration-order alone.
+- `testCatalogGenerate`/`testCatalogCheck` Gradle tasks (root `build.gradle`), the latter wired into
+  `quality-gate.yml` as a CI drift gate on every push/PR, mirroring the existing OpenAPI snapshot
+  guard.
+- `runner-service`: `TestCatalogService` (re-reads and re-validates the catalog file on every call
+  via `TestCatalogContentValidator` - the same uniqueness/canonical/exactly-one-layer/tag checks
+  applied again at runtime-load time, since a deployed catalog file is untrusted input, not an
+  inherently-safe artifact), `GET /api/v1/tests?environment=PUBLIC`, `CustomTestSelectionValidator`
+  (the one place a client-submitted `testKey` list becomes a trustworthy, immutable
+  `SelectedTestSnapshot` list), a new `customTest` Gradle task, and `Suite.CUSTOM` end to end through
+  `RunService`/`SuiteCommandFactory`/the REST contract.
+- Dashboard: `CustomTestPicker` (search, Layer dropdown, separate Smoke-only checkbox, select-all-
+  visible, clear-selection), wired into `RunLaunchForm` behind the existing `Suite` dropdown.
+
+### Review round on this increment - 4 P1 + 3 P2 + 1 P3 fixed, 1 P3 deliberately deferred
+
+1. **[P1] `testCatalogCheck` wasn't wired into any CI workflow** - fixed: added as a step in
+   `quality-gate.yml` immediately after the existing read-only test gate.
+2. **[P1] `testKey` uniqueness/canonical-form/exactly-one-layer/tag-sorting not enforced by the
+   generator** - fixed in `TestCatalogGenerator` (see above); re-generated the real catalog and
+   confirmed byte-identical content to the pre-fix version, now provably validated rather than
+   incidentally correct.
+3. **[P1] `TestCatalogService` performed no content validation at runtime-load time** - fixed: added
+   `TestCatalogContentValidator`, applying the same checks the generator enforces, invoked on every
+   `current()` call; also fixed `CustomTestSelectionValidator`'s catalog-to-map step, which
+   previously overwrote a duplicate `testKey` silently (last one wins) - it now fails fast instead.
+4. **[P1] No permanent, committed E2E scenario for `Suite.CUSTOM`** (only a manual, in-session
+   browser check existed) - fixed: added `CustomRunE2eTest` to the `dashboardE2eTest` source set -
+   selects exactly two stable `PUBLIC` tests through the real `CustomTestPicker`, launches `CUSTOM`,
+   confirms `SUCCEEDED`/`Total=2`/`Passed=2`, confirms both selected tests' rows are present and a
+   third, unselected catalog test's row is absent, and confirms the REST response's own
+   `selectedTests` snapshot matches the selection exactly via a direct same-origin `GET`. **Run live
+   against the real backend + dashboard + Chromium and passed** (not just written from source-
+   reading) before being considered done.
+5. **[P2] `CustomTestPicker`'s catalog query had no retry/recovery pattern** - fixed: mirrors the
+   existing capabilities/health-query pattern (poll while erroring + `refetchIntervalInBackground:
+   true`, with a testable interval prop). Two new tests prove recovery without remounting, including
+   a backgrounded-tab scenario - the latter was verified to actually fail without
+   `refetchIntervalInBackground: true` before being trusted as a meaningful regression test, not
+   just written and assumed correct.
+6. **[P2] `TestCatalogUnavailableException`'s client-facing message embedded a resolved absolute
+   filesystem path**, leaked verbatim by `RunExceptionHandler` in a 503 `ProblemDetail.detail` -
+   fixed to match the existing `ArtifactManifestCorruptException` pattern: a generic client-facing
+   message, with the real path carried only in a `diagnosticReason()` logged server-side. A logback
+   `ListAppender` test proves the path reaches the log but never the client-facing response.
+7. **[P2] No full-chain `RunServiceTest` for `CUSTOM`** - fixed: added a test exercising catalog load
+   -> validation -> immutable selection snapshot -> the actual launched `customTest --tests ...`
+   command (with a second, unselected catalog entry proving the command carries exactly the selected
+   filter and nothing else), plus a negative-path test proving an invalid selection never saves a
+   `Run`, never emits any event, and never launches a process. A `RunControllerTest` addition proves
+   the request body's `testKeys` reach `RunService.submit` and the response's `selectedTests`
+   reflects what the service returned.
+8. **[P3] `RunResponse` exposed the domain `SelectedTestSnapshot` record directly** - fixed: added a
+   dedicated `SelectedTestResponse` DTO with explicit mapping, mirroring `RunResponse`'s own existing
+   separation from the `Run` domain record. Re-exported the OpenAPI spec from a real running backend
+   and regenerated the TypeScript client (the schema component name changed from
+   `SelectedTestSnapshot` to `SelectedTestResponse`, field shape unchanged) - full frontend `npm run
+   check` and the backend test suite both re-verified green afterward.
+9. **[P3, deliberately deferred] `maxSelectableTests` (currently 25, enforced server-side) is not
+   exposed to the frontend** - `CustomTestPicker`'s "Select all visible" could exceed the limit once
+   the catalog grows past 25 entries. Left deferred, per the explicit condition it was accepted
+   under: the real catalog has 10 entries today, well under the cap, and server-side validation
+   (`CustomTestSelectionValidator`) remains the final authority regardless - an over-limit request is
+   still rejected with a 400, never silently truncated or accepted. Must be revisited before the
+   catalog is allowed to grow past 25, and preferably before D2.
+
+### Known limitations (D0.5-specific, in addition to the RC's own)
+
+- The `maxSelectableTests` cap (25) is invisible to the frontend, as described above (P3,
+  deliberately deferred).
+- `RunResponse.selectedTests` is now its own `SelectedTestResponse` DTO, but the underlying domain
+  `SelectedTestSnapshot`/`Run.selectedTests()` shape is still what D2's planned
+  `run_selected_tests` Postgres table is designed to persist - no persistence exists yet; a `CUSTOM`
+  run's selection lives only in the same in-memory `Run` record as everything else the RC's own
+  "Known limitations" section already discloses (no restart recovery).
+- No authentication/authorization gates catalog listing or `CUSTOM` submission specifically - covered
+  by the RC's existing, broader "no authentication/authorization" limitation, not a new gap.
+
+Verified after all fixes: `./gradlew.bat spotlessCheck test :runner-service:test` green, `npm run
+check` (frontend format/lint/boundaries/typecheck/coverage/build) green, `dashboardE2eTest`'s
+`CustomRunE2eTest` and `RunLifecycleE2eTest` both re-run live and green after the `SelectedTestResponse`
+DTO change, and the OpenAPI snapshot/generated client re-exported and regenerated from a real running
+backend rather than hand-edited.

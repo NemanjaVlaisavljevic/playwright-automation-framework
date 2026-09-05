@@ -28,7 +28,13 @@ class CapabilitiesResponseTest {
         .containsExactly(Environment.PUBLIC, Environment.LOCAL);
     assertThat(response.environments().get(0).suites())
         .containsExactly(
-            Suite.SMOKE, Suite.API, Suite.UI, Suite.JOURNEY, Suite.REGRESSION, Suite.FIXTURE);
+            Suite.SMOKE,
+            Suite.API,
+            Suite.UI,
+            Suite.JOURNEY,
+            Suite.REGRESSION,
+            Suite.FIXTURE,
+            Suite.CUSTOM);
     // LOCAL only ever runs mutation-safe against a manually-started local stack for JOURNEY today -
     // see RunCatalog and Environment.LOCAL's own Javadoc for why this is deliberately narrow.
     assertThat(response.environments().get(1).suites()).containsExactly(Suite.JOURNEY);

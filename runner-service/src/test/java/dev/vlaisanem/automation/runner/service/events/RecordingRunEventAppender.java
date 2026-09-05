@@ -54,4 +54,9 @@ public final class RecordingRunEventAppender implements RunEventAppender {
   public List<RunnerEvent> eventsFor(String runId) {
     return events.stream().filter(event -> event.runId().equals(runId)).toList();
   }
+
+  /** Every event ever appended, across every runId - proves nothing was emitted at all. */
+  public int totalEventCount() {
+    return events.size();
+  }
 }

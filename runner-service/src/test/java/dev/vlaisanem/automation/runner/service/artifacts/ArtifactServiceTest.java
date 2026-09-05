@@ -181,6 +181,7 @@ class ArtifactServiceTest {
         artifactsRoot.resolve("raw").toString(),
         artifactsRoot.resolve("journal").toString(),
         artifactsRoot.resolve("logs").toString(),
+        "src/test/resources/catalog/public-test-catalog.json",
         artifactsRoot.toString(),
         1024 * 1024,
         Duration.ofSeconds(5),

@@ -1,0 +1,46 @@
+# {$SITE_ADDRESS} defaults to :80 for the D0 spike/local Compose run (no domain purchased yet -
+# D5's job). This alone is NOT yet a working TLS setup once a real domain exists - D1 still has to
+# (a) actually pass SITE_ADDRESS through from docker-compose.yml (nothing does today), (b) publish
+# 80/443 (and optionally 443/udp for HTTP/3) on `web`, and (c) give Caddy persistent named volumes
+# for its own /data (ACME account + certificates) and /config, none of which exist yet - without
+# those, Caddy would re-request a fresh certificate on every container recreate and hit Let's
+# Encrypt's rate limits. Tracked as an explicit D1 task list in docs/DEPLOYMENT_ARCHITECTURE.md,
+# not assumed done just because this file references the env var.
+{$SITE_ADDRESS::80} {
+	encode gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Caddy normally runs directives in its own fixed internal order, not the order written below -
+	# `try_files`/`file_server` would otherwise rewrite an unmatched path (including a real API
+	# path like /api/v1/capabilities) to /index.html *before* reverse_proxy ever saw the original
+	# path, silently serving the SPA shell instead of proxying it (a real bug caught during the D0
+	# spike by actually curling /api/v1/capabilities through Caddy, not assumed from the config
+	# alone). Wrapping everything in one `route` block forces genuine top-to-bottom evaluation, so
+	# the two reverse_proxy matchers below always get first refusal.
+	route {
+		# Only a bare health check is exposed publicly - not the full actuator surface (info is
+		# enabled server-side too, per application.yml, but deliberately not proxied here) and not
+		# /v3/api-docs (the OpenAPI document only ever needs to be reachable from the dashboard's
+		# own build tooling, against a real running instance directly, not through the public edge
+		# - see runner-dashboard/README.md's api:check:contract script).
+		reverse_proxy /actuator/health runner-service:8080
+
+		# SSE-safe by default - Caddy's reverse_proxy streams a chunked/event-stream response as it
+		# arrives rather than buffering the whole thing, so RunEventStreamController's long-lived
+		# connections work with no special flush_interval override needed.
+		reverse_proxy /api/* runner-service:8080
+
+		# React Router's client-side routing needs every other path to still resolve to
+		# index.html - the SPA reads the real URL itself once loaded, Caddy just has to stop
+		# returning 404 for it.
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -5,11 +5,13 @@ import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.RunEventAppender;
 import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
 import dev.vlaisanem.automation.runner.service.repository.RunRepository;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.LongFunction;
@@ -51,7 +53,16 @@ public class RunLifecycleCoordinator {
 
   /** Durably accepts a new run and emits its {@code RUN_QUEUED} - always the first event. */
   public Run queue(String runId, Environment environment, Suite suite, Instant now) {
-    Run run = Run.queued(runId, environment, suite, now);
+    return queue(runId, environment, suite, now, List.of());
+  }
+
+  public Run queue(
+      String runId,
+      Environment environment,
+      Suite suite,
+      Instant now,
+      List<SelectedTestSnapshot> selectedTests) {
+    Run run = Run.queued(runId, environment, suite, now, selectedTests);
     return repository.save(
         run, ignored -> appendEvent(runId, seq -> RunnerEvent.runQueued(runId, seq, now)));
   }

@@ -1,0 +1,67 @@
+# Production topology - three long-lived containers, no host ports published by default (this file
+# alone is not enough to actually reach anything from outside the Compose network - see
+# docker-compose.debug.yml for local/D0-spike port publishing, and docs/DEPLOYMENT_ARCHITECTURE.md
+# for what D1 still needs to add before a real deployment: SITE_ADDRESS/80/443 wiring on `web` and
+# persistent volumes for Caddy's own /data and /config, none of which exist yet).
+#
+# Run from the repository root:
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up --build
+#
+# Two networks, not one: `edge` (web <-> runner-service) and `data` (runner-service <-> postgres,
+# `internal: true` - no default-network access at all, not even for `web`). Without this split,
+# every service shares one default network and `web` could reach `postgres` directly, undermining
+# the "no public/no-other-service Postgres access" boundary even though nothing external is
+# involved - caught during D0's own review round, not assumed safe from the Compose file alone.
+#
+# No Docker socket is mounted anywhere (the runner never manages its own host, in a container or
+# otherwise - LOCAL-environment suites, which are the only thing that would need one, are out of
+# scope for this deployment).
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web/Dockerfile
+    networks:
+      - edge
+    depends_on:
+      - runner-service
+    restart: unless-stopped
+
+  runner-service:
+    build:
+      context: ..
+      dockerfile: deploy/runner-service/Dockerfile
+    networks:
+      - edge
+      - data
+    environment:
+      - RUNNER_QUEUECAPACITY=5
+    volumes:
+      - runner-data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    networks:
+      - data
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-runner}
+      - POSTGRES_USER=${POSTGRES_USER:-runner}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - see deploy/.env.example}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-runner}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  edge:
+  data:
+    internal: true
+
+volumes:
+  runner-data:
+  pgdata:

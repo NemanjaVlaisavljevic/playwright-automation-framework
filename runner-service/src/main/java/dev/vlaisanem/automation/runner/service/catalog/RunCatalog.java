@@ -42,6 +42,7 @@ public final class RunCatalog {
           Map.entry(new Key(Environment.PUBLIC, Suite.JOURNEY), "journeyTest"),
           Map.entry(new Key(Environment.PUBLIC, Suite.REGRESSION), "regressionTest"),
           Map.entry(new Key(Environment.PUBLIC, Suite.FIXTURE), "fixtureTest"),
+          Map.entry(new Key(Environment.PUBLIC, Suite.CUSTOM), "customTest"),
           Map.entry(new Key(Environment.LOCAL, Suite.JOURNEY), "localJourneyTest"));
 
   private RunCatalog() {}

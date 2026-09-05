@@ -45,7 +45,8 @@ class OpenApiContractTest {
           "downloadRunLog",
           "getRunnerCapabilities",
           "listRunArtifacts",
-          "downloadRunArtifact");
+          "downloadRunArtifact",
+          "listPublicTests");
 
   @Value("${local.server.port}")
   private int port;
@@ -133,7 +134,12 @@ class OpenApiContractTest {
               "/api/v1/runs/{runId}/artifacts/{artifactId}",
               "get",
               List.of("200", "404", "500"),
-              Map.of("200", MediaType.IMAGE_PNG_VALUE)));
+              Map.of("200", MediaType.IMAGE_PNG_VALUE)),
+          new OperationContract(
+              "/api/v1/tests",
+              "get",
+              List.of("200", "400", "503", "500"),
+              Map.of("200", MediaType.APPLICATION_JSON_VALUE)));
 
   @Test
   void everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes() {
@@ -244,7 +250,13 @@ class OpenApiContractTest {
     JsonNode runResponse = spec.path("components").path("schemas").path("RunResponse");
     assertThat(requiredFieldsOf(runResponse))
         .containsExactlyInAnyOrder(
-            "runId", "environment", "suite", "status", "requestedAt", "processLogUrl");
+            "runId",
+            "environment",
+            "suite",
+            "status",
+            "requestedAt",
+            "processLogUrl",
+            "selectedTests");
 
     JsonNode properties = runResponse.path("properties");
     for (String terminalField : List.of("startedAt", "finishedAt", "exitCode", "detail")) {

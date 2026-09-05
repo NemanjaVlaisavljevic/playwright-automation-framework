@@ -1,5 +1,7 @@
 package dev.vlaisanem.automation.runner.service.api;
 
+import dev.vlaisanem.automation.runner.service.catalog.TestCatalogUnavailableException;
+import dev.vlaisanem.automation.runner.service.catalog.UnsupportedTestCatalogEnvironmentException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
@@ -10,6 +12,7 @@ import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
 import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
+import dev.vlaisanem.automation.runner.service.orchestration.InvalidTestSelectionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -79,6 +82,32 @@ public class RunExceptionHandler {
   @ExceptionHandler(ArtifactNotFoundException.class)
   public ProblemDetail handleArtifactNotFound(ArtifactNotFoundException exception) {
     return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, exception.getMessage());
+  }
+
+  @ExceptionHandler(InvalidTestSelectionException.class)
+  public ProblemDetail handleInvalidTestSelection(InvalidTestSelectionException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, exception.getMessage());
+  }
+
+  @ExceptionHandler(UnsupportedTestCatalogEnvironmentException.class)
+  public ProblemDetail handleUnsupportedTestCatalogEnvironment(
+      UnsupportedTestCatalogEnvironmentException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, exception.getMessage());
+  }
+
+  /**
+   * A missing/unreadable/invalid catalog file is a deployment problem, not a client error - 503
+   * (not 400) is the honest status: retrying the exact same request later, once the file is fixed,
+   * would succeed. Like {@link ArtifactManifestCorruptException}, {@link
+   * TestCatalogUnavailableException#getMessage()} is client-safe by construction, never by
+   * coincidence - the real cause ({@link TestCatalogUnavailableException#diagnosticReason()}, which
+   * can legitimately contain a resolved absolute filesystem path) is logged here and never sent to
+   * the client.
+   */
+  @ExceptionHandler(TestCatalogUnavailableException.class)
+  public ProblemDetail handleTestCatalogUnavailable(TestCatalogUnavailableException exception) {
+    log.error("Test catalog unavailable: {}", exception.diagnosticReason(), exception);
+    return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
   }
 
   /**

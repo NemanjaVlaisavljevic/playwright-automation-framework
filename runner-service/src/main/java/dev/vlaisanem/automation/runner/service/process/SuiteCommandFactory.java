@@ -2,8 +2,10 @@ package dev.vlaisanem.automation.runner.service.process;
 
 import dev.vlaisanem.automation.runner.service.catalog.RunCatalog;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -25,7 +27,12 @@ public final class SuiteCommandFactory {
   private SuiteCommandFactory() {}
 
   public static List<String> commandFor(
-      Environment environment, Suite suite, Path repoRoot, String runId, Path rawEventsDir) {
+      Environment environment,
+      Suite suite,
+      Path repoRoot,
+      String runId,
+      Path rawEventsDir,
+      List<SelectedTestSnapshot> selectedTests) {
     String task =
         RunCatalog.gradleTaskFor(environment, suite)
             .orElseThrow(
@@ -35,13 +42,22 @@ public final class SuiteCommandFactory {
                     // can actually map, a programming error, not bad input.
                     new IllegalStateException(
                         "No Gradle task mapped for " + environment + " + " + suite));
-    return List.of(
-        gradlewPath(repoRoot),
-        task,
-        "--rerun",
-        "--no-daemon",
-        "-Drunner.runId=" + runId,
-        "-Drunner.rawEventsDir=" + rawEventsDir);
+    List<String> command = new ArrayList<>();
+    command.add(gradlewPath(repoRoot));
+    command.add(task);
+    command.add("--rerun");
+    command.add("--no-daemon");
+    // The only place a client-submitted value ever reaches this command line - and only the exact
+    // testKey a caller already validated against the server's own catalog (see
+    // RunService#submit), translated into Gradle's `--tests Class.method` filter syntax. Never a
+    // raw string from the request body copied through directly.
+    for (SelectedTestSnapshot selected : selectedTests) {
+      command.add("--tests");
+      command.add(selected.testKey().replace('#', '.'));
+    }
+    command.add("-Drunner.runId=" + runId);
+    command.add("-Drunner.rawEventsDir=" + rawEventsDir);
+    return List.copyOf(command);
   }
 
   private static String gradlewPath(Path repoRoot) {

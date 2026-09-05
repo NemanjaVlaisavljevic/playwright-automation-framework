@@ -6,6 +6,7 @@ import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import io.swagger.v3.oas.annotations.media.Schema;
 import java.time.Instant;
+import java.util.List;
 
 /**
  * Wire representation of a {@link Run}. Kept separate from the domain record (rather than
@@ -33,7 +34,8 @@ public record RunResponse(
     @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED) Instant finishedAt,
     @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED) Integer exitCode,
     @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED) String detail,
-    @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String processLogUrl) {
+    @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String processLogUrl,
+    @Schema(requiredMode = Schema.RequiredMode.REQUIRED) List<SelectedTestResponse> selectedTests) {
 
   public static RunResponse from(Run run) {
     return new RunResponse(
@@ -46,6 +48,7 @@ public record RunResponse(
         run.finishedAt(),
         run.exitCode(),
         run.detail(),
-        "/api/v1/runs/" + run.runId() + "/log");
+        "/api/v1/runs/" + run.runId() + "/log",
+        run.selectedTests().stream().map(SelectedTestResponse::from).toList());
   }
 }

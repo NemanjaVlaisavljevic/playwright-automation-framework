@@ -6,7 +6,10 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import dev.vlaisanem.automation.runner.service.catalog.TestCatalogUnavailableException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
+import java.io.IOException;
+import java.nio.file.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -81,6 +84,33 @@ class RunExceptionHandlerTest {
             event -> {
               assertThat(event.getLevel()).isEqualTo(Level.ERROR);
               assertThat(event.getFormattedMessage()).contains("C:\\secret\\path");
+            });
+  }
+
+  /**
+   * Regression test for a review's finding: {@code TestCatalogService} resolves the catalog file to
+   * an absolute path, so the exception's raw message used to embed it and {@code
+   * RunExceptionHandler} sent that verbatim as {@code ProblemDetail#getDetail()} - leaking internal
+   * container/host filesystem structure to any client hitting a 503. The absolute path must reach
+   * the server log for diagnosis but never the client-facing response.
+   */
+  @Test
+  void testCatalogUnavailableExceptionNeverLeaksTheAbsolutePathButLogsIt() {
+    TestCatalogUnavailableException original =
+        new TestCatalogUnavailableException(
+            Path.of("C:\\secret\\container\\path\\catalog.json"), new IOException("disk error"));
+
+    ProblemDetail response = handler.handleTestCatalogUnavailable(original);
+
+    assertThat(response.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
+    assertThat(response.getDetail()).isEqualTo("Test catalog is unavailable.");
+    assertThat(response.getDetail()).doesNotContain("C:\\secret\\container\\path");
+
+    assertThat(logAppender.list)
+        .anySatisfy(
+            event -> {
+              assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+              assertThat(event.getFormattedMessage()).contains("C:\\secret\\container\\path");
             });
   }
 }

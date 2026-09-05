@@ -1,5 +1,6 @@
 package dev.vlaisanem.automation.runner.service.api;
 
+import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -14,7 +15,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
+import dev.vlaisanem.automation.runner.service.domain.TestLayer;
 import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
 import dev.vlaisanem.automation.runner.service.exception.RunLogNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
@@ -24,6 +27,7 @@ import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,7 +48,7 @@ class RunControllerTest {
   void createReturns202WithTheQueuedRun() throws Exception {
     Run queued =
         Run.queued("run-1", Environment.PUBLIC, Suite.SMOKE, Instant.parse("2026-08-30T00:00:00Z"));
-    when(runService.submit(Environment.PUBLIC, Suite.SMOKE)).thenReturn(queued);
+    when(runService.submit(Environment.PUBLIC, Suite.SMOKE, null)).thenReturn(queued);
 
     mockMvc
         .perform(
@@ -58,9 +62,43 @@ class RunControllerTest {
         .andExpect(jsonPath("$.startedAt").doesNotExist());
   }
 
+  /**
+   * Regression test for the review's finding: nothing previously proved the request body's own
+   * {@code testKeys} actually reach {@link RunService#submit}, or that the response's {@code
+   * selectedTests} reflects what the service returned rather than some other hardcoded shape.
+   */
+  @Test
+  void createPassesTestKeysThroughAndReturnsTheMatchingSelectionSnapshot() throws Exception {
+    List<SelectedTestSnapshot> selectedTests =
+        List.of(new SelectedTestSnapshot("some.Test#method", "Some test", TestLayer.API));
+    Run queued =
+        Run.queued(
+            "run-1",
+            Environment.PUBLIC,
+            Suite.CUSTOM,
+            Instant.parse("2026-08-30T00:00:00Z"),
+            selectedTests);
+    when(runService.submit(Environment.PUBLIC, Suite.CUSTOM, List.of("some.Test#method")))
+        .thenReturn(queued);
+
+    mockMvc
+        .perform(
+            post("/api/v1/runs")
+                .contentType("application/json")
+                .content(
+                    "{\"environment\":\"PUBLIC\",\"suite\":\"CUSTOM\","
+                        + "\"testKeys\":[\"some.Test#method\"]}"))
+        .andExpect(status().isAccepted())
+        .andExpect(jsonPath("$.runId").value("run-1"))
+        .andExpect(jsonPath("$.selectedTests", hasSize(1)))
+        .andExpect(jsonPath("$.selectedTests[0].testKey").value("some.Test#method"))
+        .andExpect(jsonPath("$.selectedTests[0].displayName").value("Some test"))
+        .andExpect(jsonPath("$.selectedTests[0].layer").value("API"));
+  }
+
   @Test
   void createReturns400ForAnUnsupportedCombination() throws Exception {
-    when(runService.submit(eq(Environment.PUBLIC), any()))
+    when(runService.submit(eq(Environment.PUBLIC), any(), any()))
         .thenThrow(new UnsupportedRunCombinationException(Environment.PUBLIC, Suite.SMOKE));
 
     mockMvc
@@ -120,7 +158,7 @@ class RunControllerTest {
    */
   @Test
   void createReturns500WithAGenericMessageForAnUnexpectedException() throws Exception {
-    when(runService.submit(any(), any()))
+    when(runService.submit(any(), any(), any()))
         .thenThrow(new IllegalStateException("internal detail: should never reach a client"));
 
     mockMvc
@@ -134,7 +172,7 @@ class RunControllerTest {
 
   @Test
   void createReturns503WhenTheQueueIsFull() throws Exception {
-    when(runService.submit(any(), any())).thenThrow(new RunQueueFullException(5));
+    when(runService.submit(any(), any(), any())).thenThrow(new RunQueueFullException(5));
 
     mockMvc
         .perform(
@@ -146,7 +184,7 @@ class RunControllerTest {
 
   @Test
   void createReturns503WhenTheCanonicalEventJournalIsUnavailable() throws Exception {
-    when(runService.submit(any(), any()))
+    when(runService.submit(any(), any(), any()))
         .thenThrow(
             new RunEventPersistenceException(
                 "run-1", new IllegalStateException("simulated journal failure")));

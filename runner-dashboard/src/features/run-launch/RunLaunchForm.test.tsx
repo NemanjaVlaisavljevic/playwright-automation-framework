@@ -30,6 +30,7 @@ const runResponse = (overrides: Partial<Record<string, unknown>> = {}) => ({
   status: "QUEUED",
   requestedAt: "2026-09-01T10:00:00Z",
   processLogUrl: "/api/v1/runs/run-1/log",
+  selectedTests: [],
   ...overrides,
 });
 
@@ -86,7 +87,15 @@ describe("RunLaunchForm", () => {
       Array.from(suiteSelect.querySelectorAll("option")).map(
         (option) => option.textContent,
       ),
-    ).toEqual(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"]);
+    ).toEqual([
+      "SMOKE",
+      "API",
+      "UI",
+      "JOURNEY",
+      "REGRESSION",
+      "FIXTURE",
+      "CUSTOM",
+    ]);
 
     await user.selectOptions(suiteSelect, "API");
     await user.click(screen.getByRole("button", { name: "Run" }));
@@ -168,6 +177,82 @@ describe("RunLaunchForm", () => {
       await screen.findByText(
         "The runner is busy or temporarily unavailable. Try again shortly.",
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the test picker only for CUSTOM, disables Run until a test is selected, and submits the selected testKeys", async () => {
+    const user = userEvent.setup();
+    let capturedBody: unknown;
+    server.use(
+      http.post("/api/v1/runs", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json(runResponse({ suite: "CUSTOM" }), {
+          status: 202,
+        });
+      }),
+    );
+
+    renderForm();
+    const suiteSelect = await screen.findByLabelText("Suite");
+
+    // Not CUSTOM yet - no picker, plain "Run" label.
+    expect(screen.queryByLabelText("Search tests")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+
+    await user.selectOptions(suiteSelect, "CUSTOM");
+
+    expect(await screen.findByLabelText("Search tests")).toBeInTheDocument();
+    const runButton = screen.getByRole("button", {
+      name: "Run selected tests (0)",
+    });
+    expect(runButton).toBeDisabled();
+
+    const homePageCheckbox = (
+      await screen.findByText("Guest can see at least one bookable room")
+    )
+      .closest("label")!
+      .querySelector("input")!;
+    await user.click(homePageCheckbox);
+
+    const enabledButton = screen.getByRole("button", {
+      name: "Run selected tests (1)",
+    });
+    expect(enabledButton).toBeEnabled();
+
+    await user.click(enabledButton);
+
+    await waitFor(() => {
+      expect(capturedBody).toEqual({
+        environment: "PUBLIC",
+        suite: "CUSTOM",
+        testKeys: [
+          "dev.vlaisanem.automation.tests.ui.HomePageTest#guestCanDiscoverBookableRooms",
+        ],
+      });
+    });
+  });
+
+  it("clears the selection when switching away from CUSTOM and back", async () => {
+    const user = userEvent.setup();
+    renderForm();
+    const suiteSelect = await screen.findByLabelText("Suite");
+
+    await user.selectOptions(suiteSelect, "CUSTOM");
+    const homePageCheckbox = (
+      await screen.findByText("Guest can see at least one bookable room")
+    )
+      .closest("label")!
+      .querySelector("input")!;
+    await user.click(homePageCheckbox);
+    expect(
+      screen.getByRole("button", { name: "Run selected tests (1)" }),
+    ).toBeInTheDocument();
+
+    await user.selectOptions(suiteSelect, "SMOKE");
+    await user.selectOptions(suiteSelect, "CUSTOM");
+
+    expect(
+      screen.getByRole("button", { name: "Run selected tests (0)" }),
     ).toBeInTheDocument();
   });
 

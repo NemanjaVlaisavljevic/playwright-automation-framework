@@ -56,6 +56,7 @@ function run(overrides: Partial<Record<string, unknown>> = {}) {
     status: "QUEUED",
     requestedAt: "2026-09-01T10:00:00Z",
     processLogUrl: `/api/v1/runs/${RUN_ID}/log`,
+    selectedTests: [],
     ...overrides,
   };
 }

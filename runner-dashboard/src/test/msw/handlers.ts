@@ -15,7 +15,15 @@ export const handlers = [
       environments: [
         {
           name: "PUBLIC",
-          suites: ["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"],
+          suites: [
+            "SMOKE",
+            "API",
+            "UI",
+            "JOURNEY",
+            "REGRESSION",
+            "FIXTURE",
+            "CUSTOM",
+          ],
         },
       ],
     }),
@@ -29,7 +37,36 @@ export const handlers = [
       status: "QUEUED",
       requestedAt: "2026-09-01T10:00:00Z",
       processLogUrl: `/api/v1/runs/${String(params.runId)}/log`,
+      selectedTests: [],
     }),
   ),
   http.get("/api/v1/runs/:runId/artifacts", () => HttpResponse.json([])),
+  http.get("/api/v1/tests", () =>
+    HttpResponse.json({
+      tests: [
+        {
+          testKey:
+            "dev.vlaisanem.automation.tests.api.AuthenticationApiTest#adminCanAuthenticate",
+          displayName: "Admin can obtain a non-empty session token",
+          category: "API",
+          tags: ["smoke", "auth", "regression", "api", "read-only"],
+        },
+        {
+          testKey:
+            "dev.vlaisanem.automation.tests.ui.HomePageTest#guestCanDiscoverBookableRooms",
+          displayName: "Guest can see at least one bookable room",
+          category: "UI",
+          tags: ["smoke", "regression", "ui", "room", "read-only"],
+        },
+        {
+          testKey:
+            "dev.vlaisanem.automation.tests.journey.FeaturedRoomParityTest#homepageRendersFirstThreeApiRoomsAsBookingActions",
+          displayName:
+            "Homepage renders the first three API rooms as booking actions",
+          category: "JOURNEY",
+          tags: ["regression", "journey", "room", "read-only"],
+        },
+      ],
+    }),
+  ),
 ];

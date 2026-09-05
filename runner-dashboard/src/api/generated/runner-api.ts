@@ -5,19 +5,28 @@ import type * as __TypedOpenapi from "./runner-api.types.js";
 
 // <Schemas>
 export type CreateRunRequest = __TypedOpenapi.Schemas.CreateRunRequest;
-export const CreateRunRequest = z.object({ environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"]) }).catchall(z.unknown());
+export const CreateRunRequest = z.object({ environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE", "CUSTOM"]), testKeys: z.array(z.string()).optional() }).catchall(z.unknown());
+
+export type SelectedTestResponse = __TypedOpenapi.Schemas.SelectedTestResponse;
+export const SelectedTestResponse = z.object({ testKey: z.string(), displayName: z.string(), layer: z.enum(["API", "UI", "JOURNEY"]) }).catchall(z.unknown());
 
 export type RunResponse = __TypedOpenapi.Schemas.RunResponse;
-export const RunResponse = z.object({ runId: z.string(), environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"]), status: z.enum(["QUEUED", "STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "ERROR"]), requestedAt: z.iso.datetime(), startedAt: z.iso.datetime().optional(), finishedAt: z.iso.datetime().optional(), exitCode: z.number().int().optional(), detail: z.string().optional(), processLogUrl: z.string() }).catchall(z.unknown());
+export const RunResponse = z.object({ runId: z.string(), environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE", "CUSTOM"]), status: z.enum(["QUEUED", "STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "ERROR"]), requestedAt: z.iso.datetime(), startedAt: z.iso.datetime().optional(), finishedAt: z.iso.datetime().optional(), exitCode: z.number().int().optional(), detail: z.string().optional(), processLogUrl: z.string(), selectedTests: z.array(SelectedTestResponse) }).catchall(z.unknown());
 
 export type ProblemDetail = __TypedOpenapi.Schemas.ProblemDetail;
 export const ProblemDetail = z.object({ type: z.url().optional(), title: z.string(), status: z.number().int(), detail: z.string(), instance: z.string(), properties: z.record(z.string(), z.unknown()).optional() }).catchall(z.unknown());
+
+export type TestCatalogEntry = __TypedOpenapi.Schemas.TestCatalogEntry;
+export const TestCatalogEntry = z.object({ testKey: z.string(), displayName: z.string(), category: z.enum(["API", "UI", "JOURNEY"]), tags: z.array(z.string()).refine((arr) => new Set(arr).size === arr.length, { message: "uniqueItems" }) }).catchall(z.unknown());
+
+export type TestCatalogResponse = __TypedOpenapi.Schemas.TestCatalogResponse;
+export const TestCatalogResponse = z.object({ tests: z.array(TestCatalogEntry) }).catchall(z.unknown());
 
 export type ArtifactSummaryResponse = __TypedOpenapi.Schemas.ArtifactSummaryResponse;
 export const ArtifactSummaryResponse = z.object({ artifactId: z.string(), testId: z.string(), testDisplayName: z.string(), stepId: z.string().optional(), type: z.enum(["SCREENSHOT", "TRACE", "VIDEO"]), mediaType: z.string(), sizeBytes: z.number().int(), createdAt: z.iso.datetime(), downloadUrl: z.string() }).catchall(z.unknown());
 
 export type EnvironmentCapabilities = __TypedOpenapi.Schemas.EnvironmentCapabilities;
-export const EnvironmentCapabilities = z.object({ name: z.enum(["PUBLIC", "LOCAL"]), suites: z.array(z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE"])) }).catchall(z.unknown());
+export const EnvironmentCapabilities = z.object({ name: z.enum(["PUBLIC", "LOCAL"]), suites: z.array(z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE", "CUSTOM"])) }).catchall(z.unknown());
 
 export type CapabilitiesResponse = __TypedOpenapi.Schemas.CapabilitiesResponse;
 export const CapabilitiesResponse = z.object({ apiVersion: z.string(), eventSchemaVersion: z.string(), environments: z.array(EnvironmentCapabilities) }).catchall(z.unknown());
@@ -53,6 +62,16 @@ export const post_CancelRun = {
   responseFormat: z.literal("json"),
   parameters: { path: z.object({ runId: z.string() }).strict() },
   responses: { 200: RunResponse, 404: ProblemDetail, 500: ProblemDetail, 503: ProblemDetail },
+};
+
+export type get_ListPublicTests = __TypedOpenapi.Endpoints.get_ListPublicTests;
+export const get_ListPublicTests = {
+  method: z.literal("GET"),
+  path: z.literal("/api/v1/tests"),
+  requestFormat: z.literal("json"),
+  responseFormat: z.literal("json"),
+  parameters: { query: z.object({ environment: z.enum(["PUBLIC", "LOCAL"]) }).strict() },
+  responses: { 200: TestCatalogResponse, 400: ProblemDetail, 500: ProblemDetail, 503: ProblemDetail },
 };
 
 export type get_GetRun = __TypedOpenapi.Endpoints.get_GetRun;
@@ -112,6 +131,7 @@ export const get_GetRunnerCapabilities = {
      export const EndpointByMethod = {
      get: {
            "/api/v1/runs": get_ListRuns,
+"/api/v1/tests": get_ListPublicTests,
 "/api/v1/runs/{runId}": get_GetRun,
 "/api/v1/runs/{runId}/log": get_DownloadRunLog,
 "/api/v1/runs/{runId}/artifacts": get_ListRunArtifacts,
@@ -162,7 +182,7 @@ export type SecurityRequirements = readonly (readonly string[])[];
     export type ParameterSerialization = { style: string; explode: boolean; allowReserved: boolean };
     export type EndpointParameterStyles = Partial<Record<"query" | "path" | "header" | "cookie", Record<string, ParameterSerialization>>>;
     /** OpenAPI parameter styles used by the built-in encoders. */
-    export const endpointParameterStyles = {"post":{"/api/v1/runs/{runId}/cancel":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}}},"get":{"/api/v1/runs/{runId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/log":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/artifacts":{"query":{"testId":{"style":"form","explode":true,"allowReserved":false}},"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/artifacts/{artifactId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false},"artifactId":{"style":"simple","explode":false,"allowReserved":false}}}}} as Partial<Record<string, Partial<Record<string, EndpointParameterStyles>>>>;
+    export const endpointParameterStyles = {"post":{"/api/v1/runs/{runId}/cancel":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}}},"get":{"/api/v1/tests":{"query":{"environment":{"style":"form","explode":true,"allowReserved":false}}},"/api/v1/runs/{runId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/log":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/artifacts":{"query":{"testId":{"style":"form","explode":true,"allowReserved":false}},"path":{"runId":{"style":"simple","explode":false,"allowReserved":false}}},"/api/v1/runs/{runId}/artifacts/{artifactId}":{"path":{"runId":{"style":"simple","explode":false,"allowReserved":false},"artifactId":{"style":"simple","explode":false,"allowReserved":false}}}}} as Partial<Record<string, Partial<Record<string, EndpointParameterStyles>>>>;
     // </EndpointParameterStyles>
 
 

@@ -163,6 +163,70 @@
         }
       }
     },
+    "/api/v1/tests": {
+      "get": {
+        "tags": [
+          "test-catalog-controller"
+        ],
+        "operationId": "listPublicTests",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PUBLIC",
+                "LOCAL"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestCatalogResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "environment is missing or not PUBLIC.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The committed test catalog file is missing or unreadable.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runs/{runId}": {
       "get": {
         "tags": [
@@ -447,8 +511,15 @@
               "UI",
               "JOURNEY",
               "REGRESSION",
-              "FIXTURE"
+              "FIXTURE",
+              "CUSTOM"
             ]
+          },
+          "testKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -477,7 +548,8 @@
               "UI",
               "JOURNEY",
               "REGRESSION",
-              "FIXTURE"
+              "FIXTURE",
+              "CUSTOM"
             ]
           },
           "status": {
@@ -514,6 +586,12 @@
           },
           "processLogUrl": {
             "type": "string"
+          },
+          "selectedTests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SelectedTestResponse"
+            }
           }
         },
         "required": [
@@ -521,8 +599,33 @@
           "processLogUrl",
           "requestedAt",
           "runId",
+          "selectedTests",
           "status",
           "suite"
+        ]
+      },
+      "SelectedTestResponse": {
+        "type": "object",
+        "properties": {
+          "testKey": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "API",
+              "UI",
+              "JOURNEY"
+            ]
+          }
+        },
+        "required": [
+          "displayName",
+          "layer",
+          "testKey"
         ]
       },
       "ProblemDetail": {
@@ -555,6 +658,52 @@
           "instance",
           "status",
           "title"
+        ]
+      },
+      "TestCatalogEntry": {
+        "type": "object",
+        "properties": {
+          "testKey": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "API",
+              "UI",
+              "JOURNEY"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "category",
+          "displayName",
+          "tags",
+          "testKey"
+        ]
+      },
+      "TestCatalogResponse": {
+        "type": "object",
+        "properties": {
+          "tests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TestCatalogEntry"
+            }
+          }
+        },
+        "required": [
+          "tests"
         ]
       },
       "ArtifactSummaryResponse": {
@@ -648,7 +797,8 @@
                 "UI",
                 "JOURNEY",
                 "REGRESSION",
-                "FIXTURE"
+                "FIXTURE",
+                "CUSTOM"
               ]
             }
           }

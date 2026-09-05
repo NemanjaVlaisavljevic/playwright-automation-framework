@@ -40,6 +40,14 @@ jobs:
         # full explanation of why this project's caching setup makes that a real risk).
         run: ./gradlew spotlessCheck test --rerun
 
+      - name: Test catalog drift check
+        # The CUSTOM-suite catalog (src/test/resources/catalog/public-test-catalog.json) is a
+        # committed, JUnit-discovery-generated snapshot - CustomTestSelectionValidator's whole
+        # safety model depends on it matching what a fresh `testCatalogGenerate` would produce
+        # right now, the same way the OpenAPI snapshot is guarded. Without this step nothing ever
+        # catches drift, and every other gate here stays green regardless.
+        run: ./gradlew testCatalogCheck
+
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

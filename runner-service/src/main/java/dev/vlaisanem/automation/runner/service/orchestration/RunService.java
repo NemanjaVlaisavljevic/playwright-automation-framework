@@ -1,9 +1,12 @@
 package dev.vlaisanem.automation.runner.service.orchestration;
 
+import dev.vlaisanem.automation.runner.service.catalog.TestCatalogEntry;
+import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.IngestionResult;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestor;
@@ -83,6 +86,7 @@ public class RunService {
   private final RunLifecycleCoordinator lifecycle;
   private final ProcessLauncher processLauncher;
   private final ListenerEventIngestorFactory ingestorFactory;
+  private final TestCatalogService testCatalogService;
   private final Path repoRoot;
   private final Path rawEventsDir;
   private final Path logsDir;
@@ -112,11 +116,13 @@ public class RunService {
       RunLifecycleCoordinator lifecycle,
       ProcessLauncher processLauncher,
       ListenerEventIngestorFactory ingestorFactory,
+      TestCatalogService testCatalogService,
       RunnerProperties properties) {
     this.repository = repository;
     this.lifecycle = lifecycle;
     this.processLauncher = processLauncher;
     this.ingestorFactory = ingestorFactory;
+    this.testCatalogService = testCatalogService;
     this.repoRoot = Path.of(properties.repoRoot()).toAbsolutePath().normalize();
     this.rawEventsDir = Path.of(properties.rawEventsDir()).toAbsolutePath().normalize();
     this.logsDir = Path.of(properties.logsDir()).toAbsolutePath().normalize();
@@ -144,15 +150,23 @@ public class RunService {
   }
 
   public Run submit(Environment environment, Suite suite) {
+    return submit(environment, suite, null);
+  }
+
+  public Run submit(Environment environment, Suite suite, List<String> testKeys) {
     if (availability.get() == Availability.DEGRADED) {
       throw new RunnerDegradedException(degradedSurvivingPids());
     }
     RunRequestValidator.validate(environment, suite);
+    List<TestCatalogEntry> catalog =
+        suite == Suite.CUSTOM ? testCatalogService.current() : List.of();
+    List<SelectedTestSnapshot> selectedTests =
+        CustomTestSelectionValidator.validate(suite, testKeys, catalog);
     String runId = UUID.randomUUID().toString();
-    Run run = lifecycle.queue(runId, environment, suite, Instant.now());
+    Run run = lifecycle.queue(runId, environment, suite, Instant.now(), selectedTests);
     ActiveRun activeRun = new ActiveRun();
     activeRuns.put(runId, activeRun);
-    Runnable queuedTask = () -> executeRun(runId, environment, suite, activeRun);
+    Runnable queuedTask = () -> executeRun(runId, environment, suite, selectedTests, activeRun);
     activeRun.queuedTask().set(queuedTask);
 
     try {
@@ -257,7 +271,12 @@ public class RunService {
     return find(runId);
   }
 
-  private void executeRun(String runId, Environment environment, Suite suite, ActiveRun activeRun) {
+  private void executeRun(
+      String runId,
+      Environment environment,
+      Suite suite,
+      List<SelectedTestSnapshot> selectedTests,
+      ActiveRun activeRun) {
     Process process = null;
     ListenerEventIngestor ingestor = null;
     activeRun.attachWorker(Thread.currentThread());
@@ -280,7 +299,8 @@ public class RunService {
       }
 
       List<String> command =
-          SuiteCommandFactory.commandFor(environment, suite, repoRoot, runId, rawEventsDir);
+          SuiteCommandFactory.commandFor(
+              environment, suite, repoRoot, runId, rawEventsDir, selectedTests);
       process = awaitAvailableThenStart(runId, activeRun, command);
       if (process == null) {
         // Already recorded a terminal status (CANCELLED while waiting, or ERROR from a start()

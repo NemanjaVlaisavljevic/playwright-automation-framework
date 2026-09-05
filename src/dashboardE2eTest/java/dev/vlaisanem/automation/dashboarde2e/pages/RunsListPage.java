@@ -37,6 +37,25 @@ public final class RunsListPage {
     return this;
   }
 
+  /**
+   * Checks one {@code CustomTestPicker} entry by its accessible name, which is the checkbox {@code
+   * <label>}'s full text content - {@code test.displayName} followed by its category badge (see
+   * {@code CustomTestPicker.tsx}) - so this matches on {@code testDisplayName} as a (default,
+   * case-insensitive) substring rather than an exact name. {@code check()} auto-waits for the
+   * catalog fetch to resolve and the row to render, so no separate "picker loaded" wait is needed.
+   */
+  public RunsListPage selectCustomTest(String testDisplayName) {
+    launchForm()
+        .getByRole(AriaRole.CHECKBOX, new Locator.GetByRoleOptions().setName(testDisplayName))
+        .check();
+    return this;
+  }
+
+  /** The {@code CustomTestPicker}'s own live selection counter, e.g. "2 tests selected". */
+  public Locator customSelectionCount() {
+    return launchForm().locator("[aria-live='polite']");
+  }
+
   public RunDetailsPage launchRun() {
     launchForm().getByRole(AriaRole.BUTTON, new Locator.GetByRoleOptions().setName("Run")).click();
     page.waitForURL("**/runs/*");

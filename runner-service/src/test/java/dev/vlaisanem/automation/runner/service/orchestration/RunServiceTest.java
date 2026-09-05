@@ -9,11 +9,14 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
+import dev.vlaisanem.automation.runner.service.domain.TestLayer;
 import dev.vlaisanem.automation.runner.service.events.FailingRunEventAppender;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestor;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestorFactory;
@@ -112,6 +115,96 @@ class RunServiceTest {
     assertThat(launcher.startedCommands).hasSize(1);
     assertThat(launcher.startedCommands.get(0)).contains("localJourneyTest");
     assertThat(launcher.startedCommands.get(0)).doesNotContain("journeyTest");
+  }
+
+  /**
+   * Full-chain regression test for the review's finding: nothing previously exercised catalog load
+   * -> {@code CustomTestSelectionValidator} -> immutable {@link SelectedTestSnapshot} -> the actual
+   * launched {@code customTest --tests ...} command together. A second, unselected catalog entry
+   * proves the launched command carries exactly the selected filter and nothing else - not a
+   * coincidentally-passing full {@code customTest} invocation.
+   */
+  @Test
+  void submitsACustomRunWithExactlyTheSelectedTestsAndNothingElse(
+      @TempDir Path eventsDir, @TempDir Path catalogDir) throws Exception {
+    Path catalogFile = catalogDir.resolve("catalog.json");
+    Files.writeString(
+        catalogFile,
+        """
+        {
+          "tests": [
+            {
+              "testKey": "some.ApiTest#methodOne",
+              "displayName": "First selected test",
+              "category": "API",
+              "tags": ["regression", "read-only", "api"]
+            },
+            {
+              "testKey": "some.UiTest#methodTwo",
+              "displayName": "Second, unselected test",
+              "category": "UI",
+              "tags": ["regression", "read-only", "ui"]
+            }
+          ]
+        }
+        """);
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newServiceWithCatalog(launcher, eventsDir, catalogFile, 5);
+
+    Run submitted =
+        service.submit(Environment.PUBLIC, Suite.CUSTOM, List.of("some.ApiTest#methodOne"));
+    awaitStatus(submitted.runId(), RunStatus.RUNNING);
+
+    assertThat(submitted.selectedTests())
+        .containsExactly(
+            new SelectedTestSnapshot(
+                "some.ApiTest#methodOne", "First selected test", TestLayer.API));
+    assertThat(launcher.startedCommands).hasSize(1);
+    List<String> command = launcher.startedCommands.get(0);
+    assertThat(command).contains("customTest");
+    assertThat(command).containsSequence("--tests", "some.ApiTest.methodOne");
+    assertThat(command).doesNotContain("some.UiTest.methodTwo");
+  }
+
+  /**
+   * Regression test for the review's finding: an invalid {@code CUSTOM} selection must fail before
+   * any of a run's usual side effects happen - {@code submit()}'s own code path only generates a
+   * {@code runId} and calls {@code lifecycle.queue} (which is what emits {@code RUN_QUEUED}) after
+   * {@code CustomTestSelectionValidator.validate} has already succeeded, so a rejected selection
+   * must leave the repository empty, the event log untouched, and (implicitly, since no runId or
+   * {@code ActiveRun} is ever created) nothing tracked in {@code activeRuns}.
+   */
+  @Test
+  void anInvalidCustomSelectionNeverSavesARunOrEmitsAnyEvent(
+      @TempDir Path eventsDir, @TempDir Path catalogDir) throws Exception {
+    Path catalogFile = catalogDir.resolve("catalog.json");
+    Files.writeString(
+        catalogFile,
+        """
+        {
+          "tests": [
+            {
+              "testKey": "some.ApiTest#methodOne",
+              "displayName": "First selected test",
+              "category": "API",
+              "tags": ["regression", "read-only", "api"]
+            }
+          ]
+        }
+        """);
+    RunRepository repository = new RunRepository();
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newServiceWithCatalog(repository, launcher, eventsDir, catalogFile, 5);
+
+    assertThatThrownBy(
+            () ->
+                service.submit(
+                    Environment.PUBLIC, Suite.CUSTOM, List.of("unknown.Test#doesNotExist")))
+        .isInstanceOf(InvalidTestSelectionException.class);
+
+    assertThat(repository.findAll()).isEmpty();
+    assertThat(events.totalEventCount()).isZero();
+    assertThat(launcher.startedCommands).isEmpty();
   }
 
   @Test
@@ -485,6 +578,7 @@ class RunServiceTest {
             eventsDir.toString(),
             eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
+            "src/test/resources/catalog/public-test-catalog.json",
             eventsDir.resolve("artifacts").toString(),
             1024 * 1024,
             Duration.ofMillis(50),
@@ -507,7 +601,14 @@ class RunServiceTest {
           }
         };
     events = appender;
-    service = new RunService(repository, lifecycle, launcher, blockingIngestorFactory, properties);
+    service =
+        new RunService(
+            repository,
+            lifecycle,
+            launcher,
+            blockingIngestorFactory,
+            new TestCatalogService(properties, OBJECT_MAPPER),
+            properties);
 
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
     assertThat(ingestorStartEntered.await(5, TimeUnit.SECONDS)).isTrue();
@@ -810,6 +911,7 @@ class RunServiceTest {
             eventsDir.toString(),
             eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
+            "src/test/resources/catalog/public-test-catalog.json",
             eventsDir.resolve("artifacts").toString(),
             1024 * 1024,
             Duration.ofMillis(50),
@@ -823,7 +925,56 @@ class RunServiceTest {
     RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(repository, eventAppender);
     ListenerEventIngestorFactory ingestorFactory =
         new ListenerEventIngestorFactory(eventAppender, OBJECT_MAPPER, properties);
-    return new RunService(repository, lifecycle, launcher, ingestorFactory, properties);
+    return new RunService(
+        repository,
+        lifecycle,
+        launcher,
+        ingestorFactory,
+        new TestCatalogService(properties, OBJECT_MAPPER),
+        properties);
+  }
+
+  private RunService newServiceWithCatalog(
+      ProcessLauncher launcher, Path eventsDir, Path catalogFile, int queueCapacity) {
+    return newServiceWithCatalog(
+        new RunRepository(), launcher, eventsDir, catalogFile, queueCapacity);
+  }
+
+  private RunService newServiceWithCatalog(
+      RunRepository repository,
+      ProcessLauncher launcher,
+      Path eventsDir,
+      Path catalogFile,
+      int queueCapacity) {
+    events = new RecordingRunEventAppender();
+    RunnerProperties properties =
+        new RunnerProperties(
+            ".",
+            Duration.ofSeconds(30),
+            eventsDir.toString(),
+            eventsDir.resolve("journal").toString(),
+            eventsDir.resolve("logs").toString(),
+            catalogFile.toString(),
+            eventsDir.resolve("artifacts").toString(),
+            1024 * 1024,
+            Duration.ofMillis(50),
+            Duration.ofMillis(20),
+            queueCapacity,
+            Duration.ofMillis(20),
+            Duration.ofSeconds(2),
+            10_000,
+            Duration.ofSeconds(15),
+            Duration.ofMinutes(10));
+    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(repository, events);
+    ListenerEventIngestorFactory ingestorFactory =
+        new ListenerEventIngestorFactory(events, OBJECT_MAPPER, properties);
+    return new RunService(
+        repository,
+        lifecycle,
+        launcher,
+        ingestorFactory,
+        new TestCatalogService(properties, OBJECT_MAPPER),
+        properties);
   }
 
   private Run awaitStatus(String runId, RunStatus expected) throws InterruptedException {

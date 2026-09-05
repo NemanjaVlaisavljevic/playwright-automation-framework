@@ -18,6 +18,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     service-owned timeline that also carries {@code RUN_*} lifecycle events the listener never
  *     produces.
  * @param logsDir directory containing one bounded combined stdout/stderr log per run.
+ * @param testCatalogPath path (relative to {@link #repoRoot}) of the committed, JUnit-discovery-
+ *     generated {@code CUSTOM}-suite test catalog - see {@code TestCatalogGenerator} in the main
+ *     suite's own {@code tooling} package for how it is produced, and {@code
+ *     testCatalogGenerate}/{@code testCatalogCheck} in the root {@code build.gradle} for how drift
+ *     from it is caught in CI.
  * @param artifactsDir root directory under which every run gets its own isolated subdirectory
  *     (named after its runId), passed to the spawned Gradle process as the {@code ARTIFACTS_DIR}
  *     environment variable - the same configuration key {@code TestConfig#artifactsDirectory()}
@@ -51,6 +56,7 @@ public record RunnerProperties(
     String rawEventsDir,
     String journalDir,
     String logsDir,
+    String testCatalogPath,
     String artifactsDir,
     long processLogMaxBytes,
     Duration terminationGracePeriod,
@@ -77,6 +83,9 @@ public record RunnerProperties(
     }
     if (logsDir == null || logsDir.isBlank()) {
       throw new IllegalArgumentException("runner.logs-dir must not be blank");
+    }
+    if (testCatalogPath == null || testCatalogPath.isBlank()) {
+      throw new IllegalArgumentException("runner.test-catalog-path must not be blank");
     }
     if (artifactsDir == null || artifactsDir.isBlank()) {
       throw new IllegalArgumentException("runner.artifacts-dir must not be blank");

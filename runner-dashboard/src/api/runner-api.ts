@@ -8,6 +8,7 @@ import {
   type CapabilitiesResponse,
   type CreateRunRequest,
   type RunResponse,
+  type TestCatalogEntry,
 } from "./generated/runner-api";
 import { RunnerApiError } from "./problem-detail";
 
@@ -25,6 +26,7 @@ export type {
   CapabilitiesResponse,
   CreateRunRequest,
   RunResponse,
+  TestCatalogEntry,
 };
 
 // The generated client's own request() does `new URL(baseUrl + path)`, and the WHATWG URL
@@ -144,6 +146,23 @@ export function getRun(runId: string): Promise<RunResponse> {
 
 export function createRun(request: CreateRunRequest): Promise<RunResponse> {
   return unwrap(client.post("/api/v1/runs", { body: request }));
+}
+
+/**
+ * The `CUSTOM`-suite picker's own allowlist - every `testKey` a caller may later put in
+ * `CreateRunRequest.testKeys` and nothing else. `environment` is typed off `CreateRunRequest`
+ * itself (not a new hand-written union) for the same contract-drift-proofing reason `domain/
+ * run.ts`'s own `Environment` type is - this file cannot import that type back without a circular
+ * dependency (`domain/run.ts` already imports from here).
+ */
+export function listPublicTests(
+  environment: CreateRunRequest["environment"],
+): Promise<TestCatalogEntry[]> {
+  return unwrap(
+    client
+      .get("/api/v1/tests", { query: { environment } })
+      .then((r) => r.tests),
+  );
 }
 
 export function cancelRun(runId: string): Promise<RunResponse> {

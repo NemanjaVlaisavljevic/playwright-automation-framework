@@ -402,6 +402,7 @@ class FileBackedRunEventJournalTest {
         tempDir.resolve("raw").toString(),
         tempDir.resolve("journal").toString(),
         tempDir.resolve("logs").toString(),
+        "src/test/resources/catalog/public-test-catalog.json",
         tempDir.resolve("artifacts").toString(),
         1024 * 1024,
         Duration.ofSeconds(5),

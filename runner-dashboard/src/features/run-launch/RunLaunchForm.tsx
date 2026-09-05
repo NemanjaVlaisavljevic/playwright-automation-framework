@@ -1,13 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createRun, getCapabilities } from "../../api/runner-api";
+import {
+  createRun,
+  getCapabilities,
+  type CreateRunRequest,
+} from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
 import { RunnerApiError } from "../../api/problem-detail";
 import { Alert } from "../../components/ui/Alert";
 import { Button } from "../../components/ui/Button";
 import type { Environment, Suite } from "../../domain/run";
+import { CustomTestPicker } from "./CustomTestPicker";
 import styles from "./RunLaunchForm.module.css";
+
+const CUSTOM_SUITE: Suite = "CUSTOM";
 
 interface RunLaunchFormProps {
   /** Overridable for tests - see RunLaunchForm.test.tsx. */
@@ -37,10 +44,15 @@ export function RunLaunchForm({
     "",
   );
   const [suiteChoice, setSuiteChoice] = useState<Suite | "">("");
+  // Reset on every environment/suite change (not just when leaving CUSTOM) - a stale selection
+  // from a previous CUSTOM launch must never silently ride along into a new one, including a
+  // same-environment re-selection of CUSTOM itself.
+  const [selectedTestKeys, setSelectedTestKeys] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
 
   const launch = useMutation({
-    mutationFn: (request: { environment: Environment; suite: Suite }) =>
-      createRun(request),
+    mutationFn: (request: CreateRunRequest) => createRun(request),
     onSuccess: async (run) => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
       navigate(`/runs/${run.runId}`);
@@ -63,11 +75,17 @@ export function RunLaunchForm({
   const suites = selectedEnvironment?.suites ?? [];
   const selectedSuite =
     suites.find((candidate) => candidate === suiteChoice) ?? suites[0];
+  const isCustom = selectedSuite === CUSTOM_SUITE;
+  const canSubmit =
+    !launch.isPending &&
+    selectedEnvironment !== undefined &&
+    selectedSuite !== undefined &&
+    (!isCustom || selectedTestKeys.size > 0);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (
-      launch.isPending ||
+      !canSubmit ||
       selectedEnvironment === undefined ||
       selectedSuite === undefined
     ) {
@@ -76,6 +94,7 @@ export function RunLaunchForm({
     launch.mutate({
       environment: selectedEnvironment.name,
       suite: selectedSuite,
+      ...(isCustom ? { testKeys: Array.from(selectedTestKeys) } : {}),
     });
   }
 
@@ -90,6 +109,7 @@ export function RunLaunchForm({
             onChange={(event) => {
               setEnvironmentChoice(event.target.value as Environment);
               setSuiteChoice(""); // a different environment may allow a different suite set
+              setSelectedTestKeys(new Set());
             }}
           >
             {environments.map((candidate) => (
@@ -103,7 +123,10 @@ export function RunLaunchForm({
           Suite
           <select
             value={selectedSuite ?? ""}
-            onChange={(event) => setSuiteChoice(event.target.value as Suite)}
+            onChange={(event) => {
+              setSuiteChoice(event.target.value as Suite);
+              setSelectedTestKeys(new Set());
+            }}
           >
             {suites.map((candidate) => (
               <option key={candidate} value={candidate}>
@@ -112,10 +135,21 @@ export function RunLaunchForm({
             ))}
           </select>
         </label>
-        <Button type="submit" variant="primary" disabled={launch.isPending}>
-          {launch.isPending ? "Starting…" : "Run"}
+        <Button type="submit" variant="primary" disabled={!canSubmit}>
+          {launch.isPending
+            ? "Starting…"
+            : isCustom
+              ? `Run selected tests (${selectedTestKeys.size})`
+              : "Run"}
         </Button>
       </div>
+      {isCustom && selectedEnvironment !== undefined && (
+        <CustomTestPicker
+          environment={selectedEnvironment.name}
+          selectedKeys={selectedTestKeys}
+          onChange={setSelectedTestKeys}
+        />
+      )}
       {launch.isError && <Alert>{describeLaunchError(launch.error)}</Alert>}
     </form>
   );

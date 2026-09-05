@@ -23,7 +23,9 @@ java {
 dependencies {
     testImplementation platform('org.junit:junit-bom:6.0.1')
     testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    // testImplementation, not testRuntimeOnly: TestCatalogGenerator (tooling/) needs compile-time
+    // access to the Launcher API to discover the CUSTOM-suite catalog - see that class's Javadoc.
+    testImplementation 'org.junit.platform:junit-platform-launcher'
 
     // Auto-discovered via META-INF/services/org.junit.platform.launcher.TestExecutionListener -
     // emits one RunnerEvent JSONL line per test start/finish/skip. See runner-listener module.
@@ -200,6 +202,19 @@ tasks.register('fixtureTest', Test) {
     reports.junitXml.required = true
     reports.html.required = true
     shouldRunAfter tasks.named('test')
+}
+
+// D0.5 - launched only by RunService with a server-validated `--tests` filter appended per request
+// (see SuiteCommandFactory), never invoked bare. configureAutomationTest's own excludeTags
+// 'mutation'/'fixture' apply here too - a defense-in-depth backstop, not the primary safety
+// mechanism (that is the server-side catalog validation a testKey must pass before ever reaching
+// this task's command line at all).
+tasks.register('customTest', Test) {
+    description = 'Runs a server-selected subset of PUBLIC read-only tests - never invoked directly, only via the dashboard/API.'
+    group = 'verification'
+    configureAutomationTest(delegate)
+    reports.junitXml.required = true
+    reports.html.required = true
 }
 
 // --- Local Restful Booker Platform stack (Docker Compose) ---------------------------------
@@ -748,6 +763,39 @@ tasks.register('playwrightInstall', JavaExec) {
         args 'install', '--with-deps', providers.gradleProperty('browser').getOrElse('chromium')
     } else {
         args 'install', providers.gradleProperty('browser').getOrElse('chromium')
+    }
+}
+
+// --- CUSTOM-suite test catalog (D0.5) -------------------------------------------------------
+// See dev.vlaisanem.automation.tooling.TestCatalogGenerator's own Javadoc for what gets included/
+// excluded and why. The catalog is a committed file, not a build/ output - CUSTOM's whole safety
+// model depends on the server validating a client-submitted testKey against this exact snapshot,
+// so it must be reviewable in a diff and checked for drift in CI, the same way the OpenAPI
+// snapshot already is.
+def testCatalogFile = file('src/test/resources/catalog/public-test-catalog.json')
+
+tasks.register('testCatalogGenerate', JavaExec) {
+    description = 'Regenerates the CUSTOM-suite PUBLIC test catalog via JUnit Platform discovery.'
+    group = 'verification'
+    dependsOn 'testClasses'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'dev.vlaisanem.automation.tooling.TestCatalogGenerator'
+    args testCatalogFile.absolutePath
+}
+
+tasks.register('testCatalogCheck') {
+    description = 'Regenerates the CUSTOM-suite test catalog and fails if it drifted from what is committed.'
+    group = 'verification'
+    dependsOn 'testCatalogGenerate'
+    doLast {
+        // Scoped to exactly this one file - a global `git status --porcelain` would fail on any
+        // unrelated local change elsewhere in the repo, which is not this check's concern.
+        def status = rbpCapture(['git', 'status', '--porcelain', '--', testCatalogFile.absolutePath])
+        if (!status.isEmpty()) {
+            throw new GradleException(
+                'Test catalog drifted from the committed snapshot - run ./gradlew testCatalogGenerate ' +
+                "and commit the result:\n${status}")
+        }
     }
 }
 
