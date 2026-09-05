@@ -9,7 +9,7 @@ the living record of that proof, filled in section by section as each C5 sub-pha
 - **C5.2 — Clean-environment reproducibility** (this file, below): done.
 - **C5.3 — Three CI proofs on one commit** (this file, below): done.
 - **C5.4 — Portfolio README**: done - see the root [`README.md`](../README.md).
-- **C5.5 — Portfolio demo script**: not yet started.
+- **C5.5 — Portfolio demo script**: done - see [`docs/PORTFOLIO_DEMO.md`](PORTFOLIO_DEMO.md).
 - **C5.6 — RC sign-off**: not yet started.
 
 ## C5.1 — Acceptance matrix
@@ -380,15 +380,151 @@ assumed:
   and no `Dockerfile` exists anywhere in the repository (searched) - framed explicitly as RC-stage
   scope decisions Faza D addresses, per the user's own instruction, not hidden defects.
 
-The prior suite-focused content (quick start, local Docker target, dashboard E2E test docs,
-configuration table, project structure, executable-coverage table, known application issues, build
-tooling backlog) was preserved in full, not deleted - relocated under a new "Automation suite"
-section beneath the portfolio-facing material, since it's still accurate and valuable, just no
-longer the document's own headline.
+The core suite-focused content was preserved and reorganized - relocated under a new "Automation
+suite" section beneath the portfolio-facing material, since it's still accurate and valuable, just
+no longer the document's own headline. Outdated fixed-count E2E descriptions (the old "7 scenarios"
+list) were replaced with links to this document's own current acceptance matrix instead of being
+carried forward as stale prose.
 
 Verified: `./gradlew.bat spotlessCheck` clean (caught and fixed one real formatting violation on the
 first pass - `spotlessMisc` also lints Markdown, not just source, and flagged this file; a plain
 `spotlessApply` fixed it with no content change), `git diff --check` clean, and every internal link/
 anchor checked against the doc's own real heading text (`#quick-start-suite-only-no-dashboard` for
 this file's own relocated section, `#architecture-current` for `runner-dashboard/README.md`'s
-existing heading) rather than assumed. **C5.4 is now closed.**
+existing heading) rather than assumed.
+
+### Review round on this section (2026-09-04) - 2 P1 + 3 P2 + 1 P3, all fixed and reverified
+
+1. **[P1] Claimed reconnect replay comes from a durable on-disk journal that survives a service
+   restart** - read `FileBackedRunEventJournal` directly: `readAfter`/`latest` serve purely from
+   `RunJournal.history`, an in-memory `ArrayList` populated only by `append()`; `journals` is a
+   fresh empty map on construction with no code path anywhere that re-hydrates it from the
+   `.events.jsonl` files already on disk. Disk writes are real (synchronous, flushed before
+   `append` returns) but exist for durability of the record, not for serving replay or surviving a
+   restart - confirmed accurate to what the "Current limitations" section already said, which the
+   feature list had contradicted. Reworded to: "Events are synchronously persisted to disk, while
+   reconnect replay uses the canonical in-memory history for the lifetime of the current service
+   instance... Restart recovery and journal re-indexing are planned for Phase D."
+2. **[P1] Quick start never mentioned installing the Chromium browser** - a fresh checkout's first
+   `PUBLIC`/`FIXTURE`/`SMOKE` run would fail without `./gradlew.bat playwrightInstall` run at least
+   once first. Added as an explicit one-time step before the two-terminal walkthrough. Also added
+   Git/Docker Compose as `LOCAL`-specific prerequisites, and reworded "5 minutes" to explicitly
+   scope to the `PUBLIC`/`FIXTURE` fast path - confirmed via `infra/rbp/README.md`'s own words
+   ("slow (several minutes) the first time") that a first local stack build realistically exceeds
+   that budget.
+3. **[P2] Architecture diagram collapsed a real two-hop flow into one arrow** - read
+   `ListenerEventIngestor`'s own Javadoc to confirm the actual path: a JUnit Platform listener and
+   the `Steps` API write raw JSONL + an artifact manifest; the runner's ingestor tails that raw
+   stream and forwards each validated event into its own separate canonical, sequence-numbered
+   journal (the one `FileBackedRunEventJournal` serves replay from). Added a raw-storage node and a
+   tail-back edge to the diagram, and replaced "via a JUnit extension" with the more precise "a
+   JUnit Platform listener and the `Steps` API."
+4. **[P2] "The largest single test class in this repository"** - `dashboardE2eTest` is a Gradle
+   source set/test suite, not one class. Independently recounted (17 files via `grep -rl`, 21
+   `@Test` methods via `grep -rc`, matching the reviewer's own numbers) before fixing to "the
+   largest dedicated test suite in the repository (17 test classes, 21 test methods)."
+5. **[P2] `localTest` cited as 27/27** - that number is the automation-foundation-era count from
+   `docs/RELEASE_EVIDENCE.md` (2026-08-25), not current. Re-ran `localTest` fresh against the still-up
+   local Docker stack rather than trusting old XML on disk: **32/32 passed, 0 failures/errors**,
+   matching both the existing on-disk JUnit XML and the C5.1 acceptance matrix's own count. Split
+   the claim into a current sentence (32/32) and a historical one (the 27-test suite, 10 consecutive
+   `stabilityTest` runs), linking the latter to `RELEASE_EVIDENCE.md`.
+6. **[P3] This file's own C5.4 write-up claimed prior suite content was "preserved in full"** - the
+   diff shows the old fixed-count E2E paragraphs were genuinely replaced (correctly, since they were
+   stale), not preserved verbatim. Reworded to "preserved and reorganized... outdated fixed-count E2E
+   descriptions were replaced with links to the current acceptance matrix," matching what actually
+   happened.
+
+Verified after all six: `./gradlew.bat spotlessCheck` clean, `git diff --check` clean. No suite
+re-run needed beyond the fresh `localTest` confirmation above - every other fix was a documentation
+correction against already-verified real source. **C5.4 is now closed.**
+
+## C5.5 — Portfolio demo script (2026-09-05)
+
+Wrote [`docs/PORTFOLIO_DEMO.md`](PORTFOLIO_DEMO.md): a fixed nine-step walkthrough (open `/runs` ->
+launch `LOCAL`/`JOURNEY` -> watch it live, Progress and Live Focus -> launch `FIXTURE` -> open its
+failed test -> show exception/screenshot/trace -> copy the failed step's deep link and open it in a
+new tab -> show the `Problems` and `Has artifacts` filters), matching the user's own C5.5 spec
+verbatim. Every UI label and route named in it (the launch form's `Environment`/`Suite`
+dropdowns and `Run` button, `/runs`/`/runs/:runId`, the `Progress` panel, the "Active now" Live
+Focus panel, the Tests table's `Search`/`Status`/`Evidence` filters including the exact `Problems`
+and `Has artifacts` option labels, per-row and per-step `Copy link` buttons) was checked against
+the real `runner-dashboard` source (`RunLaunchForm.tsx`, `router.tsx`, `TestResultsFilters.tsx`,
+`RunDetailsPage.tsx`) before being written into the script, not assumed from memory.
+
+**Live-verified end to end, not just written from source-reading**, against a real
+`runner-service` + `npm run dev` dashboard + the already-running local Docker RBP stack (Docker
+Desktop was off at the start of this session; started fresh, then `localSutHealth` confirmed all
+seven services healthy before proceeding):
+
+- Launched a real `LOCAL`/`JOURNEY` run from the dashboard's own launch form (selecting `LOCAL`
+  correctly narrowed Suite to `JOURNEY` alone) and watched `Progress`/"Active now" update live
+  while the six journey classes ran against the local stack.
+- Launched `PUBLIC`/`FIXTURE` *while the LOCAL run was still active* - **this session's own
+  original writeup here was wrong, see the review round below**: the two runs do not progress
+  concurrently. `FIXTURE` correctly stayed `QUEUED` until `LOCAL`/`JOURNEY` reached a terminal
+  status, then flipped to `RUNNING` on its own. `FIXTURE` reached 2/2 complete (1 passed, 1 failed)
+  unattended shortly after that - `CancelDuringStepFixtureTest`'s "blocks mid-step" resolves on its
+  own if nothing cancels it, so no manual cancellation step was needed for this script.
+- Expanded the failed `StepDrilldownFixtureTest`'s steps, confirmed the real exception text,
+  screenshot thumbnail, and working trace download link on its failed step.
+- Copied the failed step's deep link and confirmed it in a genuinely separate tab - **found and
+  worked around a real tooling gap while doing this**: Chrome does not treat a CDP-dispatched
+  click as a trusted user gesture for the Clipboard API, so `navigator.clipboard.writeText` was
+  silently rejected on the first attempt (the same reason `DeepLinkE2eTest` itself calls
+  `context.grantPermissions(["clipboard-read","clipboard-write"])` before clicking) - worked
+  around by capturing the write call's argument directly in-page rather than reading the OS
+  clipboard back, then confirming the captured URL genuinely contained `testId=`/`stepId=` and,
+  opened in a new tab, auto-revealed and focused the exact failed step. This is a browser-
+  automation environment limitation, not a defect in the dashboard's own copy-link feature.
+- Applied the `Problems` status filter alone (narrowed 2 tests to 1), cleared it, then applied the
+  `Has artifacts` evidence filter alone (also narrowed 2 to 1, the same test) - confirmed
+  independently, not just that one filter combination happened to work.
+
+No code was written or modified to make any of this work - the whole script runs on UI and backend
+behavior that already existed from prior phases.
+
+### Review round on this section (2026-09-05) - 2 P1 + 2 P2, all fixed and reverified
+
+1. **[P1] Claimed `LOCAL`/`JOURNEY` and `PUBLIC`/`FIXTURE` run concurrently thanks to an
+   "environment-scoped lock"** - read `RunService` directly: there is no per-environment lock
+   anywhere in it. It holds one single global `ThreadPoolExecutor(1, 1, ..., new
+   ArrayBlockingQueue<>(queueCapacity))` - exactly one worker thread, shared by every environment
+   and suite. A second run submitted while one is active is queued behind it (`RunStatus.QUEUED`
+   is a first-class, fully-modeled state - see `RunStatus.java` and the dashboard's own
+   `StatusBadge.tsx`), regardless of environment. The original live session had actually witnessed
+   this correctly (`FIXTURE` only appeared to start once `LOCAL`/`JOURNEY` had in fact already
+   finished, purely because enough real wall-clock time passed while working around browser-
+   automation flakiness) - the "concurrent, environment-scoped lock" explanation was an incorrect
+   inference layered on top of an otherwise-real observation, not a fabricated result. **Turned
+   into a better, more accurate demo per the reviewer's own suggestion**: re-verified live by
+   submitting both runs back-to-back through the real `POST /api/v1/runs` endpoint (`LOCAL`/
+   `JOURNEY` runId `83ac354d-...`, then immediately `PUBLIC`/`FIXTURE` runId `84d2907f-...`) -
+   confirmed via `GET /api/v1/runs/{id}` polling and screenshotted in the dashboard's own `/runs`
+   history table that the second run rendered `QUEUED` (not `RUNNING`) for the entire time the
+   first was still `RUNNING`, then automatically flipped to `RUNNING` the instant the first reached
+   `SUCCEEDED` - with zero manual intervention. `docs/PORTFOLIO_DEMO.md`'s step 5 now describes and
+   asks the presenter to actually show this `QUEUED` -> `RUNNING` transition as the real, correct
+   behavior it is, rather than a mistaken concurrency claim.
+2. **[P1] This document's own C5.5 writeup repeated the same incorrect "concurrent, no conflict"
+   result** - corrected in place above (see the "this session's own original writeup here was
+   wrong" note) rather than deleting the history of the mistake, so the record stays honest about
+   what was actually claimed first and why it was wrong.
+3. **[P2] The demo script skipped one-time setup** (`npm ci`, `playwrightInstall`, JDK 21/Node 24
+   prerequisites) and would fail on a fresh machine that hadn't already run the suite before.
+   `docs/PORTFOLIO_DEMO.md` gained a "One-time setup" section (linking to the README's own "Run it
+   locally in 5 minutes" for full detail) plus a macOS/Linux `./gradlew` note on every command, and
+   named Git/Docker Compose as `LOCAL`-only prerequisites.
+4. **[P3] "Reproduces the same nine observations every time" overclaimed what a clean `git status`
+   alone guarantees** - a healthy local stack, network reachability to the public target, and both
+   processes actually running all matter too, and the script itself allows skipping the `LOCAL`
+   scenario. Reworded to "reproducible when the documented prerequisites are met," and separated
+   deterministic application behavior (which UI states appear, how filters narrow the table, what
+   the deep link reveals) from run-to-run-variable values (run IDs, timestamps, exact durations) -
+   the latter are now explicitly framed as illustrative examples from one real session, not
+   guaranteed numbers.
+
+Verified after all four: re-ran the corrected step 5 live (two real runs via the real REST API,
+`QUEUED` -> `RUNNING` transition screenshotted in both the run's own detail page and the `/runs`
+history table), `./gradlew.bat spotlessApply` clean, `git diff --check` clean. **C5.5 is now
+closed.**

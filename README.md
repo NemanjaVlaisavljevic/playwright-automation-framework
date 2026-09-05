@@ -20,8 +20,10 @@ real time, with failures, screenshots, and traces surfacing the moment they happ
 - **REST-triggered runs** - pick an environment and suite from an allowlist, launch a real Gradle
   test process through a small Spring Boot service, no SSH/CI-console round trip required.
 - **Live progress over Server-Sent Events** - every `RUN_*`/`TEST_*`/`STEP_*` event streams to the
-  browser as it happens, replayed from a durable on-disk journal on reconnect so a dropped
-  connection never loses history.
+  browser as it happens. Events are synchronously persisted to disk, while reconnect replay uses
+  the canonical in-memory history for the lifetime of the current service instance, so a dropped
+  connection never loses history mid-run. Restart recovery and journal re-indexing are planned for
+  Phase D (see [Current limitations](#current-limitations)).
 - **Step-level reporting** - a `Steps` API instrumented directly in the test code reports
   step-by-step progress inside each test, not just a pass/fail at the end - see it live in the
   dashboard's "Live Focus" panel and, after the fact, as a per-test drill-down.
@@ -40,21 +42,30 @@ real time, with failures, screenshots, and traces surfacing the moment they happ
 flowchart TD
     A["React dashboard"] -->|"REST + SSE"| B["Spring Boot runner"]
     B -->|"ProcessBuilder"| C["Gradle / JUnit / Playwright"]
-    C -->|"JSONL events + manifest"| D["Journal, logs and artifacts"]
+    C -->|"raw JSONL events + artifact manifest"| S["Raw journal + artifacts on disk"]
+    S -->|"tailed by the runner"| B
 ```
 
 The dashboard never talks to Gradle/JUnit directly - it only ever sees the runner's REST/SSE
-surface. The runner launches the real test suite as a child process and tails the JSONL event
-journal that process writes as it runs (via a JUnit extension, not log-scraping), so the dashboard's
-live view is built from the same durable record that survives a dropped connection or a service
-restart. See [Architecture](docs/ARCHITECTURE.md) for the automation suite's own internal lifecycle,
-and [`runner-dashboard/README.md`](runner-dashboard/README.md#architecture-current) for the
-frontend's state model in more depth.
+surface. Two steps sit between the test process and the dashboard: a JUnit Platform listener and
+the `Steps` API write raw test/step JSONL events and an artifact manifest as the suite runs; the
+runner tails that raw stream (not log-scraping) and appends each validated event into its own
+canonical, sequence-numbered journal, which is what SSE replay is actually served from. See
+[Architecture](docs/ARCHITECTURE.md) for the automation suite's own internal lifecycle, and
+[`runner-dashboard/README.md`](runner-dashboard/README.md#architecture-current) for the frontend's
+state model in more depth.
 
 ## Run it locally in 5 minutes
 
-Prerequisites: **JDK 21**, **Node 24** (`runner-dashboard/.nvmrc` pins this), and - only for the
-`LOCAL` scenario below - **Docker Desktop**.
+This is the `PUBLIC`/`FIXTURE` fast path, after a one-time browser install. `LOCAL` (below) needs
+Git and Docker Desktop with Compose support, and its first local stack build realistically takes
+longer than 5 minutes - it fetches and builds the target application from source.
+
+Prerequisites: **JDK 21**, **Node 24** (`runner-dashboard/.nvmrc` pins this).
+
+```bash
+./gradlew.bat playwrightInstall   # one-time: installs the Chromium build every run launches
+```
 
 **Terminal 1 - backend:**
 
@@ -75,12 +86,13 @@ Open `http://localhost:5173/runs`. Two scenarios are available out of the box:
 | Environment | Suite | What it does |
 |---|---|---|
 | `PUBLIC` | `SMOKE` (or any of the other public suites) | Runs against the public read-only [Restful Booker Platform](https://automationintesting.online/) sandbox - nothing extra to set up. |
-| `LOCAL` | `JOURNEY` | Runs the same journey suite, including mutation-tagged tests, against a local Docker Compose copy of the same app - safe to write to, never touches the shared public target. Bring the stack up first: `./gradlew.bat localSutUp && ./gradlew.bat localSutHealth`. |
+| `LOCAL` | `JOURNEY` | Runs the same journey suite, including mutation-tagged tests, against a local Docker Compose copy of the same app - safe to write to, never touches the shared public target. Requires Git and Docker Desktop (with Compose). Bring the stack up first: `./gradlew.bat localSutUp && ./gradlew.bat localSutHealth` - the first `localSutUp` fetches and builds the target application from source and is slow (several minutes); later runs are fast. |
 
 Want the failure/artifact drill-down specifically, without waiting on a real defect? Pick the
 `FIXTURE` suite under `PUBLIC` - it deliberately fails one step on purpose, on demand, so you can
 see the full step/failure/screenshot/trace path immediately. More screenshots of all of this in
-[`docs/screenshots/`](docs/screenshots/).
+[`docs/screenshots/`](docs/screenshots/), or follow the fixed, repeatable
+[portfolio demo script](docs/PORTFOLIO_DEMO.md) for a full guided walkthrough.
 
 ## Test strategy and CI
 
@@ -98,12 +110,13 @@ every acceptance criterion checked in [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE
 | `dashboard-e2e.yml` | The complete real-browser dashboard E2E suite (Playwright, real backend + real dashboard build), weekly + on demand. |
 | `local-sut.yml` | Full read-only + mutation regression against the local Docker stack, weekly + on demand. |
 
-The dashboard's own E2E suite (`dashboardE2eTest`) is itself the largest single test class in this
-repository - real-browser coverage of accessibility (axe-core + a dedicated keyboard-operability
-gate), responsive layout at 320/768/1440px, long/unbroken content, a 100-test/400-step synthetic
-run, and measured render/filter performance, on top of the functional run-lifecycle/cancel/
-recovery/deep-link scenarios. See [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md)'s
-acceptance matrix for exactly which test proves which scenario.
+The dashboard E2E suite (`dashboardE2eTest`) is the largest dedicated test suite in the repository
+(17 test classes, 21 test methods) - real-browser coverage of accessibility (axe-core + a dedicated
+keyboard-operability gate), responsive layout at 320/768/1440px, long/unbroken content, a
+100-test/400-step synthetic run, and measured render/filter performance, on top of the functional
+run-lifecycle/cancel/recovery/deep-link scenarios. See
+[`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md)'s acceptance matrix for exactly which test
+proves which scenario.
 
 ## Current limitations
 
@@ -193,7 +206,9 @@ The default `test` task excludes the `mutation` tag. This is deliberate: a profe
 ./gradlew.bat stabilityTest    # rerun localTest N times (-PstabilityRuns=N, default 10) to check determinism
 ```
 
-Requires Docker Desktop (with Compose) and `git`; no other toolchain needs to be installed on the host — the Java build runs inside a throwaway Maven container. `localSutPrepare` applies a small local patch on top of the pinned upstream source to fix a build-time env var ordering bug in the `assets` service's own Dockerfile (details, including why it's a patch and not a fork, in `infra/rbp/README.md`). With that patch, `localTest` passes 27/27, and `stabilityTest -PstabilityRuns=10` has passed 10/10.
+Requires Docker Desktop (with Compose) and `git`; no other toolchain needs to be installed on the host — the Java build runs inside a throwaway Maven container. `localSutPrepare` applies a small local patch on top of the pinned upstream source to fix a build-time env var ordering bug in the `assets` service's own Dockerfile (details, including why it's a patch and not a fork, in `infra/rbp/README.md`).
+
+The current `localTest` suite passes 32/32 tests. The earlier automation-foundation stability gate verified the then-current 27-test suite across 10 consecutive `stabilityTest` runs - see [`docs/RELEASE_EVIDENCE.md`](docs/RELEASE_EVIDENCE.md) for that historical record.
 
 ### Dashboard end-to-end tests
 
