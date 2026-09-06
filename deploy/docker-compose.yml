@@ -39,10 +39,17 @@ services:
     # real domain exists - today's D0/D1 state keeps serving plain HTTP on :80.
     environment:
       - SITE_ADDRESS
+    # WEB_HTTP_BIND/WEB_HTTPS_BIND (D2.6 review) - production always defaults to the real 80/443
+    # below via Compose's own `${VAR:-default}` substitution; only set them in deploy/.env to
+    # remap the host side for a local acceptance run whose host already has something else bound
+    # to 80/443 (see deploy/.env.example) - a permanent, reusable escape hatch instead of a
+    # throwaway override file a reviewer would otherwise have to hand-reconstruct from a doc
+    # comment. The container-side ports (:80/:443) never change - only which host port they land
+    # on.
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp" # HTTP/3 (QUIC) - harmless to publish even before SITE_ADDRESS names a domain.
+      - "${WEB_HTTP_BIND:-80}:80"
+      - "${WEB_HTTPS_BIND:-443}:443"
+      - "${WEB_HTTPS_BIND:-443}:443/udp" # HTTP/3 (QUIC) - harmless even before SITE_ADDRESS names a domain.
     volumes:
       - caddy-data:/data
       - caddy-config:/config

@@ -26,12 +26,22 @@ runner-service ─────────────────── data ne
         (--no-daemon, one at a time - see RunService/SuiteCommandFactory)
 ```
 
-**Two separate Compose networks, not one** - `edge` (`web` ↔ `runner-service`) and `data`
-(`runner-service` ↔ `postgres`, declared `internal: true`). Without this split every service shares
-one default network, and `web` could reach `postgres` directly even though nothing external is
-involved - a real gap caught in review before it ever shipped, not assumed safe from the Compose
-file's prose alone (see "Verified": confirmed live that `web` genuinely cannot reach `postgres`,
-while `runner-service` can).
+**Two separate Compose networks, not one** - `edge` (`web`, `runner-service`) and `data`
+(`runner-service`, `postgres`). **What actually stops `web` reaching `postgres` is topology, not
+`internal: true`**: `web` is attached only to `edge`, `postgres` is attached only to `data`, and
+Docker containers can only resolve/reach each other by name over a network they are *both* attached
+to - `runner-service` is the only service on both, so it alone bridges the two. Without this split
+(every service sharing one default network instead) `web` could reach `postgres` directly even
+though nothing external is involved - a real gap caught in review before it ever shipped, not
+assumed safe from the Compose file's prose alone (see "Verified": confirmed live that `web`
+genuinely cannot reach `postgres`, while `runner-service` can). `data`'s own `internal: true` is a
+*separate*, additional protection on top of that topology, not the mechanism behind it: it stops the
+`data` network itself from routing to the external internet/host gateway at all (so even
+`runner-service` or `postgres` could never reach out through it), which is a real defense-in-depth
+property but is not what would save this boundary if `web` were ever mistakenly also attached to
+`data` - at that point `internal: true` would do nothing to stop `web`↔`postgres` traffic, since
+`internal` only restricts a network's *external* connectivity, never which of its own already-joined
+members can reach each other.
 
 **No Node process exists in the runtime image at all.** `deploy/web/Dockerfile` is a two-stage
 build: a discarded `node:24-slim` stage runs `npm ci && npm run build`, and the shipped image is
@@ -978,6 +988,88 @@ Verified after all fixes: full gate green (root `test`, `runner-contract`, `runn
 `runner-service` `test` and `databaseIntegrationTest`, including the new `EXPLAIN`-backed index test
 and the real-trigger-backed fail-closed test), `spotlessCheck`/`git diff --check` clean.
 
+**D2.6 - Production acceptance - DONE 2026-09-06.** No code changes to `runner-service` itself -
+this phase is entirely the real end-to-end proof D2.1-D2.5 were built for, against the actual
+three-container production topology (`deploy/docker-compose.yml`), not `bootRun` + a bare local
+Postgres. One real config change did land here: `web`'s published host ports are now
+`${WEB_HTTP_BIND:-80}`/`${WEB_HTTPS_BIND:-443}` instead of hardcoded `80`/`443` (review finding - a
+local acceptance run needs a durable, reusable way to remap the host side when something else on
+the dev machine already holds 80/443, not a throwaway override file a later reviewer or CI run
+cannot reconstruct). Production is unaffected: both env vars are unset in any real deployment, so
+Compose's own `${VAR:-default}` falls back to the real `80`/`443` exactly as before.
+
+**Reproducible commands** (run from the repository root; `deploy/.env` - gitignored - needs
+`WEB_HTTP_BIND`/`WEB_HTTPS_BIND` set only if host 80/443 is already taken, see
+`deploy/.env.example`):
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml \
+  --env-file deploy/.env up --build -d
+# ... submit runs, poll for the crash window (see below) ...
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml \
+  --env-file deploy/.env kill -s SIGKILL runner-service
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml \
+  --env-file deploy/.env up -d runner-service
+# ... verify recovery, reconnect-and-replay, artifacts (see below) ...
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml \
+  --env-file deploy/.env down -v
+```
+
+A full, sanitized transcript of every command and response below (`docker compose ps`, REST
+responses, SSE output, the recovery log, `docker stats` samples, and the Postgres/artifact
+consistency checks) is committed in [`docs/RELEASE_EVIDENCE.md`](RELEASE_EVIDENCE.md)'s own
+"Faza D2.6" section, following that file's existing evidence-log convention rather than a new,
+separate transcript file.
+
+- Built and started the real stack. All three containers came up; `postgres` published **no host
+  port at all** (confirmed via `docker compose ps`), and `runner-service` migrated cleanly through
+  v1→v3 against it on first boot.
+- Confirmed the network-isolation invariant still holds with real D2 traffic flowing: `web` timed
+  out trying to reach `postgres:5432` directly - `web` simply has no membership on the `data`
+  network at all (see §1's corrected explanation of why that topology, not `internal: true`, is
+  what actually enforces this) - while `runner-service`, the only service on both `edge` and `data`,
+  reached it successfully for Flyway/JDBC the entire time.
+- **[P1 fix] The key crash scenario now uses a genuine `SIGKILL`, not `docker compose restart`.**
+  `restart` sends `SIGTERM` first and gives Spring time for its own graceful shutdown (confirmed
+  live in an earlier pass: `"Commencing graceful shutdown"` appears, `@PreDestroy` hooks and Hikari
+  get to run, and a still-in-flight test run's own events kept flowing for several more seconds
+  before the process actually exited) - not the hard-crash `runner-service`/README already promise
+  recovery from. Re-verified with `docker compose kill -s SIGKILL runner-service`: no graceful
+  shutdown log line at all, the container exits immediately (code 137), and - checked directly in
+  Postgres, not just inferred - the run's row was left exactly mid-flight (`status = RUNNING`,
+  `finished_at` null, event history ending at whatever it last durably committed, no partial or
+  corrupt row). After `docker compose up -d runner-service`, the log showed `Recovered 1
+  non-terminal run(s) to ERROR on startup`; a direct `SELECT COUNT(*) FROM run_events WHERE
+  run_id = ... AND event_type = 'RUN_FINISHED'` returned exactly **1**.
+- **[P2 fix] The artifact check now covers the actual D2.4×D2.5 intersection the review named**, not
+  just an already-terminal run's artifacts surviving a restart: submitted a `PUBLIC`/`FIXTURE` run,
+  tightly polled `GET .../artifacts` until it returned both artifacts (a `SCREENSHOT` and a `TRACE`)
+  while a separate poll of `GET .../runs/{id}` still read `RUNNING` in the very same loop iteration,
+  and fired the `SIGKILL` immediately in that same iteration - the run was killed with its artifact
+  metadata already durably ingested but its own `RUN_FINISHED` not yet committed (confirmed directly
+  in Postgres: the `artifacts` rows already existed while `runs.status` was still `RUNNING`). After
+  recovery to `ERROR`, both artifact rows were byte-for-byte unchanged (same `artifact_id`s, same
+  `size_bytes`), and downloading each one through the real HTTP endpoint returned the exact byte
+  count Postgres recorded (1,620,071 / 1,316,252 bytes) and genuinely valid files (a real PNG, a real
+  ZIP) - proving artifact ingestion that happens *before* a crash survives being followed by recovery
+  to `ERROR`, not only an artifact that was already safely terminal beforehand.
+- **Reconnect-and-replay proven two ways against this same hard-killed run, no gap, no duplicate**: a
+  live SSE subscriber connected before the kill saw events up through `TEST_FAILED` (sequence 14)
+  and then genuinely dropped, with no `RUN_FINISHED` ever delivered to it. After recovery, a fresh
+  subscription with no `Last-Event-ID` returned the complete 15-event history in order, ending in
+  exactly one `RUN_FINISHED(ERROR)`; a second subscription resuming with `Last-Event-ID: 14` (exactly
+  where the dropped live subscriber had last seen an event) returned exactly the one event it had
+  missed - not a re-delivery of 1-14, not a gap.
+- Separately confirmed the idempotent-no-op path against the real stack too (a second, ordinary
+  `docker compose restart runner-service` with nothing left non-terminal logged no `Recovered` line
+  at all), and that an older, already-recovered run and a separately-completed terminal run both
+  remained fully readable through the real edge path afterward.
+- Re-ran the §5 RAM/disk measurement (`PUBLIC`/`REGRESSION`, same `docker stats` methodology) now
+  that both the D1 heap caps and D2's real Postgres persistence path are genuinely active - see the
+  "D2.6 remeasurement" note under §5. System-wide peak (~1.71 GB) was materially unchanged from the
+  pre-D2 figure; the 8 GB go/no-go recommendation is now confirmed against reality, not a pre-caps/
+  pre-persistence estimate.
+
 ## 4. Security boundary
 
 | Surface | Access |
@@ -986,7 +1078,7 @@ and the real-trigger-backed fail-closed test), `spotlessCheck`/`git diff --check
 | Launch a run, cancel a run | Requires authentication (D3 - not yet implemented) |
 | `/actuator/health` | Public (liveness only) |
 | `/actuator/info`, `/v3/api-docs`, any other actuator endpoint | Not proxied publicly at all |
-| PostgreSQL | No published port anywhere, on any network - reachable only from `runner-service`, via the `data` network, which is `internal: true` (not even `web` can reach it - see §1) |
+| PostgreSQL | No published port anywhere, on any network - reachable only from `runner-service`, the only service attached to both `edge` and `data`; `web` has no membership on `data` at all, so it cannot reach `postgres` regardless of `internal: true` (see §1's corrected explanation of what that flag does and does not do) |
 | `runner-service` itself | No published port in the base Compose file at all - only reachable through `web`. `docker-compose.debug.yml` publishes a loopback-only debug port for local measurement/troubleshooting; never applied in a real deployment |
 | Docker socket | Never mounted into any container - nothing here starts/stops/manages other containers or the host |
 
@@ -1072,11 +1164,51 @@ this pre-caps, pre-persistence number as final.
   `docker-compose.yml` - `docker-compose.debug.yml` no longer duplicates a `web` port mapping, it
   now only adds the loopback-only `runner-service` debug port.
 - **Done**: named volumes `caddy-data:/data` and `caddy-config:/config` on `web`.
-- Still open: re-run the RAM/disk measurement in §5 with all of the above in place (heap caps did
-  not exist when §5 was last measured), and once D2's persistence path is actually active - before
-  the D5 purchase. Also still open: a real domain to actually prove TLS issuance end to end (no
-  domain purchased yet - D5's job); everything above has only been verified with `SITE_ADDRESS`
+- **Done** (D2.6, below): re-ran the RAM/disk measurement with heap caps and D2's real Postgres
+  persistence path both active. Still open: a real domain to actually prove TLS issuance end to end
+  (no domain purchased yet - D5's job); everything above has only been verified with `SITE_ADDRESS`
   unset (plain `:80`), not against a real ACME challenge.
+
+### D2.6 remeasurement (2026-09-06) - heap caps and real Postgres persistence both active
+
+The measurement above predates both the `-Xmx256m`/`maxHeapSize=512m` heap caps and D2's real
+Postgres read/write path - re-measured against the same real three-container stack, same
+`PUBLIC`/`REGRESSION` suite, same `docker stats` sampling methodology, now that both are genuinely
+in place:
+
+| Container | Idle | Peak during an active `REGRESSION` run |
+|---|---|---|
+| `runner-service` | ~380 MB (up from ~215 MB - Hikari connection pool, Flyway, JDBC/transaction infrastructure that simply did not exist in-process before D2) | **1.62 GB** (same order of magnitude as the pre-D2 1.70 GB peak, not higher - the heap cap and real Postgres traffic did not meaningfully change the dominant cost, which is still `--no-daemon` build process + forked JUnit worker + up to 2 concurrent Chromium instances) |
+| `web` (Caddy) | ~15 MB | ~15 MB (unchanged) |
+| `postgres` | ~78 MB (up from ~40 MB idle - the schema now actually exists, not just an empty cluster) | ~78 MB (essentially flat under real load - a handful of `runs`/`run_events`/`run_selected_tests`/`artifacts` row writes per test run is negligible next to the Chromium/Gradle footprint that dominates this measurement) |
+
+**System-wide peak: ~1.71 GB** for the three containers - materially unchanged from the pre-D2 ~1.75
+GB figure, confirming the concern the original measurement flagged ("zero margin for D2's Postgres
+query/connection load") did not actually materialize: Postgres's own footprint under real per-run
+read/write traffic is small enough to be noise next to the browser-automation cost that already
+dominated. The **8 GB go/no-go recommendation below is confirmed, not just provisional** - re-run
+against real, both caps and persistence active, not the earlier pre-caps/pre-persistence estimate.
+
+**Disk**, also re-measured for real:
+
+| Item | Size |
+|---|---|
+| `deploy-runner-service` image | 3.59 GB (unchanged - code changes are small next to the baked-in JDK/Chromium/repository weight) |
+| `deploy-web` image | 89 MB (unchanged) |
+| `postgres:17-alpine` image | 424 MB (unchanged) |
+| `runner-data` volume, after 3 real runs (1 `SMOKE`, 1 `FIXTURE`, 1 `REGRESSION`) | ~3 MB (same order of magnitude as before) |
+| `pgdata` volume, after those same 3 runs (new - D2 is the first time this volume ever held real schema/data rather than an idle empty cluster) | ~49 MB |
+
+**~49 MB is the current footprint, not a measured growth rate** (review correction) - it is
+overwhelmingly Postgres's own baseline cluster/WAL overhead that exists the moment the schema is
+migrated, before a single run's own row is ever written, not the accumulated cost of those 3 runs'
+`runs`/`run_events`/`artifacts` rows. Establishing the actual per-run growth rate needs comparing
+`pgdata`'s size immediately after migration against its size after a much larger number of runs -
+that comparison, and the retention policy it would motivate, is D4's own job, not this measurement's.
+What this figure does confirm: even taken at face value as if it were all real per-run growth, ~49
+MB is negligible next to the image sizes and the already-budgeted rebuild-and-redeploy headroom -
+the **20 GB floor stated below still holds** regardless of which interpretation of this number turns
+out to be closer to true per-run growth once D4 actually measures it.
 
 ## Verified
 
