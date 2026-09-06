@@ -4,15 +4,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.domain.Environment;
+import dev.vlaisanem.automation.runner.service.domain.Run;
+import dev.vlaisanem.automation.runner.service.domain.RunStatus;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
+import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
-import java.nio.file.Path;
+import dev.vlaisanem.automation.runner.service.repository.CommittedRunChange;
+import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -23,26 +27,33 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.LongFunction;
+import java.util.function.UnaryOperator;
 import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * D2.3 cutover: rewritten against {@link FakeRunLifecycleStore} instead of the retired {@code
+ * FileBackedRunEventJournal}. A real Postgres-backed run row is now a hard prerequisite for any
+ * event (the {@code fk_run_events_run} foreign key the real schema enforces has no equivalent in
+ * the old file journal, which could append to any {@code runId} with no prior record at all) -
+ * every test here calls {@link RunEventBroker#queue} first for exactly that reason. The 300-event
+ * and 260-event stress tests use {@link RunEventBroker#append} with {@code TEST_STARTED} events
+ * (the append-only path, unbounded while a run stays non-terminal) rather than repeatedly "queuing"
+ * the same run, which a real run can only do once.
+ */
 class RunEventBrokerTest {
 
   private static final Instant NOW = Instant.parse("2026-08-31T12:00:00Z");
-  private static final ObjectMapper OBJECT_MAPPER =
-      new ObjectMapper()
-          .registerModule(new JavaTimeModule())
-          .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
   @Test
-  void appendPublishesToAnAlreadyRegisteredLiveSubscriber(@TempDir Path dir) throws Exception {
-    RunEventBroker broker = newBroker(dir);
+  void appendPublishesToAnAlreadyRegisteredLiveSubscriber() throws Exception {
+    RunEventBroker broker = newBroker();
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     broker.replayAndSubscribe("run-1", 0, subscriber);
 
-    broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
-    broker.append("run-1", seq -> RunnerEvent.runStarted("run-1", seq, NOW));
+    queue(broker, "run-1");
+    startRunning(broker, "run-1");
 
     awaitReceivedCount(subscriber, 2);
     assertThat(subscriber.received)
@@ -51,25 +62,24 @@ class RunEventBrokerTest {
   }
 
   @Test
-  void replayAndSubscribeDeliversExistingHistoryThenLiveEvents(@TempDir Path dir) throws Exception {
-    RunEventBroker broker = newBroker(dir);
-    broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
-    broker.append("run-1", seq -> RunnerEvent.runStarted("run-1", seq, NOW));
+  void replayAndSubscribeDeliversExistingHistoryThenLiveEvents() throws Exception {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
+    startRunning(broker, "run-1");
 
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     broker.replayAndSubscribe("run-1", 0, subscriber);
-    broker.append(
-        "run-1", seq -> RunnerEvent.runFinished("run-1", seq, NOW, RunOutcome.SUCCEEDED, null));
+    finish(broker, "run-1", RunStatus.SUCCEEDED, RunOutcome.SUCCEEDED);
 
     awaitReceivedCount(subscriber, 3);
     assertThat(subscriber.received).extracting(RunnerEvent::sequence).containsExactly(1L, 2L, 3L);
   }
 
   @Test
-  void replayAfterASequenceOnlyReplaysNewerEvents(@TempDir Path dir) throws Exception {
-    RunEventBroker broker = newBroker(dir);
-    broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
-    broker.append("run-1", seq -> RunnerEvent.runStarted("run-1", seq, NOW));
+  void replayAfterASequenceOnlyReplaysNewerEvents() throws Exception {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
+    startRunning(broker, "run-1");
 
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     broker.replayAndSubscribe("run-1", 1, subscriber); // already saw sequence 1
@@ -88,17 +98,18 @@ class RunEventBrokerTest {
    * order, with no gap and no duplicate.
    */
   @Test
-  void replayAndSubscribeNeverMissesOrDuplicatesAnEventRacingConcurrently(@TempDir Path dir)
-      throws Exception {
-    RunEventBroker broker = newBroker(dir);
-    int totalEvents = 300;
+  void replayAndSubscribeNeverMissesOrDuplicatesAnEventRacingConcurrently() throws Exception {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
+    startRunning(broker, "run-1"); // now RUNNING - stays non-terminal for the whole stress run
+    int totalTestEvents = 300;
     ExecutorService publisher = Executors.newSingleThreadExecutor();
 
     Future<?> publishing =
         publisher.submit(
             () -> {
-              for (int i = 0; i < totalEvents; i++) {
-                broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
+              for (int i = 0; i < totalTestEvents; i++) {
+                appendTestEvent(broker, "run-1");
               }
             });
 
@@ -110,6 +121,7 @@ class RunEventBrokerTest {
 
     publishing.get(30, TimeUnit.SECONDS);
     publisher.shutdown();
+    int totalEvents = totalTestEvents + 2; // + RUN_QUEUED + RUN_STARTED seeded above
     awaitReceivedCount(subscriber, totalEvents);
 
     assertThat(subscriber.received)
@@ -122,62 +134,66 @@ class RunEventBrokerTest {
    * RunEventHub.Subscription#offerLive}, on whatever thread calls {@link RunEventBroker#append} -
    * here, this test's own thread. If the subscriber's {@code onError} callback ran synchronously on
    * that path and threw, the exception would propagate out of {@code append} even though the event
-   * was already durably written to the journal. Proving {@code append} never throws here, and that
+   * was already durably written to the store. Proving {@code append} never throws here, and that
    * every appended event is still readable afterward, is what proves the callback is fully
    * decoupled from the publisher.
    */
   @Test
-  void aSubscriberErrorCallbackThatThrowsNeverFailsAppendOrCorruptsTheJournal(@TempDir Path dir)
-      throws Exception {
-    FileBackedRunEventJournal journal = newJournal(dir);
-    RunEventBroker broker = newBroker(journal);
+  void aSubscriberErrorCallbackThatThrowsNeverFailsAppendOrCorruptsTheStore() throws Exception {
+    FakeRunLifecycleStore store = new FakeRunLifecycleStore();
+    RunEventBroker broker = newBroker(store);
+    queue(broker, "run-1");
+    startRunning(broker, "run-1");
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     subscriber.blockOnEvent = true; // never drains, so the live mailbox eventually overflows
     subscriber.throwOnErrorCallback = true;
     broker.replayAndSubscribe("run-1", 0, subscriber);
 
-    for (long seq = 1; seq <= 260; seq++) { // comfortably exceeds the live capacity (256)
-      assertThatCode(() -> broker.append("run-1", s -> RunnerEvent.runQueued("run-1", s, NOW)))
-          .doesNotThrowAnyException();
+    for (int i = 0; i < 260; i++) { // comfortably exceeds the live capacity (256)
+      int index = i;
+      assertThatCode(() -> appendTestEvent(broker, "run-1", index)).doesNotThrowAnyException();
     }
 
     assertThat(subscriber.errorLatch.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(subscriber.error).hasMessageContaining("mailbox full");
-    assertThat(journal.readAfter("run-1", 0)).hasSize(260);
+    assertThat(store.readEventsAfter("run-1", 0)).hasSize(262); // RUN_QUEUED + RUN_STARTED + 260
   }
 
   /**
-   * Deterministic replacement for a timing-based race test: a custom {@link RunEventReader} blocks
-   * mid-read, while the broker's per-run lock is held, so this test can prove - not just hope -
-   * that a concurrent {@link RunEventBroker#append} cannot complete until the reader is released
-   * and {@code replayAndSubscribe} has registered the subscriber. Once released, the subscriber
-   * must see exactly the pre-existing replay event followed by the one concurrent live append, with
-   * no gap and no duplicate.
+   * Deterministic replacement for a timing-based race test: a custom {@link RunLifecycleStore}
+   * blocks mid-read, while the broker's per-run lock is held, so this test can prove - not just
+   * hope - that a concurrent {@link RunEventBroker#append} cannot complete until the store read is
+   * released and {@code replayAndSubscribe} has registered the subscriber. Once released, the
+   * subscriber must see exactly the pre-existing replay event followed by the one concurrent live
+   * append, with no gap and no duplicate.
    */
   @Test
-  void replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered(@TempDir Path dir)
-      throws Exception {
-    FileBackedRunEventJournal journal = newJournal(dir);
-    journal.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW)); // pre-existing
-    BlockingReader blockingReader = new BlockingReader(journal);
-    RunEventBroker broker = new RunEventBroker(journal, blockingReader, testProperties());
+  void replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered() throws Exception {
+    FakeRunLifecycleStore store = new FakeRunLifecycleStore();
+    store.queue(
+        "run-1",
+        Environment.PUBLIC,
+        Suite.SMOKE,
+        NOW,
+        List.of(),
+        seq -> RunnerEvent.runQueued("run-1", seq, NOW)); // pre-existing
+    BlockingLifecycleStore blockingStore = new BlockingLifecycleStore(store);
+    RunEventBroker broker = new RunEventBroker(blockingStore, testProperties());
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     ExecutorService executor = Executors.newFixedThreadPool(2);
     try {
       Future<RunEventSubscription> subscribing =
           executor.submit(() -> broker.replayAndSubscribe("run-1", 0, subscriber));
-      assertThat(blockingReader.entered.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(blockingStore.entered.await(5, TimeUnit.SECONDS)).isTrue();
 
-      Future<RunnerEvent> appending =
-          executor.submit(
-              () -> broker.append("run-1", seq -> RunnerEvent.runStarted("run-1", seq, NOW)));
+      Future<RunnerEvent> appending = executor.submit(() -> appendTestEvent(broker, "run-1"));
 
       // The per-run lock is still held by the blocked replayAndSubscribe call - the concurrent
       // append must not be able to finish yet.
       assertThatThrownBy(() -> appending.get(300, TimeUnit.MILLISECONDS))
           .isInstanceOf(TimeoutException.class);
 
-      blockingReader.release.countDown();
+      blockingStore.release.countDown();
 
       subscribing.get(5, TimeUnit.SECONDS);
       appending.get(5, TimeUnit.SECONDS);
@@ -190,14 +206,14 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Regression test for the review's finding: resuming from a sequence the journal never produced
-   * (a client's {@code Last-Event-ID} claiming to have seen something that does not exist) must be
+   * Regression test for the review's finding: resuming from a sequence the store never produced (a
+   * client's {@code Last-Event-ID} claiming to have seen something that does not exist) must be
    * rejected outright, not silently served as if it were {@code 0} or the latest.
    */
   @Test
-  void replayAndSubscribeRejectsAnAfterSequenceAheadOfTheJournal(@TempDir Path dir) {
-    RunEventBroker broker = newBroker(dir);
-    broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
+  void replayAndSubscribeRejectsAnAfterSequenceAheadOfTheStore() {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
 
     assertThatThrownBy(() -> broker.replayAndSubscribe("run-1", 100, subscriber))
@@ -206,10 +222,10 @@ class RunEventBrokerTest {
         .hasMessageContaining("1");
   }
 
-  /** Same finding, for a runId the journal has no record of at all - not just a stale one. */
+  /** Same finding, for a runId the store has no record of at all - not just a stale one. */
   @Test
-  void replayAndSubscribeRejectsAnAfterSequenceForAnUnknownRun(@TempDir Path dir) {
-    RunEventBroker broker = newBroker(dir);
+  void replayAndSubscribeRejectsAnAfterSequenceForAnUnknownRun() {
+    RunEventBroker broker = newBroker();
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
 
     assertThatThrownBy(() -> broker.replayAndSubscribe("never-seen", 1, subscriber))
@@ -217,13 +233,13 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Regression test for the review's finding: a run the journal has no record of at all still
-   * accepts a resume point of {@code 0} (the "give me everything" sentinel) without being rejected
-   * as "ahead of the journal" - {@code 0} is never ahead of anything.
+   * Regression test for the review's finding: a run the store has no record of at all still accepts
+   * a resume point of {@code 0} (the "give me everything" sentinel) without being rejected as
+   * "ahead of the store" - {@code 0} is never ahead of anything.
    */
   @Test
-  void replayAndSubscribeWithZeroIsNeverRejectedEvenForAnUnknownRun(@TempDir Path dir) {
-    RunEventBroker broker = newBroker(dir);
+  void replayAndSubscribeWithZeroIsNeverRejectedEvenForAnUnknownRun() {
+    RunEventBroker broker = newBroker();
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
 
     assertThatCode(() -> broker.replayAndSubscribe("never-seen", 0, subscriber))
@@ -236,15 +252,14 @@ class RunEventBrokerTest {
    * must complete immediately rather than sit open until the emitter's own timeout.
    */
   @Test
-  void replayAndSubscribeAtExactlyTheLatestTerminalSequenceCompletesImmediately(@TempDir Path dir)
-      throws Exception {
-    RunEventBroker broker = newBroker(dir);
-    broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
-    broker.append(
-        "run-1", seq -> RunnerEvent.runFinished("run-1", seq, NOW, RunOutcome.SUCCEEDED, null));
+  void replayAndSubscribeAtExactlyTheLatestTerminalSequenceCompletesImmediately() throws Exception {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
+    startRunning(broker, "run-1");
+    finish(broker, "run-1", RunStatus.SUCCEEDED, RunOutcome.SUCCEEDED);
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
 
-    broker.replayAndSubscribe("run-1", 2, subscriber);
+    broker.replayAndSubscribe("run-1", 3, subscriber);
 
     assertThat(subscriber.completedLatch.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(subscriber.received).isEmpty();
@@ -255,10 +270,9 @@ class RunEventBrokerTest {
    * stay open - more events may still be appended, unlike the terminal case above.
    */
   @Test
-  void replayAndSubscribeAtExactlyTheLatestNonTerminalSequenceStaysOpen(@TempDir Path dir)
-      throws Exception {
-    RunEventBroker broker = newBroker(dir);
-    broker.append("run-1", seq -> RunnerEvent.runQueued("run-1", seq, NOW));
+  void replayAndSubscribeAtExactlyTheLatestNonTerminalSequenceStaysOpen() throws Exception {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
 
     broker.replayAndSubscribe("run-1", 1, subscriber);
@@ -272,8 +286,9 @@ class RunEventBrokerTest {
    * silently on shutdown.
    */
   @Test
-  void shutdownClosesActiveSubscriptions(@TempDir Path dir) throws Exception {
-    RunEventBroker broker = newBroker(dir);
+  void shutdownClosesActiveSubscriptions() throws Exception {
+    RunEventBroker broker = newBroker();
+    queue(broker, "run-1");
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     broker.replayAndSubscribe("run-1", 0, subscriber);
 
@@ -282,47 +297,59 @@ class RunEventBrokerTest {
     assertThat(subscriber.completedLatch.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
-  private RunEventBroker newBroker(Path dir) {
-    return newBroker(newJournal(dir));
+  private RunEventBroker newBroker() {
+    return newBroker(new FakeRunLifecycleStore());
   }
 
-  private FileBackedRunEventJournal newJournal(Path dir) {
-    RunnerProperties properties =
-        new RunnerProperties(
-            ".",
-            Duration.ofSeconds(30),
-            dir.resolve("raw").toString(),
-            dir.resolve("journal").toString(),
-            dir.resolve("logs").toString(),
-            "src/test/resources/catalog/public-test-catalog.json",
-            dir.resolve("artifacts").toString(),
-            1024 * 1024,
-            Duration.ofSeconds(5),
-            Duration.ofSeconds(1),
-            1,
-            Duration.ofMillis(150),
-            Duration.ofSeconds(5),
-            10_000,
-            Duration.ofSeconds(15),
-            Duration.ofMinutes(10));
-    return new FileBackedRunEventJournal(properties, OBJECT_MAPPER);
+  private RunEventBroker newBroker(RunLifecycleStore store) {
+    return new RunEventBroker(store, testProperties());
   }
 
-  private RunEventBroker newBroker(FileBackedRunEventJournal journal) {
-    return new RunEventBroker(journal, journal, testProperties());
+  private void queue(RunEventBroker broker, String runId) {
+    broker.queue(
+        runId,
+        Environment.PUBLIC,
+        Suite.SMOKE,
+        NOW,
+        List.of(),
+        seq -> RunnerEvent.runQueued(runId, seq, NOW));
+  }
+
+  private void startRunning(RunEventBroker broker, String runId) {
+    // RunStateMachine only allows QUEUED -> STARTING -> RUNNING, never QUEUED -> RUNNING directly.
+    broker.transitionIfNonTerminal(runId, run -> run.transitionTo(RunStatus.STARTING, NOW), null);
+    broker.transitionIfNonTerminal(
+        runId,
+        run -> run.transitionTo(RunStatus.RUNNING, NOW),
+        seq -> RunnerEvent.runStarted(runId, seq, NOW));
+  }
+
+  private void finish(RunEventBroker broker, String runId, RunStatus status, RunOutcome outcome) {
+    broker.transitionIfNonTerminal(
+        runId,
+        run -> run.transitionTo(status, NOW, 0, null),
+        seq -> RunnerEvent.runFinished(runId, seq, NOW, outcome, null));
+  }
+
+  private RunnerEvent appendTestEvent(RunEventBroker broker, String runId) {
+    return appendTestEvent(broker, runId, 0);
+  }
+
+  private RunnerEvent appendTestEvent(RunEventBroker broker, String runId, int index) {
+    return broker.append(
+        runId,
+        seq -> RunnerEvent.testStarted(runId, seq, NOW, "test-" + index, "Some test " + index));
   }
 
   /**
    * A minimal-but-valid properties object for constructing a broker directly - only {@code
-   * sseMaxSubscribers()} is ever read from it, so the directory fields are dummy values, not tied
-   * to any {@code @TempDir}.
+   * sseMaxSubscribers()} is ever read from it.
    */
   private RunnerProperties testProperties() {
     return new RunnerProperties(
         ".",
         Duration.ofSeconds(30),
         "raw",
-        "journal",
         "logs",
         "src/test/resources/catalog/public-test-catalog.json",
         "artifacts",
@@ -338,35 +365,70 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Test double that blocks inside {@code latest} until released, so a test can deterministically
-   * prove the broker's per-run lock is actually held for the whole "read replay snapshot" step -
-   * not just usually working out under timing that happens to favor it. Blocks in {@code latest}
-   * specifically because {@link RunEventBroker#replayAndSubscribe} calls that first, to validate
-   * the resume point against the current high-water mark before ever reading the replay batch.
+   * Test double that blocks inside {@code latestEvent} until released, so a test can
+   * deterministically prove the broker's per-run lock is actually held for the whole "read replay
+   * snapshot" step - not just usually working out under timing that happens to favor it. Blocks in
+   * {@code latestEvent} specifically because {@link RunEventBroker#replayAndSubscribe} calls that
+   * first, to validate the resume point against the current high-water mark before ever reading the
+   * replay batch.
    */
-  private static final class BlockingReader implements RunEventReader {
-    private final RunEventReader delegate;
+  private static final class BlockingLifecycleStore implements RunLifecycleStore {
+    private final RunLifecycleStore delegate;
     private final CountDownLatch entered = new CountDownLatch(1);
     private final CountDownLatch release = new CountDownLatch(1);
 
-    private BlockingReader(RunEventReader delegate) {
+    private BlockingLifecycleStore(RunLifecycleStore delegate) {
       this.delegate = delegate;
     }
 
     @Override
-    public List<RunnerEvent> readAfter(String runId, long afterSequence) {
-      return delegate.readAfter(runId, afterSequence);
+    public CommittedRunChange queue(
+        String runId,
+        Environment environment,
+        Suite suite,
+        Instant requestedAt,
+        List<SelectedTestSnapshot> selectedTests,
+        LongFunction<RunnerEvent> queuedEventFactory) {
+      return delegate.queue(
+          runId, environment, suite, requestedAt, selectedTests, queuedEventFactory);
     }
 
     @Override
-    public Optional<RunnerEvent> latest(String runId) {
+    public Optional<CommittedRunChange> transitionIfNonTerminal(
+        String runId, UnaryOperator<Run> transition, LongFunction<RunnerEvent> eventFactory) {
+      return delegate.transitionIfNonTerminal(runId, transition, eventFactory);
+    }
+
+    @Override
+    public Optional<RunnerEvent> appendEventIfNonTerminal(
+        String runId, LongFunction<RunnerEvent> eventFactory) {
+      return delegate.appendEventIfNonTerminal(runId, eventFactory);
+    }
+
+    @Override
+    public Optional<Run> findById(String runId) {
+      return delegate.findById(runId);
+    }
+
+    @Override
+    public List<Run> findAll() {
+      return delegate.findAll();
+    }
+
+    @Override
+    public List<RunnerEvent> readEventsAfter(String runId, long afterSequence) {
+      return delegate.readEventsAfter(runId, afterSequence);
+    }
+
+    @Override
+    public Optional<RunnerEvent> latestEvent(String runId) {
       entered.countDown();
       try {
         release.await();
       } catch (InterruptedException interrupted) {
         Thread.currentThread().interrupt();
       }
-      return delegate.latest(runId);
+      return delegate.latestEvent(runId);
     }
   }
 

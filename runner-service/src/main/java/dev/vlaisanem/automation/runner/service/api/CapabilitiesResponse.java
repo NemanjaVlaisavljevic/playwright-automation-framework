@@ -1,6 +1,7 @@
 package dev.vlaisanem.automation.runner.service.api;
 
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.orchestration.RunRequestValidator;
@@ -10,15 +11,18 @@ import java.util.Objects;
 
 /**
  * Wire representation of what a client is actually allowed to submit. {@link
- * RunRequestValidator#allowedCombinations()} is the single source of truth this mirrors, so a
- * frontend never has to hand-copy the allowlist and risk it silently drifting from what the server
- * will actually accept - a new environment or suite only ever appears here once it is also wired
- * into the validator itself.
+ * RunRequestValidator#allowedCombinations(RunAvailabilityPolicy)} is the single source of truth
+ * this mirrors, so a frontend never has to hand-copy the allowlist and risk it silently drifting
+ * from what the server will actually accept - a new environment or suite only ever appears here
+ * once it is also wired into the validator itself, and this deployment's own {@link
+ * RunAvailabilityPolicy} (e.g. the portfolio profile hiding {@link Environment#LOCAL}) is applied
+ * identically to both.
  *
  * <p>Both this record and {@link EnvironmentCapabilities} copy their list components in their
  * compact constructors, so the response stays deeply immutable and its ordering deterministic
- * regardless of how a future caller constructs one directly - {@link #current()} already builds
- * sorted, unmodifiable lists, but callers should not have to know that to get the same guarantee.
+ * regardless of how a future caller constructs one directly - {@link
+ * #current(RunAvailabilityPolicy)} already builds sorted, unmodifiable lists, but callers should
+ * not have to know that to get the same guarantee.
  *
  * <p>Every component here is annotated with an explicit {@code requiredMode}, deliberately, the
  * same way {@link RunResponse} is - verified live against a real {@code /v3/api-docs} response
@@ -50,9 +54,9 @@ public record CapabilitiesResponse(
     }
   }
 
-  public static CapabilitiesResponse current() {
+  public static CapabilitiesResponse current(RunAvailabilityPolicy policy) {
     List<EnvironmentCapabilities> environments =
-        RunRequestValidator.allowedCombinations().entrySet().stream()
+        RunRequestValidator.allowedCombinations(policy).entrySet().stream()
             .map(
                 entry ->
                     new EnvironmentCapabilities(

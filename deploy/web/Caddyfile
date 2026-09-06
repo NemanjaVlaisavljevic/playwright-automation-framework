@@ -1,11 +1,11 @@
-# {$SITE_ADDRESS} defaults to :80 for the D0 spike/local Compose run (no domain purchased yet -
-# D5's job). This alone is NOT yet a working TLS setup once a real domain exists - D1 still has to
-# (a) actually pass SITE_ADDRESS through from docker-compose.yml (nothing does today), (b) publish
-# 80/443 (and optionally 443/udp for HTTP/3) on `web`, and (c) give Caddy persistent named volumes
-# for its own /data (ACME account + certificates) and /config, none of which exist yet - without
-# those, Caddy would re-request a fresh certificate on every container recreate and hit Let's
-# Encrypt's rate limits. Tracked as an explicit D1 task list in docs/DEPLOYMENT_ARCHITECTURE.md,
-# not assumed done just because this file references the env var.
+# {$SITE_ADDRESS::80} defaults to :80 (plain HTTP, no domain) - the D0 spike/local Compose run,
+# and still today's default in production until deploy/.env sets a real SITE_ADDRESS (see
+# deploy/.env.example). D1 wired the rest of what real TLS needs once a domain exists:
+# docker-compose.yml passes SITE_ADDRESS through, publishes 80/443 (and 443/udp for HTTP/3) on
+# `web`, and gives Caddy persistent named volumes for its own /data (ACME account + certificates)
+# and /config - without those, Caddy would re-request a fresh certificate on every container
+# recreate and hit Let's Encrypt's rate limits. Not yet verified against a real domain (no domain
+# purchased yet - D5's job) - see docs/DEPLOYMENT_ARCHITECTURE.md.
 {$SITE_ADDRESS::80} {
 	encode gzip
 

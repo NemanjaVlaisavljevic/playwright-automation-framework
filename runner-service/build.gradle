@@ -1,3 +1,5 @@
+import java.time.Duration
+
 plugins {
     id 'java'
     id 'org.springframework.boot' version '4.1.1'
@@ -16,6 +18,14 @@ java {
     }
 }
 
+// Testcontainers isn't in spring-boot-dependencies' own managed list under Spring Boot 4 the same
+// way flyway/postgresql are - pinned explicitly here (both this and databaseIntegrationTest below
+// import it) rather than left to whatever version each testcontainers module happens to declare as
+// its own transitive default, which drifted between modules historically.
+ext {
+    testcontainersVersion = '1.20.4'
+}
+
 dependencies {
     implementation platform('org.springframework.boot:spring-boot-dependencies:4.1.1')
 
@@ -25,8 +35,8 @@ dependencies {
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
     // spring-boot-starter-webmvc alone does not pull in Jackson's autoconfiguration (unlike the
     // classic spring-boot-starter-web) - without this, no ObjectMapper bean is ever created and the
-    // context fails to start the moment anything (FileBackedRunEventJournal, ListenerEventIngestor)
-    // asks Spring for one. Caught by actually starting the service, not by any unit test - those all
+    // context fails to start the moment anything (JdbcRunStore, ListenerEventIngestor) asks Spring
+    // for one. Caught by actually starting the service, not by any unit test - those all
     // construct their own ObjectMapper directly, bypassing Spring's DI entirely.
     implementation 'org.springframework.boot:spring-boot-starter-json'
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
@@ -36,10 +46,79 @@ dependencies {
     // generate a typed client; nothing in this service's own runtime needs an interactive UI.
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-api:3.1.0'
 
+    // D2.1 (Postgres foundation) - plain JDBC, deliberately not Spring Data JPA: the replay-
+    // atomicity protocol (docs/DEPLOYMENT_ARCHITECTURE.md section 3) needs explicit `SELECT ... FOR
+    // UPDATE` row locking and manual sequence allocation under that lock, both of which an ORM's own
+    // session/entity-state machinery works against rather than expresses directly. Brings
+    // JdbcTemplate/DataSource/HikariCP. D2.3 wires DataSourceAutoConfiguration/FlywayAutoConfiguration
+    // back into RunnerServiceApplication (see its own Javadoc) - JdbcRunStore is now a real
+    // @Component and every startup needs a real, reachable Postgres.
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.postgresql:postgresql'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    // Spring Boot 4's modular split moved FlywayAutoConfiguration out of spring-boot-autoconfigure
+    // into its own per-feature module (DataSourceAutoConfiguration made the same move, into
+    // spring-boot-jdbc, already pulled in transitively by spring-boot-starter-jdbc above) - this
+    // one needs adding explicitly since nothing else here pulls it in.
+    implementation 'org.springframework.boot:spring-boot-flyway'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // Spring Boot 4 moved @WebMvcTest out of spring-boot-test-autoconfigure into its own module.
     testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// D2.1 - a separate source set/task for integration tests that need a real Docker-backed
+// PostgreSQL (via Testcontainers), mirroring the main suite's own dashboardE2eTest pattern: keeps
+// the ordinary, fast, Docker-free `test` task exactly as it is today, while still giving CI (and a
+// developer with Docker available) a real, separately-visible signal for what actually exercised
+// the DB schema/protocol - never H2, which cannot faithfully emulate jsonb or Postgres's own
+// row-locking semantics (see docs/DEPLOYMENT_ARCHITECTURE.md's own "Technology choices").
+sourceSets {
+    databaseIntegrationTest {
+        java {
+            srcDir 'src/databaseIntegrationTest/java'
+        }
+        resources {
+            srcDir 'src/databaseIntegrationTest/resources'
+        }
+        compileClasspath += sourceSets.main.output + sourceSets.test.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.test.output
+    }
+}
+
+configurations {
+    databaseIntegrationTestImplementation.extendsFrom testImplementation
+    databaseIntegrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+dependencies {
+    databaseIntegrationTestImplementation platform("org.testcontainers:testcontainers-bom:${testcontainersVersion}")
+    databaseIntegrationTestImplementation 'org.testcontainers:junit-jupiter'
+    databaseIntegrationTestImplementation 'org.testcontainers:postgresql'
+}
+
+tasks.register('databaseIntegrationTest', Test) {
+    description = 'Integration tests against a real Testcontainers PostgreSQL - requires Docker.'
+    group = 'verification'
+    testClassesDirs = sourceSets.databaseIntegrationTest.output.classesDirs
+    classpath = sourceSets.databaseIntegrationTest.runtimeClasspath
+    useJUnitPlatform()
+    maxHeapSize = '512m'
+    // A real Docker container is started fresh each run - this task has side effects Gradle's
+    // input/output modeling cannot see, so it must never be treated as cacheable/up-to-date (the
+    // same reasoning dashboardE2eTest's own task documents for its own real side effects).
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = false
+    }
+    reports.junitXml.required = true
+    reports.html.required = true
+    shouldRunAfter tasks.named('test')
 }
 
 tasks.named('test') {
@@ -52,4 +131,75 @@ tasks.named('test') {
 // one directory too deep and every run fails at process startup.
 tasks.named('bootRun') {
     workingDir = rootProject.projectDir
+}
+
+// --- Local Postgres for `bootRun` (D2.3 live wiring) ---------------------------------------------
+// A single throwaway postgres:17-alpine container matching application.yml's own local-dev
+// spring.datasource.* defaults (jdbc:postgresql://localhost:5433/runner, runner/runner) - published
+// on 5433, not Postgres's usual 5432, since a developer's machine commonly already runs its own,
+// completely unrelated Postgres install/service on 5432 (confirmed live in this exact environment -
+// `docker run -p 127.0.0.1:5432:5432` failed outright with a port-in-use error against a real
+// Windows postgres.exe service already bound to it). NOT the
+// same as deploy/docker-compose.yml's own `postgres` service, which requires POSTGRES_PASSWORD from
+// deploy/.env and is meant for the portfolio deployment, not a developer's own machine; that service
+// also publishes no host port at all, by design (see that file's own header comment on the
+// edge/data network split), so it is unreachable from a `bootRun` running directly on the host
+// regardless. A plain `docker run`/`docker rm -f` pair, not docker compose - a single container needs
+// none of docker compose's own multi-service orchestration, unlike the seven-container RBP stack
+// localSutUp/localSutDown manage elsewhere in this repo's root build.gradle.
+// Project.exec()/copy() (the `exec { ... }` closure sugar used inside a task action) was removed in
+// this Gradle version - shells out via plain ProcessBuilder instead, mirroring the root build.gradle's
+// own rbpRun/rbpCapture helpers (see their comment there for the full rationale, including why
+// inheritIO() is deliberately avoided on Windows).
+def localPostgresRun = { List command, boolean ignoreExitCode = false ->
+    def builder = new ProcessBuilder(command.collect { it.toString() })
+    builder.redirectErrorStream(true)
+    Process process = builder.start()
+    String output = process.inputStream.getText('UTF-8')
+    int exitCode = process.waitFor()
+    if (exitCode != 0 && !ignoreExitCode) {
+        throw new GradleException("Command failed (exit ${exitCode}): ${command.join(' ')}\n${output}")
+    }
+    return [exitCode: exitCode, output: output]
+}
+
+tasks.register('localPostgresUp') {
+    description = 'Starts (or resumes) a local postgres:17-alpine container for runner-service bootRun, and waits until ready.'
+    group = 'runner-service'
+    doLast {
+        def existing = localPostgresRun(['docker', 'ps', '-aq', '--filter', 'name=^runner-local-postgres$'])
+        if (existing.output.trim().isEmpty()) {
+            localPostgresRun([
+                'docker', 'run', '-d',
+                '--name', 'runner-local-postgres',
+                '-e', 'POSTGRES_DB=runner',
+                '-e', 'POSTGRES_USER=runner',
+                '-e', 'POSTGRES_PASSWORD=runner',
+                '-p', '127.0.0.1:5433:5432',
+                'postgres:17-alpine'
+            ])
+        } else {
+            localPostgresRun(['docker', 'start', 'runner-local-postgres'])
+        }
+        // No fixed blind startup delay - the same polling convention the root build.gradle's own
+        // localSutHealth task already uses for the local Restful Booker Platform stack.
+        long deadline = System.currentTimeMillis() + Duration.ofMinutes(1).toMillis()
+        while (System.currentTimeMillis() < deadline) {
+            def probe = localPostgresRun(
+                ['docker', 'exec', 'runner-local-postgres', 'pg_isready', '-U', 'runner'], true)
+            if (probe.exitCode == 0) {
+                return
+            }
+            Thread.sleep(1000)
+        }
+        throw new GradleException('runner-local-postgres did not become ready within 1 minute')
+    }
+}
+
+tasks.register('localPostgresDown') {
+    description = 'Stops and removes the localPostgresUp container.'
+    group = 'runner-service'
+    doLast {
+        localPostgresRun(['docker', 'rm', '-f', 'runner-local-postgres'], true)
+    }
 }

@@ -61,10 +61,12 @@ This is the `PUBLIC`/`FIXTURE` fast path, after a one-time browser install. `LOC
 Git and Docker Desktop with Compose support, and its first local stack build realistically takes
 longer than 5 minutes - it fetches and builds the target application from source.
 
-Prerequisites: **JDK 21**, **Node 24** (`runner-dashboard/.nvmrc` pins this).
+Prerequisites: **JDK 21**, **Node 24** (`runner-dashboard/.nvmrc` pins this), **Docker** (for the
+local Postgres `runner-service` now persists run/event history to - see below).
 
 ```bash
 ./gradlew.bat playwrightInstall   # one-time: installs the Chromium build every run launches
+./gradlew.bat :runner-service:localPostgresUp   # one-time per session: starts a local Postgres on :5433
 ```
 
 **Terminal 1 - backend:**
@@ -124,10 +126,13 @@ This is a working release candidate, not a production deployment - the boundarie
 deliberate scope decisions for this stage, not hidden defects, and Faza D (packaging, persistence,
 security, deployment) is where each of them gets addressed:
 
-- **Run history and the artifact/event journal are in-memory and on local disk** - nothing is
-  persisted to a database; restarting `runner-service` loses in-flight run state and its history
-  list (the raw JSONL event/artifact files on disk survive, but nothing currently re-indexes them
-  on startup).
+- **A run still stuck `RUNNING` at the moment of a crash/restart is not yet reconciled** - run/event
+  history itself is now persisted to PostgreSQL (Faza D2) and survives a `runner-service` restart
+  intact (nothing is lost, and nothing needs re-indexing), but a run that was mid-flight when the
+  process died stays stuck at its last-known status rather than being marked `ERROR`/reconciled on
+  the next startup - that reconciliation is Faza D2.5's explicit job, not yet done.
+- **Artifacts (screenshots/traces/logs) are still local-disk-only** - `build/runner-artifacts/<runId>/`,
+  not yet in the database; artifact metadata persistence is Faza D2.4's job.
 - **Single-instance only** - one `runner-service` process, one in-process run queue. There is no
   clustering, leader election, or horizontal scaling.
 - **No authentication or authorization** - anyone who can reach the dashboard/API can launch,
@@ -135,9 +140,6 @@ security, deployment) is where each of them gets addressed:
   internet as-is.
 - **No artifact retention policy** - screenshots, traces, and logs accumulate under
   `build/runner-artifacts/<runId>/` indefinitely; nothing currently prunes old runs.
-- **No deployment packaging yet** - no Dockerfile/image for `runner-service` or the dashboard, no
-  same-origin production serving setup. Today this runs as two separate local dev processes (as
-  shown above), not a single deployable unit.
 
 ## Automation suite
 
@@ -232,6 +234,20 @@ Where results land:
 | `runner-service`/`runner-dashboard` stdout/stderr | `build/dashboard-e2e-logs/<name>.log` — always written, not just on failure |
 
 Every test gets a Playwright trace and video running the whole time, but only a **failed** test's are actually kept — open `trace.zip` with `npx playwright show-trace` for a timeline replay of exactly what the browser saw.
+
+### Database integration tests
+
+`databaseIntegrationTest` proves `runner-service`'s Flyway-managed PostgreSQL schema (Faza D2, see [`docs/DEPLOYMENT_ARCHITECTURE.md`](docs/DEPLOYMENT_ARCHITECTURE.md)) against a real database, not a compatible-looking stand-in — every test runs against a real `postgres` Docker image via [Testcontainers](https://testcontainers.com/), never H2 (H2 can't faithfully emulate `jsonb` or PostgreSQL's own row-locking semantics, both load-bearing for this schema's replay-atomicity protocol).
+
+```bash
+./gradlew.bat :runner-service:databaseIntegrationTest
+```
+
+Requires Docker — the same requirement `dashboardE2eTest`'s underlying tooling has, nothing extra to install. A separate Gradle source set/task from `runner-service`'s ordinary `test`, on purpose: keeps that fast, Docker-free default suite unchanged while still giving CI (`quality-gate.yml`) its own real, separately-visible signal for what actually exercised the database schema/protocol.
+
+Where results land: JUnit HTML report at `runner-service/build/reports/tests/databaseIntegrationTest/`, JUnit XML at `runner-service/build/test-results/databaseIntegrationTest/`.
+
+`RunnerServiceApplication` itself (Faza D2.3) now depends on a real Postgres too — every `bootRun`/`dashboardE2eTest` invocation, not just `databaseIntegrationTest`. `./gradlew.bat :runner-service:localPostgresUp`/`localPostgresDown` manage a throwaway `postgres:17-alpine` container on `localhost:5433` for local `bootRun` (see that task's own comment in `runner-service/build.gradle` for why 5433, not 5432); `dashboardE2eTest` provisions its own Testcontainers Postgres automatically, nothing to start by hand. The real `deploy/docker-compose.yml` deployment points `runner-service` at its sibling `postgres` service instead of either of these.
 
 ### Configuration
 

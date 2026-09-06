@@ -8,11 +8,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Provides the classic Jackson 2 {@link ObjectMapper} that {@code FileBackedRunEventJournal} and
- * {@code ListenerEventIngestor} are written against. Spring Boot 4's own {@code
- * spring-boot-starter-json} autoconfigures a Jackson <em>3</em> ({@code tools.jackson.databind})
- * {@code ObjectMapper} instead - a completely different type from a different artifact - so without
- * this bean, the context fails to start the moment anything asks Spring for a {@code
+ * Provides the classic Jackson 2 {@link ObjectMapper} that {@code JdbcRunStore} and {@code
+ * ListenerEventIngestor} are written against. Spring Boot 4's own {@code spring-boot-starter-json}
+ * autoconfigures a Jackson <em>3</em> ({@code tools.jackson.databind}) {@code ObjectMapper} instead
+ * - a completely different type from a different artifact - so without this bean, the context fails
+ * to start the moment anything asks Spring for a {@code
  * com.fasterxml.jackson.databind.ObjectMapper}. Configured to match runner-listener's own {@code
  * RunnerEventObjectMapper}, since both sides serialize the same {@code RunnerEvent} contract type
  * and must agree on the wire format.

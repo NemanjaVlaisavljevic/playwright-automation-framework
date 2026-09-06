@@ -2,6 +2,7 @@ package dev.vlaisanem.automation.runner;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
  * Regression guard for the runner's most important safety boundary: this service can launch
@@ -17,8 +19,17 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
  * a config-property check) so a future refactor that accidentally drops or overrides {@code
  * server.address} fails loudly here, not in production.
  */
-@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
+// D2.3: see OpenApiContractTest's own identical annotation for why this Docker-free, full-context
+// test re-excludes DataSource/Flyway autoconfiguration and mocks out the real store.
+@SpringBootTest(
+    webEnvironment = WebEnvironment.RANDOM_PORT,
+    properties =
+        "spring.autoconfigure.exclude="
+            + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
+            + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration")
 class ServerBindingTest {
+
+  @MockitoBean private RunLifecycleStore lifecycleStore;
 
   @Value("${server.address}")
   private String configuredAddress;

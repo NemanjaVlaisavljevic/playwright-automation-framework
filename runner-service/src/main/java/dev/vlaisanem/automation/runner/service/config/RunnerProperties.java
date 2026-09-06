@@ -10,13 +10,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param processTimeout hard deadline after which a run's Gradle process is forcibly killed.
  * @param rawEventsDir directory runner-listener writes each run's raw {@code <runId>.tests.jsonl}/
  *     {@code .tests.complete} marker files into - must match what gets passed as {@code
- *     -Drunner.rawEventsDir}. Distinct from {@link #journalDir}: this is the listener's own,
- *     unprocessed test-event stream, not the runner service's canonical, cross-run-lifecycle event
- *     journal.
- * @param journalDir directory the runner service's own canonical event journal writes each run's
- *     {@code <runId>.events.jsonl}/{@code .events.complete} files into - a completely separate,
- *     service-owned timeline that also carries {@code RUN_*} lifecycle events the listener never
- *     produces.
+ *     -Drunner.rawEventsDir}. This is the listener's own, unprocessed test-event stream; the runner
+ *     service's own canonical, cross-run-lifecycle event timeline lives in Postgres (see {@code
+ *     RunLifecycleStore}), not on disk.
  * @param logsDir directory containing one bounded combined stdout/stderr log per run.
  * @param testCatalogPath path (relative to {@link #repoRoot}) of the committed, JUnit-discovery-
  *     generated {@code CUSTOM}-suite test catalog - see {@code TestCatalogGenerator} in the main
@@ -54,7 +50,6 @@ public record RunnerProperties(
     String repoRoot,
     Duration processTimeout,
     String rawEventsDir,
-    String journalDir,
     String logsDir,
     String testCatalogPath,
     String artifactsDir,
@@ -77,9 +72,6 @@ public record RunnerProperties(
     }
     if (rawEventsDir == null || rawEventsDir.isBlank()) {
       throw new IllegalArgumentException("runner.raw-events-dir must not be blank");
-    }
-    if (journalDir == null || journalDir.isBlank()) {
-      throw new IllegalArgumentException("runner.journal-dir must not be blank");
     }
     if (logsDir == null || logsDir.isBlank()) {
       throw new IllegalArgumentException("runner.logs-dir must not be blank");

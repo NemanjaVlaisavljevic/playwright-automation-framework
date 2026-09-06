@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,6 +19,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
  * Locks the generated {@code /v3/api-docs} document against everything the frontend's typed-client
@@ -33,8 +35,22 @@ import org.springframework.http.MediaType;
  * all, since springdoc infers nothing without an explicit {@code @Schema} or Bean Validation
  * annotation on a plain response record.
  */
-@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
+// D2.3: RunnerServiceApplication no longer excludes DataSourceAutoConfiguration/
+// FlywayAutoConfiguration itself (JdbcRunStore is a real @Component now), so this Docker-free,
+// real-Postgres-free full-context test re-excludes both at the test level - this test is about the
+// generated OpenAPI document, not the store's own behavior, and must never need a real Postgres to
+// even start. @MockitoBean below covers the other half: with no DataSource/JdbcTemplate/
+// TransactionTemplate beans, JdbcRunStore's own constructor could not be satisfied even if it were
+// still eligible to run - RunEventBroker/RunLifecycleCoordinator get a mock instead.
+@SpringBootTest(
+    webEnvironment = WebEnvironment.RANDOM_PORT,
+    properties =
+        "spring.autoconfigure.exclude="
+            + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
+            + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration")
 class OpenApiContractTest {
+
+  @MockitoBean private RunLifecycleStore lifecycleStore;
 
   private static final List<String> EXPECTED_OPERATION_IDS =
       List.of(

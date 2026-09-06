@@ -355,7 +355,6 @@ class GradleProcessRunnerTest {
             ".",
             Duration.ofSeconds(30),
             "build/events/raw",
-            "build/events/journal",
             "build/logs",
             "src/test/resources/catalog/public-test-catalog.json",
             "build/artifacts",

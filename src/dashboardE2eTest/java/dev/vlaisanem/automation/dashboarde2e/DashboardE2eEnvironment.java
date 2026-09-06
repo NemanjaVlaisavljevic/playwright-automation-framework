@@ -262,12 +262,21 @@ final class DashboardE2eEnvironment
         Path runnerServiceJar = Path.of(System.getProperty("dashboardE2e.runnerServiceJar"));
         Path dashboardDir = Path.of(System.getProperty("dashboardE2e.dashboardDir"));
 
+        // D2.3 - started before the backend, not after: the backend's own Flyway migration runs at
+        // startup, so the database must already be accepting connections before DashboardProcess
+        // even launches the jar. Not added to startedSoFar's own rollback list -
+        // DashboardE2eDatabase
+        // owns its own lifecycle (stopped explicitly in close() below), and a partial-startup
+        // rollback here must not tear down a container BackendUnavailableE2eTest might already be
+        // sharing.
+        Map<String, String> databaseEnv = DashboardE2eDatabase.connectionEnv();
+
         DashboardProcess startedBackend =
             DashboardProcess.start(
                 "backend",
                 List.of("java", "-jar", runnerServiceJar.toString()),
                 repoRoot,
-                Map.of(),
+                databaseEnv,
                 BACKEND_HEALTH_URL,
                 Duration.ofMinutes(1));
         startedSoFar.add(startedBackend::stop);
@@ -322,8 +331,17 @@ final class DashboardE2eEnvironment
       // (e.g. browser.close() already having been called, or already crashed) must not skip the
       // later ones - especially dashboard.stop()/backend.stop(), which is what actually frees the
       // ports for the next run.
+      // DashboardE2eDatabase.stop() last, after backend::stop - the shared Postgres container must
+      // outlive every backend that might still be connected to it, and is only actually torn down
+      // here rather than per-test-class since BackendUnavailableE2eTest (a separate JVM-shared
+      // lifecycle, see its own Javadoc) may still be about to reuse the exact same container.
       List<Runnable> steps =
-          List.of(browser::close, playwright::close, dashboard::stop, backend::stop);
+          List.of(
+              browser::close,
+              playwright::close,
+              dashboard::stop,
+              backend::stop,
+              DashboardE2eDatabase::stop);
       RuntimeException failure = null;
       for (Runnable step : steps) {
         try {

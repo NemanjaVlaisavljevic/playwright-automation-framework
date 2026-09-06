@@ -35,9 +35,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  *
  * <p>A subscription closes itself, cleanly, the moment it has delivered a {@link
  * EventType#RUN_FINISHED} event (replayed or live) - a run's canonical timeline never produces
- * anything after that (see {@link FileBackedRunEventJournal}'s own terminal contract), so there is
- * nothing left to justify holding its delivery thread, mailbox, and (for an SSE subscriber) HTTP
- * connection open any further.
+ * anything after that (see {@code RunLifecycleStore#appendEventIfNonTerminal}'s own terminal
+ * contract), so there is nothing left to justify holding its delivery thread, mailbox, and (for an
+ * SSE subscriber) HTTP connection open any further.
  *
  * <p>A subscriber's terminal callback ({@link RunEventSubscriber#onError} / {@code onComplete})
  * always runs off whatever thread triggered the close, and any exception it throws is swallowed -

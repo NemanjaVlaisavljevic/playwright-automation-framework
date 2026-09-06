@@ -60,3 +60,45 @@ jobs:
             build/test-results/
             build/allure-results/
             build/artifacts/
+
+  database-integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A separate job, not a later step of read-only-tests, per review: as a step, a failure or
+    # timeout earlier in that job (the PUBLIC read-only suite, the catalog drift check) would skip
+    # this entirely, so a real Faza D2 schema/protocol regression could go completely unnoticed on
+    # a run where something unrelated also happened to fail. As its own job it runs in parallel
+    # (faster overall, not slower), gets its own timeout budget independent of the growing D2
+    # concurrency suite this will carry once D2.2/D2.3 land, and reports its own pass/fail
+    # independently of the read-only suite's outcome.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Database integration tests (real Testcontainers PostgreSQL)
+        # D2.1 (docs/DEPLOYMENT_ARCHITECTURE.md section 3) - proves the Flyway-managed schema and
+        # its constraints against a real `postgres` container, never H2 (see runner-service's own
+        # build.gradle for why). ubuntu-latest ships Docker pre-installed, so Testcontainers needs
+        # no extra setup here.
+        run: ./gradlew :runner-service:databaseIntegrationTest
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: database-integration-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runner-service/build/reports/tests/databaseIntegrationTest/
+            runner-service/build/test-results/databaseIntegrationTest/

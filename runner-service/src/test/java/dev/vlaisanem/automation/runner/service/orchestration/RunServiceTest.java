@@ -1,6 +1,7 @@
 package dev.vlaisanem.automation.runner.service.orchestration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,6 +10,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
+import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy.DeploymentProfile;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
@@ -17,19 +20,20 @@ import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.domain.TestLayer;
-import dev.vlaisanem.automation.runner.service.events.FailingRunEventAppender;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestor;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestorFactory;
-import dev.vlaisanem.automation.runner.service.events.RecordingRunEventAppender;
-import dev.vlaisanem.automation.runner.service.events.RunEventAppender;
+import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.exception.ProcessTerminationException;
-import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
+import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
 import dev.vlaisanem.automation.runner.service.process.ProcessLauncher;
 import dev.vlaisanem.automation.runner.service.process.ProcessOutcome;
-import dev.vlaisanem.automation.runner.service.repository.RunRepository;
+import dev.vlaisanem.automation.runner.service.repository.FailFirstTransitionStore;
+import dev.vlaisanem.automation.runner.service.repository.FailingRunLifecycleStore;
+import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -47,8 +51,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
-import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -57,6 +59,14 @@ import org.junit.jupiter.api.io.TempDir;
  * Exercises {@link RunService}'s orchestration - state transitions, cancellation, queue capacity -
  * against a {@link FakeProcessLauncher} rather than a real Gradle invocation, so the tricky
  * concurrent parts (cancel racing completion, timeout, queue-full) are deterministic and fast.
+ *
+ * <p>D2.3 cutover: rewritten against {@link FakeRunLifecycleStore} (behaviorally faithful to {@code
+ * JdbcRunStore}, proven separately against a real Postgres in {@code databaseIntegrationTest})
+ * instead of the retired in-memory {@code RunRepository}/file-backed {@code RunEventAppender} pair.
+ * Every event-bearing test now goes through a real {@link RunEventBroker} wrapping that fake store
+ * (the same production wiring, minus only the live Hub publish's actual transport), so {@code
+ * service}'s own event assertions read the fake store directly rather than a separate recording
+ * appender.
  */
 class RunServiceTest {
 
@@ -66,7 +76,7 @@ class RunServiceTest {
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
   private RunService service;
-  private RecordingRunEventAppender events;
+  private FakeRunLifecycleStore store;
 
   @AfterEach
   void shutdown() {
@@ -171,8 +181,9 @@ class RunServiceTest {
    * any of a run's usual side effects happen - {@code submit()}'s own code path only generates a
    * {@code runId} and calls {@code lifecycle.queue} (which is what emits {@code RUN_QUEUED}) after
    * {@code CustomTestSelectionValidator.validate} has already succeeded, so a rejected selection
-   * must leave the repository empty, the event log untouched, and (implicitly, since no runId or
-   * {@code ActiveRun} is ever created) nothing tracked in {@code activeRuns}.
+   * must leave the store empty (which, thanks to the real schema's own foreign key, structurally
+   * implies no event could possibly exist either) and (implicitly, since no runId or {@code
+   * ActiveRun} is ever created) nothing tracked in {@code activeRuns}.
    */
   @Test
   void anInvalidCustomSelectionNeverSavesARunOrEmitsAnyEvent(
@@ -192,9 +203,9 @@ class RunServiceTest {
           ]
         }
         """);
-    RunRepository repository = new RunRepository();
+    FakeRunLifecycleStore fakeStore = new FakeRunLifecycleStore();
     FakeProcessLauncher launcher = new FakeProcessLauncher();
-    service = newServiceWithCatalog(repository, launcher, eventsDir, catalogFile, 5);
+    service = newServiceWithCatalog(fakeStore, launcher, eventsDir, catalogFile, 5);
 
     assertThatThrownBy(
             () ->
@@ -202,9 +213,65 @@ class RunServiceTest {
                     Environment.PUBLIC, Suite.CUSTOM, List.of("unknown.Test#doesNotExist")))
         .isInstanceOf(InvalidTestSelectionException.class);
 
-    assertThat(repository.findAll()).isEmpty();
-    assertThat(events.totalEventCount()).isZero();
+    assertThat(fakeStore.findAll()).isEmpty();
     assertThat(launcher.startedCommands).isEmpty();
+  }
+
+  /**
+   * Regression test for the review's finding: every other test in this class constructs {@code
+   * RunService} with {@link RunAvailabilityPolicy#localDev()}, so nothing here previously proved
+   * that {@code submit()} actually consults the deployment's own policy at all - a future change
+   * that accidentally dropped {@code RunRequestValidator.validate(availabilityPolicy, ...)} from
+   * {@code RunService.submit} would have left {@code RunAvailabilityPolicyTest}/ {@code
+   * RunRequestValidatorTest}/{@code CapabilitiesResponseTest} all still green, since none of them
+   * exercise {@code RunService} itself. Mirrors {@link
+   * #anInvalidCustomSelectionNeverSavesARunOrEmitsAnyEvent}'s own shape: the rejection happens
+   * before a {@code runId} is even generated (see {@code RunService.submit}'s own ordering), so no
+   * run is saved, no {@code RUN_QUEUED} event is emitted, and the process launcher is never invoked
+   * - nothing is left to assert about {@code activeRuns} directly since no entry for it could
+   * possibly have been created yet.
+   */
+  @Test
+  void rejectsALocalSubmissionUnderThePortfolioProfileWithNoSideEffects(@TempDir Path eventsDir)
+      throws Exception {
+    FakeRunLifecycleStore fakeStore = new FakeRunLifecycleStore();
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service =
+        newServiceWithPolicy(
+            fakeStore,
+            launcher,
+            eventsDir,
+            5,
+            new RunAvailabilityPolicy(DeploymentProfile.PORTFOLIO));
+
+    assertThatThrownBy(() -> service.submit(Environment.LOCAL, Suite.JOURNEY))
+        .isInstanceOf(UnsupportedRunCombinationException.class);
+
+    assertThat(fakeStore.findAll()).isEmpty();
+    assertThat(launcher.startedCommands).isEmpty();
+  }
+
+  /**
+   * The companion half of {@link #rejectsALocalSubmissionUnderThePortfolioProfileWithNoSideEffects}
+   * - proves the portfolio profile narrows {@code LOCAL} specifically, not every submission, by
+   * running a real {@code PUBLIC} request all the way to a launched process under the same policy.
+   */
+  @Test
+  void allowsAPublicSubmissionUnderThePortfolioProfile(@TempDir Path eventsDir) throws Exception {
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service =
+        newServiceWithPolicy(
+            new FakeRunLifecycleStore(),
+            launcher,
+            eventsDir,
+            5,
+            new RunAvailabilityPolicy(DeploymentProfile.PORTFOLIO));
+
+    Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
+    awaitStatus(submitted.runId(), RunStatus.RUNNING);
+
+    assertThat(launcher.startedCommands).hasSize(1);
+    assertThat(launcher.startedCommands.get(0)).contains("smokeTest");
   }
 
   @Test
@@ -290,33 +357,39 @@ class RunServiceTest {
     }
   }
 
+  /**
+   * D2.3 cutover: replaces the pre-cutover "emergency ERROR" test for this same failure point. With
+   * one atomic store transaction, a permanently failing {@code RUN_FINISHED} write can no longer be
+   * worked around by a separate, always-available side channel the way the old repository-only
+   * emergency write could - see {@code RunLifecycleCoordinator}'s own Javadoc for why removing that
+   * mechanism is a deliberate consequence of the cutover, not an oversight. Both the original
+   * SUCCEEDED write and {@code executeRun}'s own fallback ERROR write need a {@code RUN_FINISHED}
+   * event, so both fail identically here, leaving the run stuck at its last known-good status
+   * (RUNNING) - never falsely SUCCEEDED, which is the one invariant this test still exists to
+   * prove. The process is still terminated as part of cleanup, and - proving the failure is scoped
+   * to this one run's write, not a global "journal closed" flag the way the old mechanism worked -
+   * a different run can still be submitted normally afterward.
+   */
   @Test
-  void aRunFinishedJournalFailureCannotLeaveAZeroExitRunSucceeded(@TempDir Path eventsDir)
-      throws Exception {
+  void aPermanentlyFailingRunFinishedWriteLeavesTheRunStuckRunningNeverFalselySucceeded(
+      @TempDir Path eventsDir) throws Exception {
+    FakeRunLifecycleStore fakeStore = new FakeRunLifecycleStore();
+    FailingRunLifecycleStore failingStore =
+        new FailingRunLifecycleStore(fakeStore, EventType.RUN_FINISHED);
     FakeProcessLauncher launcher = new FakeProcessLauncher();
-    FailingRunEventAppender failingEvents = new FailingRunEventAppender(EventType.RUN_FINISHED);
-    service =
-        newService(
-            new RunRepository(), launcher, eventsDir, 5, Duration.ofSeconds(30), failingEvents);
+    service = newService(failingStore, launcher, eventsDir, 5, Duration.ofSeconds(30));
 
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
     awaitStatus(submitted.runId(), RunStatus.RUNNING);
-    // The real listener always creates the data file before the marker - an ingestor now rejects a
-    // marker with no data file at all as an orphan, so the fake here must match that invariant.
     Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.jsonl"));
     Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.complete"));
     launcher.lastProcess().exitNow(0);
 
-    Run finished = awaitTerminal(submitted.runId());
+    Thread.sleep(300); // give the worker every chance to (wrongly) reach a terminal status
+    assertThat(service.find(submitted.runId()).status()).isEqualTo(RunStatus.RUNNING);
+    assertThat(launcher.lastProcess().wasDestroyed()).isTrue();
 
-    assertThat(finished.status()).isEqualTo(RunStatus.ERROR);
-    assertThat(finished.exitCode()).isNull();
-    assertThat(finished.detail()).contains("event timeline is incomplete");
-    assertThat(failingEvents.eventsFor(submitted.runId()))
-        .extracting(RunnerEvent::type)
-        .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED);
-    assertThatThrownBy(() -> service.submit(Environment.PUBLIC, Suite.API))
-        .isInstanceOf(RunEventPersistenceException.class);
+    assertThatCode(() -> service.submit(Environment.PUBLIC, Suite.API)).doesNotThrowAnyException();
   }
 
   @Test
@@ -452,7 +525,8 @@ class RunServiceTest {
       @TempDir Path eventsDir) throws Exception {
     FakeProcessLauncher launcher = new FakeProcessLauncher();
     launcher.failTermination = true;
-    service = newService(new RunRepository(), launcher, eventsDir, 1, Duration.ofMinutes(10));
+    service =
+        newService(new FakeRunLifecycleStore(), launcher, eventsDir, 1, Duration.ofMinutes(10));
 
     Run stuck = service.submit(Environment.PUBLIC, Suite.REGRESSION);
     awaitStatus(stuck.runId(), RunStatus.RUNNING);
@@ -471,30 +545,34 @@ class RunServiceTest {
   }
 
   /**
-   * Cleanup must not depend on the canonical journal remaining writable. If process termination and
-   * the RUN_FINISHED append both fail, cancel() propagates the persistence failure, but the worker
-   * still has to be interrupted instead of remaining blocked for the configured timeout.
+   * Cleanup must not depend on the canonical store remaining writable. D2.3 cutover: if both
+   * process termination and the {@code RUN_FINISHED} write fail, {@code cancel()} now propagates
+   * whatever the store itself throws (there is no longer a dedicated {@code
+   * RunEventPersistenceException} wrapper - see {@code RunLifecycleCoordinator}'s own Javadoc), and
+   * - since the fallback {@code ERROR} write needs the same {@code RUN_FINISHED} event type and
+   * therefore also fails - the run is left stuck non-terminal rather than falsely recorded as
+   * {@code ERROR}. What still matters, and is still proven here, is that the worker thread itself
+   * is not left blocked for the configured timeout regardless.
    */
   @Test
   void cancelStillInterruptsTheWorkerWhenTerminationAndTerminalEventPersistenceBothFail(
       @TempDir Path eventsDir) throws Exception {
     FakeProcessLauncher launcher = new FakeProcessLauncher();
     launcher.failTermination = true;
-    FailingRunEventAppender failingEvents = new FailingRunEventAppender(EventType.RUN_FINISHED);
-    service =
-        newService(
-            new RunRepository(), launcher, eventsDir, 1, Duration.ofMinutes(10), failingEvents);
+    FakeRunLifecycleStore fakeStore = new FakeRunLifecycleStore();
+    FailingRunLifecycleStore failingStore =
+        new FailingRunLifecycleStore(fakeStore, EventType.RUN_FINISHED);
+    service = newService(failingStore, launcher, eventsDir, 1, Duration.ofMinutes(10));
 
     Run stuck = service.submit(Environment.PUBLIC, Suite.REGRESSION);
     awaitStatus(stuck.runId(), RunStatus.RUNNING);
 
-    assertThatThrownBy(() -> service.cancel(stuck.runId()))
-        .isInstanceOf(RunEventPersistenceException.class);
+    assertThatThrownBy(() -> service.cancel(stuck.runId())).isInstanceOf(RuntimeException.class);
 
     assertThat(launcher.awaitCompletionFinished.await(5, TimeUnit.SECONDS))
         .as("worker must leave awaitCompletion without waiting for the ten-minute timeout")
         .isTrue();
-    assertThat(service.find(stuck.runId()).status()).isEqualTo(RunStatus.ERROR);
+    assertThat(service.find(stuck.runId()).status()).isEqualTo(RunStatus.RUNNING);
   }
 
   /**
@@ -568,7 +646,6 @@ class RunServiceTest {
   void cancelRacingRightBeforeProcessPublicationStillTerminatesPromptly(@TempDir Path eventsDir)
       throws Exception {
     FakeProcessLauncher launcher = new FakeProcessLauncher();
-    RecordingRunEventAppender appender = new RecordingRunEventAppender();
     CountDownLatch ingestorStartEntered = new CountDownLatch(1);
     CountDownLatch releaseIngestorStart = new CountDownLatch(1);
     RunnerProperties properties =
@@ -576,7 +653,6 @@ class RunServiceTest {
             ".",
             Duration.ofMinutes(10),
             eventsDir.toString(),
-            eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
             "src/test/resources/catalog/public-test-catalog.json",
             eventsDir.resolve("artifacts").toString(),
@@ -589,10 +665,11 @@ class RunServiceTest {
             10_000,
             Duration.ofSeconds(15),
             Duration.ofMinutes(10));
-    RunRepository repository = new RunRepository();
-    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(repository, appender);
+    store = new FakeRunLifecycleStore();
+    RunEventBroker broker = new RunEventBroker(store, properties);
+    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(broker);
     ListenerEventIngestorFactory blockingIngestorFactory =
-        new ListenerEventIngestorFactory(appender, OBJECT_MAPPER, properties) {
+        new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties) {
           @Override
           public ListenerEventIngestor start(String runId) {
             ingestorStartEntered.countDown();
@@ -600,14 +677,14 @@ class RunServiceTest {
             return super.start(runId);
           }
         };
-    events = appender;
     service =
         new RunService(
-            repository,
+            store,
             lifecycle,
             launcher,
             blockingIngestorFactory,
             new TestCatalogService(properties, OBJECT_MAPPER),
+            RunAvailabilityPolicy.localDev(),
             properties);
 
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
@@ -629,7 +706,7 @@ class RunServiceTest {
 
     assertThat(finished.status()).isEqualTo(RunStatus.CANCELLED);
     assertThat(launcher.lastProcess().wasDestroyed()).isTrue();
-    List<RunnerEvent> recorded = appender.eventsFor(submitted.runId());
+    List<RunnerEvent> recorded = store.readEventsAfter(submitted.runId(), 0);
     assertThat(recorded)
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED, EventType.RUN_FINISHED);
@@ -734,7 +811,7 @@ class RunServiceTest {
     Run finished = awaitTerminal(second.runId());
     assertThat(finished.status()).isEqualTo(RunStatus.CANCELLED);
 
-    List<RunnerEvent> recorded = events.eventsFor(second.runId());
+    List<RunnerEvent> recorded = store.readEventsAfter(second.runId(), 0);
     assertThat(recorded)
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_FINISHED);
@@ -859,8 +936,8 @@ class RunServiceTest {
   @Test
   void aFailureBeforeStartingIsStillRecordedAsError(@TempDir Path eventsDir) throws Exception {
     FakeProcessLauncher launcher = new FakeProcessLauncher();
-    RunRepository repository = new FailFirstTransitionRepository();
-    service = newService(repository, launcher, eventsDir, 5);
+    RunLifecycleStore failFirstStore = new FailFirstTransitionStore(new FakeRunLifecycleStore());
+    service = newService(failFirstStore, launcher, eventsDir, 5);
 
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
 
@@ -879,37 +956,57 @@ class RunServiceTest {
 
   private RunService newService(ProcessLauncher launcher, Path eventsDir, int queueCapacity) {
     return newService(
-        new RunRepository(), launcher, eventsDir, queueCapacity, Duration.ofSeconds(30));
+        new FakeRunLifecycleStore(), launcher, eventsDir, queueCapacity, Duration.ofSeconds(30));
   }
 
   private RunService newService(
-      RunRepository repository, ProcessLauncher launcher, Path eventsDir, int queueCapacity) {
-    return newService(repository, launcher, eventsDir, queueCapacity, Duration.ofSeconds(30));
+      RunLifecycleStore lifecycleStore,
+      ProcessLauncher launcher,
+      Path eventsDir,
+      int queueCapacity) {
+    return newService(lifecycleStore, launcher, eventsDir, queueCapacity, Duration.ofSeconds(30));
   }
 
   private RunService newService(
-      RunRepository repository,
+      RunLifecycleStore lifecycleStore,
       ProcessLauncher launcher,
       Path eventsDir,
       int queueCapacity,
       Duration processTimeout) {
-    events = new RecordingRunEventAppender();
-    return newService(repository, launcher, eventsDir, queueCapacity, processTimeout, events);
+    return newServiceWithPolicy(
+        lifecycleStore,
+        launcher,
+        eventsDir,
+        queueCapacity,
+        processTimeout,
+        RunAvailabilityPolicy.localDev());
   }
 
-  private RunService newService(
-      RunRepository repository,
+  /**
+   * Overload used by tests that need a non-default {@link RunAvailabilityPolicy} (e.g. PORTFOLIO).
+   */
+  private RunService newServiceWithPolicy(
+      RunLifecycleStore lifecycleStore,
+      ProcessLauncher launcher,
+      Path eventsDir,
+      int queueCapacity,
+      RunAvailabilityPolicy policy) {
+    return newServiceWithPolicy(
+        lifecycleStore, launcher, eventsDir, queueCapacity, Duration.ofSeconds(30), policy);
+  }
+
+  private RunService newServiceWithPolicy(
+      RunLifecycleStore lifecycleStore,
       ProcessLauncher launcher,
       Path eventsDir,
       int queueCapacity,
       Duration processTimeout,
-      RunEventAppender eventAppender) {
+      RunAvailabilityPolicy policy) {
     RunnerProperties properties =
         new RunnerProperties(
             ".",
             processTimeout,
             eventsDir.toString(),
-            eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
             "src/test/resources/catalog/public-test-catalog.json",
             eventsDir.resolve("artifacts").toString(),
@@ -922,37 +1019,41 @@ class RunServiceTest {
             10_000,
             Duration.ofSeconds(15),
             Duration.ofMinutes(10));
-    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(repository, eventAppender);
+    RunEventBroker broker = new RunEventBroker(lifecycleStore, properties);
+    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(broker);
     ListenerEventIngestorFactory ingestorFactory =
-        new ListenerEventIngestorFactory(eventAppender, OBJECT_MAPPER, properties);
+        new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties);
+    if (lifecycleStore instanceof FakeRunLifecycleStore fake) {
+      this.store = fake;
+    }
     return new RunService(
-        repository,
+        lifecycleStore,
         lifecycle,
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
+        policy,
         properties);
   }
 
   private RunService newServiceWithCatalog(
       ProcessLauncher launcher, Path eventsDir, Path catalogFile, int queueCapacity) {
     return newServiceWithCatalog(
-        new RunRepository(), launcher, eventsDir, catalogFile, queueCapacity);
+        new FakeRunLifecycleStore(), launcher, eventsDir, catalogFile, queueCapacity);
   }
 
   private RunService newServiceWithCatalog(
-      RunRepository repository,
+      FakeRunLifecycleStore fakeStore,
       ProcessLauncher launcher,
       Path eventsDir,
       Path catalogFile,
       int queueCapacity) {
-    events = new RecordingRunEventAppender();
+    store = fakeStore;
     RunnerProperties properties =
         new RunnerProperties(
             ".",
             Duration.ofSeconds(30),
             eventsDir.toString(),
-            eventsDir.resolve("journal").toString(),
             eventsDir.resolve("logs").toString(),
             catalogFile.toString(),
             eventsDir.resolve("artifacts").toString(),
@@ -965,15 +1066,17 @@ class RunServiceTest {
             10_000,
             Duration.ofSeconds(15),
             Duration.ofMinutes(10));
-    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(repository, events);
+    RunEventBroker broker = new RunEventBroker(fakeStore, properties);
+    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(broker);
     ListenerEventIngestorFactory ingestorFactory =
-        new ListenerEventIngestorFactory(events, OBJECT_MAPPER, properties);
+        new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties);
     return new RunService(
-        repository,
+        fakeStore,
         lifecycle,
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
+        RunAvailabilityPolicy.localDev(),
         properties);
   }
 
@@ -1194,21 +1297,6 @@ class RunServiceTest {
 
     FakeProcess lastProcess() {
       return lastProcess;
-    }
-  }
-
-  private static final class FailFirstTransitionRepository extends RunRepository {
-
-    private boolean first = true;
-
-    @Override
-    public boolean transitionIfNonTerminal(
-        String runId, UnaryOperator<Run> transition, Consumer<Run> beforeCommit) {
-      if (first) {
-        first = false;
-        throw new IllegalStateException("simulated transition failure");
-      }
-      return super.transitionIfNonTerminal(runId, transition, beforeCommit);
     }
   }
 }

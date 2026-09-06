@@ -212,7 +212,6 @@ class TestCatalogServiceTest {
         repoRoot.toString(),
         Duration.ofMinutes(10),
         "raw",
-        "journal",
         "logs",
         testCatalogPath,
         "artifacts",

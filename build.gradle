@@ -20,6 +20,13 @@ java {
     }
 }
 
+// Mirrors runner-service/build.gradle's own identical property (see its comment) - kept as a
+// separate declaration, not a cross-project reference, since dashboardE2eTest (this project) and
+// runner-service's own databaseIntegrationTest are different Gradle projects entirely.
+ext {
+    testcontainersVersion = '1.20.4'
+}
+
 dependencies {
     testImplementation platform('org.junit:junit-bom:6.0.1')
     testImplementation 'org.junit.jupiter:junit-jupiter'
@@ -687,6 +694,35 @@ configurations {
 dependencies {
     dashboardE2eTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+    // D2.3 - the real backend this suite launches (a real `java -jar`, via bootJar) needs a real,
+    // reachable Postgres now that DataSourceAutoConfiguration/FlywayAutoConfiguration are no longer
+    // excluded on RunnerServiceApplication - see DashboardE2eDatabase, which owns one Testcontainers
+    // Postgres shared for the whole dashboardE2eTest JVM (both DashboardE2eEnvironment's shared
+    // backend and BackendUnavailableE2eTest's own isolated one point at the same container; a run's
+    // history persisting across an isolated-backend restart within the same test is exactly the
+    // recovery behavior D2.5 relies on, not a leak).
+    dashboardE2eTestImplementation platform("org.testcontainers:testcontainers-bom:${testcontainersVersion}")
+    dashboardE2eTestImplementation 'org.testcontainers:postgresql'
+    constraints {
+        // testcontainers-bom:1.20.4 itself declares org.testcontainers:testcontainers:1.20.4, but
+        // runner-service's own databaseIntegrationTest never actually uses that version: importing
+        // the Spring Boot 4.1.1 BOM there overrides this one specific artifact up to 2.0.5 (pulling
+        // in a newer docker-java-api/docker-java-transport-zerodep, 3.7.1 instead of 3.4.0,
+        // alongside it), while every other testcontainers-bom-managed module (postgresql, jdbc,
+        // database-commons) stays on 1.20.4. Confirmed live: 1.20.4's own docker-java client sends a
+        // hardcoded `GET /v1.32/info` Docker API probe that gets HTTP 400 back from this machine's
+        // Docker Desktop build's npipe compat proxy, failing every DockerClientProviderStrategy with
+        // "Could not find a valid Docker environment" - the exact same Docker daemon answers
+        // runner-service's own databaseIntegrationTest (already on 2.0.5) correctly at the very same
+        // moment. This project has no Spring Boot BOM of its own to apply that same override, so it
+        // is repeated explicitly here instead - the same targeted single-artifact override, not
+        // pinning `testcontainersVersion` itself higher (no `testcontainers-bom:2.0.5` line exists to
+        // pin to; only the core `testcontainers` artifact moved, not the whole BOM).
+        dashboardE2eTestImplementation('org.testcontainers:testcontainers:2.0.5') {
+            because 'matches the version Spring Boot 4.1.1\'s own BOM forces for runner-service\'s ' +
+                'databaseIntegrationTest - see the comment above.'
+        }
+    }
 }
 
 // Builds the dashboard's production bundle once, ahead of the whole dashboardE2eTest run - shared
@@ -802,6 +838,18 @@ tasks.register('testCatalogCheck') {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.compilerArgs += ['-Xlint:all,-processing']
+}
+
+// D1 (docs/DEPLOYMENT_ARCHITECTURE.md section 5): every forked Test JVM in this project - the main
+// suite's own `test`/`smokeTest`/.../`customTest`/`localTest`/`localJourneyTest`/`dashboardE2eTest`
+// alike - previously had no heap cap at all, unbounded except by the container's own cgroup limit.
+// This is exactly the JVM RunService launches once per dashboard run (via `./gradlew <task>
+// --no-daemon`), so capping it here directly bounds that real per-run memory footprint, not just
+// this Gradle invocation's own daemon (which gradle.properties' `-Xmx1g` already bounds separately).
+// configureEach, not a per-task edit: applies to every Test task registered above and below this
+// point alike, current and future, with nothing to remember to repeat per task.
+tasks.withType(Test).configureEach {
+    maxHeapSize = '512m'
 }
 
 spotless {

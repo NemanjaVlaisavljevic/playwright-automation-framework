@@ -1,5 +1,6 @@
 package dev.vlaisanem.automation.runner.service.api;
 
+import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -19,6 +20,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1/capabilities")
 public class CapabilitiesController {
 
+  private final RunAvailabilityPolicy availabilityPolicy;
+
+  public CapabilitiesController(RunAvailabilityPolicy availabilityPolicy) {
+    this.availabilityPolicy = availabilityPolicy;
+  }
+
   @Operation(operationId = "getRunnerCapabilities")
   @ApiResponses({
     @ApiResponse(
@@ -37,6 +44,6 @@ public class CapabilitiesController {
   })
   @GetMapping
   public CapabilitiesResponse get() {
-    return CapabilitiesResponse.current();
+    return CapabilitiesResponse.current(availabilityPolicy);
   }
 }

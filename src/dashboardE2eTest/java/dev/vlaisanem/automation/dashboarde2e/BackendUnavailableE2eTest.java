@@ -238,7 +238,11 @@ class BackendUnavailableE2eTest {
         List.of(
             "java", "-jar", runnerServiceJar.toString(), "--server.port=" + ISOLATED_BACKEND_PORT),
         repoRoot,
-        Map.of(),
+        // D2.3 - shares DashboardE2eEnvironment's own shared Postgres container rather than
+        // starting a separate one: see DashboardE2eDatabase's own Javadoc for why reusing the same
+        // database (and thus the same schema/run history) across this method's own repeated
+        // stop/restart calls is intended, not a leak between test classes.
+        DashboardE2eDatabase.connectionEnv(),
         ISOLATED_BACKEND_HEALTH_URL,
         Duration.ofMinutes(1));
   }

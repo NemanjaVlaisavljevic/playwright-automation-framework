@@ -6,6 +6,20 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  # D2.3 - RunLifecycleStore's own real (JdbcRunStore) implementation is a Spring @Component now
+  # that DataSourceAutoConfiguration/FlywayAutoConfiguration are no longer excluded (see
+  # RunnerServiceApplication), so every bootRun/deployment needs a real, reachable Postgres. These
+  # plain spring.datasource.* keys are standard Spring Boot property names - the portfolio Compose
+  # deployment overrides every one of them via the matching SPRING_DATASOURCE_* env vars (see
+  # deploy/docker-compose.yml), pointing at its own sibling `postgres` service instead. The defaults
+  # below are for local `bootRun` only: `./gradlew.bat localPostgresUp` starts a matching throwaway
+  # postgres:17-alpine container on localhost:5433 (not Postgres's usual 5432 - see that task's own
+  # comment in runner-service/build.gradle for why) rather than reusing deploy/docker-compose.yml's
+  # own `postgres` service (which publishes no host port by design).
+  datasource:
+    url: jdbc:postgresql://localhost:5433/runner
+    username: runner
+    password: runner
 
 # address defaults to loopback-only: this service can launch arbitrary Gradle/Playwright processes
 # on request, so it must never be reachable from other machines on the network without explicit
@@ -21,13 +35,18 @@ management:
       exposure:
         include: health,info
 
-# repo-root defaults to "." - this service is expected to be launched with the repository root
-# (the directory containing gradlew/gradlew.bat) as its working directory.
+# deployment-profile defaults to LOCAL_DEV (today's unrestricted behavior: every combination
+# RunCatalog allows, PUBLIC and LOCAL alike). The portfolio Compose deployment overrides this to
+# PORTFOLIO (RUNNER_DEPLOYMENTPROFILE=PORTFOLIO - see deploy/docker-compose.yml) to hide
+# Environment.LOCAL from /api/v1/capabilities and reject it outright at the validator - see
+# RunAvailabilityPolicy and docs/DEPLOYMENT_ARCHITECTURE.md section 2.
 runner:
+  deployment-profile: LOCAL_DEV
+  # repo-root defaults to "." - this service is expected to be launched with the repository root
+  # (the directory containing gradlew/gradlew.bat) as its working directory.
   repo-root: .
   process-timeout: PT10M
   raw-events-dir: build/runner-events/raw
-  journal-dir: build/runner-events/journal
   logs-dir: build/runner-logs
   test-catalog-path: src/test/resources/catalog/public-test-catalog.json
   artifacts-dir: build/runner-artifacts

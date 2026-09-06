@@ -1,5 +1,6 @@
 package dev.vlaisanem.automation.runner.service.orchestration;
 
+import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogEntry;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
@@ -19,7 +20,7 @@ import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException
 import dev.vlaisanem.automation.runner.service.process.ProcessLauncher;
 import dev.vlaisanem.automation.runner.service.process.ProcessOutcome;
 import dev.vlaisanem.automation.runner.service.process.SuiteCommandFactory;
-import dev.vlaisanem.automation.runner.service.repository.RunRepository;
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
@@ -53,13 +54,12 @@ import org.springframework.stereotype.Service;
  * <p>{@code cancel()} and the background {@code executeRun()} task run on different threads and can
  * race to finalize the same run (e.g. a run finishes normally the instant before a cancel request
  * arrives, or vice versa). Every terminal transition here goes through {@link
- * RunLifecycleCoordinator}, which tolerates losing that <em>specific</em> race (backed by {@link
- * RunRepository#transitionIfNonTerminal}) without swallowing every other kind of failure: {@code
- * executeRun}'s single try/catch/finally boundary converts anything else (a genuine bug, a
- * repository error, an unexpected exception from any collaborator) into a best-effort terminal
- * {@code ERROR}. The {@code finally} block independently guarantees {@code activeRuns} cleanup;
- * failure of the fallback repository transition is logged rather than allowed to hide the original
- * execution error.
+ * RunLifecycleCoordinator}, which tolerates losing that <em>specific</em> race (backed by {@code
+ * RunLifecycleStore#transitionIfNonTerminal}) without swallowing every other kind of failure:
+ * {@code executeRun}'s single try/catch/finally boundary converts anything else (a genuine bug, a
+ * store error, an unexpected exception from any collaborator) into a best-effort terminal {@code
+ * ERROR}. The {@code finally} block independently guarantees {@code activeRuns} cleanup; failure of
+ * the fallback store transition is logged rather than allowed to hide the original execution error.
  *
  * <p>A {@link ProcessTerminationException} means a process from some run is <em>known</em> to still
  * be alive despite our best effort to kill it. Simply freeing the single-worker slot at that point
@@ -82,11 +82,12 @@ public class RunService {
     DEGRADED
   }
 
-  private final RunRepository repository;
+  private final RunLifecycleStore store;
   private final RunLifecycleCoordinator lifecycle;
   private final ProcessLauncher processLauncher;
   private final ListenerEventIngestorFactory ingestorFactory;
   private final TestCatalogService testCatalogService;
+  private final RunAvailabilityPolicy availabilityPolicy;
   private final Path repoRoot;
   private final Path rawEventsDir;
   private final Path logsDir;
@@ -112,17 +113,19 @@ public class RunService {
   private final Object processLifecycleLock = new Object();
 
   public RunService(
-      RunRepository repository,
+      RunLifecycleStore store,
       RunLifecycleCoordinator lifecycle,
       ProcessLauncher processLauncher,
       ListenerEventIngestorFactory ingestorFactory,
       TestCatalogService testCatalogService,
+      RunAvailabilityPolicy availabilityPolicy,
       RunnerProperties properties) {
-    this.repository = repository;
+    this.store = store;
     this.lifecycle = lifecycle;
     this.processLauncher = processLauncher;
     this.ingestorFactory = ingestorFactory;
     this.testCatalogService = testCatalogService;
+    this.availabilityPolicy = availabilityPolicy;
     this.repoRoot = Path.of(properties.repoRoot()).toAbsolutePath().normalize();
     this.rawEventsDir = Path.of(properties.rawEventsDir()).toAbsolutePath().normalize();
     this.logsDir = Path.of(properties.logsDir()).toAbsolutePath().normalize();
@@ -157,7 +160,7 @@ public class RunService {
     if (availability.get() == Availability.DEGRADED) {
       throw new RunnerDegradedException(degradedSurvivingPids());
     }
-    RunRequestValidator.validate(environment, suite);
+    RunRequestValidator.validate(availabilityPolicy, environment, suite);
     List<TestCatalogEntry> catalog =
         suite == Suite.CUSTOM ? testCatalogService.current() : List.of();
     List<SelectedTestSnapshot> selectedTests =
@@ -181,11 +184,11 @@ public class RunService {
   }
 
   public Run find(String runId) {
-    return repository.findById(runId).orElseThrow(() -> new RunNotFoundException(runId));
+    return store.findById(runId).orElseThrow(() -> new RunNotFoundException(runId));
   }
 
   public List<Run> findAll() {
-    return repository.findAll();
+    return store.findAll();
   }
 
   public Path processLog(String runId) {

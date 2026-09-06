@@ -1,0 +1,164 @@
+package dev.vlaisanem.automation.runner.service.repository;
+
+import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.domain.Environment;
+import dev.vlaisanem.automation.runner.service.domain.Run;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
+import dev.vlaisanem.automation.runner.service.domain.Suite;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongFunction;
+import java.util.function.UnaryOperator;
+
+/**
+ * Fast, in-memory {@link RunLifecycleStore} for unit tests that exercise orchestration ( {@code
+ * RunEventBroker}/{@code RunLifecycleCoordinator}/{@code RunService}) without needing a real
+ * Testcontainers Postgres for every one of them - {@code JdbcRunStore} is the one production
+ * implementation, proven against a real database in {@code databaseIntegrationTest}.
+ *
+ * <p>Deliberately mirrors {@code JdbcRunStore}'s exact semantics rather than a simplified
+ * approximation: the same shared {@link RunEventValidation} calls (so a fake accepting something
+ * the real store would reject, or vice versa, is impossible by construction, not just by
+ * convention), and a genuine per-run monitor lock via {@code synchronized} - matching {@code SELECT
+ * ... FOR UPDATE}'s real blocking behavior closely enough that a test racing two threads against
+ * the same {@code runId} still proves real serialization, not merely a single-threaded happy path.
+ */
+public final class FakeRunLifecycleStore implements RunLifecycleStore {
+
+  private final Map<String, RunRecord> runs = new ConcurrentHashMap<>();
+  private final RunLockStripes lockStripes = new RunLockStripes();
+
+  private static final class RunRecord {
+    // findById()/findAll() read this field without holding the per-run lock (they must stay
+    // lock-free to avoid serializing on a run that a writer might be blocking on), so plain
+    // ConcurrentHashMap visibility isn't enough - volatile is what actually guarantees a reader on
+    // another thread observes the writer's most recent assignment under the JMM.
+    private volatile Run run;
+    private long nextEventSequence = 1;
+    private final List<RunnerEvent> events = new ArrayList<>();
+  }
+
+  private Object lockFor(String runId) {
+    return lockStripes.lockFor(runId);
+  }
+
+  @Override
+  public CommittedRunChange queue(
+      String runId,
+      Environment environment,
+      Suite suite,
+      Instant requestedAt,
+      List<SelectedTestSnapshot> selectedTests,
+      LongFunction<RunnerEvent> queuedEventFactory) {
+    synchronized (lockFor(runId)) {
+      if (runs.containsKey(runId)) {
+        throw new IllegalStateException("A run already exists for runId: " + runId);
+      }
+      Run run = Run.queued(runId, environment, suite, requestedAt, selectedTests);
+      RunnerEvent queuedEvent = queuedEventFactory.apply(1L);
+      RunEventValidation.requireQueuedEvent(queuedEvent, runId);
+      RunRecord record = new RunRecord();
+      record.run = run;
+      record.nextEventSequence = 2;
+      record.events.add(queuedEvent);
+      runs.put(runId, record);
+      return new CommittedRunChange(run, queuedEvent);
+    }
+  }
+
+  @Override
+  public Optional<CommittedRunChange> transitionIfNonTerminal(
+      String runId, UnaryOperator<Run> transition, LongFunction<RunnerEvent> eventFactory) {
+    synchronized (lockFor(runId)) {
+      RunRecord record = runs.get(runId);
+      if (record == null) {
+        throw new NoSuchElementException("No run found for runId: " + runId);
+      }
+      if (record.run.status().isTerminal()) {
+        return Optional.empty();
+      }
+      Run before = record.run;
+      Run updated = transition.apply(before);
+      RunEventValidation.requireSameIdentity(before, updated);
+      RunEventValidation.requireReachableTransition(before, updated);
+      long nextSequence = record.nextEventSequence;
+      RunnerEvent committedEvent = eventFactory == null ? null : eventFactory.apply(nextSequence);
+      if (committedEvent != null) {
+        RunEventValidation.requireMatchingEvent(committedEvent, runId, nextSequence);
+      }
+      RunEventValidation.requireLifecycleEventMatches(committedEvent, updated.status());
+      if (committedEvent != null) {
+        record.events.add(committedEvent);
+        nextSequence += 1;
+      }
+      record.run = updated;
+      record.nextEventSequence = nextSequence;
+      return Optional.of(new CommittedRunChange(updated, committedEvent));
+    }
+  }
+
+  @Override
+  public Optional<RunnerEvent> appendEventIfNonTerminal(
+      String runId, LongFunction<RunnerEvent> eventFactory) {
+    synchronized (lockFor(runId)) {
+      RunRecord record = runs.get(runId);
+      if (record == null) {
+        throw new NoSuchElementException("No run found for runId: " + runId);
+      }
+      if (record.run.status().isTerminal()) {
+        return Optional.empty();
+      }
+      long sequence = record.nextEventSequence;
+      RunnerEvent event = eventFactory.apply(sequence);
+      RunEventValidation.requireMatchingEvent(event, runId, sequence);
+      RunEventValidation.requireAppendOnlyEventType(event);
+      record.events.add(event);
+      record.nextEventSequence = sequence + 1;
+      return Optional.of(event);
+    }
+  }
+
+  @Override
+  public Optional<Run> findById(String runId) {
+    RunRecord record = runs.get(runId);
+    return record == null ? Optional.empty() : Optional.of(record.run);
+  }
+
+  @Override
+  public List<Run> findAll() {
+    return runs.values().stream()
+        .map(record -> record.run)
+        .sorted(Comparator.comparing(Run::requestedAt).reversed())
+        .toList();
+  }
+
+  @Override
+  public List<RunnerEvent> readEventsAfter(String runId, long afterSequence) {
+    RunRecord record = runs.get(runId);
+    if (record == null) {
+      return List.of();
+    }
+    synchronized (lockFor(runId)) {
+      return record.events.stream().filter(event -> event.sequence() > afterSequence).toList();
+    }
+  }
+
+  @Override
+  public Optional<RunnerEvent> latestEvent(String runId) {
+    RunRecord record = runs.get(runId);
+    if (record == null) {
+      return Optional.empty();
+    }
+    synchronized (lockFor(runId)) {
+      return record.events.isEmpty()
+          ? Optional.empty()
+          : Optional.of(record.events.get(record.events.size() - 1));
+    }
+  }
+}

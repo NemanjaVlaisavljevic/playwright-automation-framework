@@ -7,15 +7,10 @@ import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
-import dev.vlaisanem.automation.runner.service.events.RunEventAppender;
-import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
-import dev.vlaisanem.automation.runner.service.repository.RunRepository;
+import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
+import dev.vlaisanem.automation.runner.service.repository.RunEventValidation;
 import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
-import java.util.function.LongFunction;
-import java.util.function.UnaryOperator;
 import org.springframework.stereotype.Component;
 
 /**
@@ -24,31 +19,28 @@ import org.springframework.stereotype.Component;
  * launch/cancel, the DEGRADED process-isolation gate - none of that moves here; this only owns
  * <em>what gets recorded</em> once a transition actually applies.
  *
- * <p>Every event-bearing transition is validated, then persists its event through {@link
- * RunRepository#transitionIfNonTerminal(String, UnaryOperator, Consumer)} before the new snapshot
- * is committed. That repository operation's own race tolerance (only one of two racing callers ever
- * sees {@code applied == true}) guarantees a run's canonical timeline never emits more than one
- * {@code RUN_FINISHED}, and never emits {@code RUN_STARTED} for a lifecycle transition lost to
- * concurrent cancellation/error. A repository-level failure (e.g. a genuinely invalid transition)
- * still propagates uncaught; only the specific "already terminal" race is tolerated here.
- *
- * <p>Event persistence is part of the repository's per-run pre-commit boundary. If it fails, the
- * target snapshot is never exposed without its event. An already-accepted run is instead moved to
- * an emergency repository-only {@code ERROR}: no terminal event can honestly be fabricated once the
- * journal is untrustworthy, and the missing completion marker remains the durable evidence of that
- * fact. The journal dependency then stays unavailable until restart, so later submissions fail
- * closed rather than producing timelines that cannot be replayed.
+ * <p>D2.3 cutover: rewritten against {@link RunEventBroker#queue}/{@link
+ * RunEventBroker#transitionIfNonTerminal}, which each commit a run's status change and its
+ * canonical event in one real Postgres transaction (see {@code JdbcRunStore}) - not the two
+ * separately-fallible collaborators (an in-memory {@code RunRepository} plus a file-backed {@code
+ * RunEventAppender}) this class depended on before. That single-transaction guarantee is what makes
+ * the pre-cutover version of this class's own "emergency ERROR" fallback (a dedicated {@code
+ * journalFailure} flag and {@code recordEmergencyError} path, for the case where the repository
+ * transition succeeded but the separate journal append then failed, leaving a run's REST-visible
+ * status un-backed by any event) unnecessary now: that split-brain state cannot occur any more - a
+ * failure anywhere in the store's own transaction rolls back the whole thing, so this class's own
+ * methods simply propagate the failure to {@link RunService}, which already has its own top-level
+ * fallback (see {@code RunService#executeRun}'s {@code catch (RuntimeException unexpected)} block,
+ * itself calling {@link #finishIfLive} to best-effort record {@code ERROR} - unchanged, and now the
+ * only such fallback needed anywhere in this path).
  */
 @Component
 public class RunLifecycleCoordinator {
 
-  private final RunRepository repository;
-  private final RunEventAppender eventAppender;
-  private final AtomicReference<RuntimeException> journalFailure = new AtomicReference<>();
+  private final RunEventBroker broker;
 
-  public RunLifecycleCoordinator(RunRepository repository, RunEventAppender eventAppender) {
-    this.repository = repository;
-    this.eventAppender = eventAppender;
+  public RunLifecycleCoordinator(RunEventBroker broker) {
+    this.broker = broker;
   }
 
   /** Durably accepts a new run and emits its {@code RUN_QUEUED} - always the first event. */
@@ -62,9 +54,15 @@ public class RunLifecycleCoordinator {
       Suite suite,
       Instant now,
       List<SelectedTestSnapshot> selectedTests) {
-    Run run = Run.queued(runId, environment, suite, now, selectedTests);
-    return repository.save(
-        run, ignored -> appendEvent(runId, seq -> RunnerEvent.runQueued(runId, seq, now)));
+    return broker
+        .queue(
+            runId,
+            environment,
+            suite,
+            now,
+            selectedTests,
+            seq -> RunnerEvent.runQueued(runId, seq, now))
+        .run();
   }
 
   /**
@@ -74,11 +72,9 @@ public class RunLifecycleCoordinator {
    * dev.vlaisanem.automation.runner.contract.EventType}'s own Javadoc on {@code RUN_STARTED}.
    */
   public boolean markStarting(String runId, Instant now) {
-    return transitionWithJournalGuard(
-        runId,
-        run -> run.transitionTo(RunStatus.STARTING, now),
-        ignored -> requireJournalAvailable(runId),
-        now);
+    return broker
+        .transitionIfNonTerminal(runId, run -> run.transitionTo(RunStatus.STARTING, now), null)
+        .isPresent();
   }
 
   /**
@@ -86,87 +82,33 @@ public class RunLifecycleCoordinator {
    * RUN_STARTED}.
    */
   public boolean markRunning(String runId, Instant now) {
-    return transitionWithJournalGuard(
-        runId,
-        run -> run.transitionTo(RunStatus.RUNNING, now),
-        ignored -> appendEvent(runId, seq -> RunnerEvent.runStarted(runId, seq, now)),
-        now);
+    return broker
+        .transitionIfNonTerminal(
+            runId,
+            run -> run.transitionTo(RunStatus.RUNNING, now),
+            seq -> RunnerEvent.runStarted(runId, seq, now))
+        .isPresent();
   }
 
   /**
    * Transitions to a terminal {@code status} and, only if that transition actually applied, emits
    * exactly one {@code RUN_FINISHED}. Returns whether the transition applied, mirroring {@link
-   * RunRepository#transitionIfNonTerminal}.
+   * RunEventBroker#transitionIfNonTerminal}.
    */
   public boolean finishIfLive(
       String runId, RunStatus status, Integer exitCode, String detail, Instant now) {
     if (!status.isTerminal()) {
-      // Checked before touching the repository at all: rejecting only once inside the
-      // RUN_FINISHED-event factory below would have already applied the (nonsensical) transition
-      // with no way to undo it.
+      // Checked before touching the store at all: rejecting only once inside the RUN_FINISHED-
+      // event factory below would have already applied the (nonsensical) transition with no way to
+      // undo it.
       throw new IllegalArgumentException("finishIfLive requires a terminal status, was: " + status);
     }
-    return transitionWithJournalGuard(
-        runId,
-        run -> run.transitionTo(status, now, exitCode, detail),
-        ignored ->
-            appendEvent(
-                runId, seq -> RunnerEvent.runFinished(runId, seq, now, outcomeFor(status), detail)),
-        now);
-  }
-
-  private boolean transitionWithJournalGuard(
-      String runId, UnaryOperator<Run> transition, Consumer<Run> beforeCommit, Instant now) {
-    try {
-      return repository.transitionIfNonTerminal(runId, transition, beforeCommit);
-    } catch (RunEventPersistenceException persistenceFailure) {
-      recordEmergencyError(runId, now, persistenceFailure);
-      throw persistenceFailure;
-    }
-  }
-
-  private RunnerEvent appendEvent(String runId, LongFunction<RunnerEvent> eventFactory) {
-    requireJournalAvailable(runId);
-    try {
-      return eventAppender.append(runId, eventFactory);
-    } catch (RuntimeException failure) {
-      journalFailure.compareAndSet(null, failure);
-      throw new RunEventPersistenceException(runId, failure);
-    }
-  }
-
-  private void requireJournalAvailable(String runId) {
-    RuntimeException failure = journalFailure.get();
-    if (failure != null) {
-      throw new RunEventPersistenceException(runId, failure);
-    }
-  }
-
-  private void recordEmergencyError(
-      String runId, Instant now, RunEventPersistenceException persistenceFailure) {
-    Throwable rootCause = persistenceFailure.getCause();
-    String causeDetail =
-        rootCause == null ? persistenceFailure.getMessage() : rootCause.getMessage();
-    String detail =
-        "Canonical event journal failed; event timeline is incomplete"
-            + (causeDetail == null || causeDetail.isBlank() ? "" : ": " + causeDetail);
-    try {
-      repository.transitionIfNonTerminal(
-          runId, run -> run.transitionTo(RunStatus.ERROR, now, null, detail));
-    } catch (RuntimeException emergencyFailure) {
-      persistenceFailure.addSuppressed(emergencyFailure);
-    }
-  }
-
-  private RunOutcome outcomeFor(RunStatus status) {
-    return switch (status) {
-      case SUCCEEDED -> RunOutcome.SUCCEEDED;
-      case FAILED -> RunOutcome.FAILED;
-      case CANCELLED -> RunOutcome.CANCELLED;
-      case TIMED_OUT -> RunOutcome.TIMED_OUT;
-      case ERROR -> RunOutcome.ERROR;
-      case QUEUED, STARTING, RUNNING ->
-          throw new IllegalArgumentException("Not a terminal status: " + status);
-    };
+    RunOutcome outcome = RunEventValidation.outcomeFor(status);
+    return broker
+        .transitionIfNonTerminal(
+            runId,
+            run -> run.transitionTo(status, now, exitCode, detail),
+            seq -> RunnerEvent.runFinished(runId, seq, now, outcome, detail))
+        .isPresent();
   }
 }

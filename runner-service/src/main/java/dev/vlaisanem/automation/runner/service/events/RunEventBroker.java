@@ -3,48 +3,64 @@ package dev.vlaisanem.automation.runner.service.events;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.domain.Environment;
+import dev.vlaisanem.automation.runner.service.domain.Run;
+import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
+import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
+import dev.vlaisanem.automation.runner.service.repository.CommittedRunChange;
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import dev.vlaisanem.automation.runner.service.repository.RunLockStripes;
 import jakarta.annotation.PreDestroy;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongFunction;
-import org.springframework.context.annotation.Primary;
+import java.util.function.UnaryOperator;
 import org.springframework.stereotype.Component;
 
 /**
- * The single entry point for both writing and subscribing to a run's canonical event timeline.
- * Internally owns a {@link RunEventReader}/{@link RunEventAppender} (the canonical journal) and a
- * {@link RunEventHub} (live fan-out) - callers never touch either directly, and the journal itself
- * has no notion of subscribers at all.
+ * D2.3 (docs/DEPLOYMENT_ARCHITECTURE.md section 3) - the single entry point for both writing and
+ * subscribing to a run's canonical event timeline, now backed by {@link RunLifecycleStore} (in
+ * production, {@code JdbcRunStore} - a real Postgres transaction per write) instead of the retired
+ * {@code FileBackedRunEventJournal}. Internally owns the store and a {@link RunEventHub} (live
+ * fan-out) - callers never touch either directly.
  *
- * <p>{@code @Primary} for {@link RunEventAppender}: {@link dev.vlaisanem.automation.runner.service
- * .orchestration.RunLifecycleCoordinator} and {@code ListenerEventIngestorFactory} depend only on
- * that narrow interface, so wiring them to this broker instead of the raw journal - with no changes
- * to either class - is what makes every canonical event they record also reach live subscribers.
+ * <p><strong>What changed at this cutover, and why the per-run lock below still matters just as
+ * much as before</strong>: {@link RunLifecycleStore}'s own {@code SELECT ... FOR UPDATE} row lock
+ * serializes concurrent *database writers* on the same run, but it is released at each call's own
+ * {@code COMMIT} - it cannot by itself close the gap between "this store's transaction committed"
+ * and "the result was published to live subscribers" the way a single in-process lock spanning both
+ * steps can (see {@code JdbcRunStore}'s own Javadoc for the fuller explanation). This class's
+ * {@code locksByRun} - unchanged from the pre-cutover design - is exactly that lock: every write
+ * method takes it around "call the store, then publish the committed event to the hub", and {@link
+ * #replayAndSubscribe} takes it around "read the replay snapshot from the store, then register the
+ * subscriber". Serializing those against each other for the same run is what still guarantees a
+ * subscriber's replay batch and the live events that follow it are gapless and duplicate-free - a
+ * live event can only be published either strictly before the replay snapshot is taken (so it is
+ * included in the replay) or strictly after the subscriber is registered (so it arrives live),
+ * never in the gap between the two, because that gap does not exist under this lock. The lock
+ * itself comes from a fixed-size {@link RunLockStripes}, not one entry per {@code runId} - see that
+ * class's own Javadoc for why an unbounded per-run map is unsafe to prune and was replaced.
  *
- * <p>A single per-run lock (see {@link #lockFor}) is the crux of this class: {@link #append} takes
- * it around "write to the journal, then publish the result to the hub", and {@link
- * #replayAndSubscribe} takes it around "read the replay snapshot from the journal, then register
- * the subscriber". Serializing those two operations against each other for the same run is what
- * guarantees a subscriber's replay batch and the live events that follow it are gapless and
- * duplicate-free - a live event can only be published either strictly before the replay snapshot is
- * taken (so it is included in the replay) or strictly after the subscriber is registered (so it
- * arrives live), never in the gap between the two, because that gap does not exist under the lock.
+ * <p>Exposes three distinct write paths, mirroring {@link RunLifecycleStore}'s own split (a review
+ * finding from D2.2: a single generic "append" cannot express "also transition the run's status"):
+ * {@link #queue} and {@link #transitionIfNonTerminal} for {@code RunLifecycleCoordinator}'s
+ * lifecycle events (each returns the full {@link CommittedRunChange}, not just the event, since a
+ * caller may need the resulting {@link Run} snapshot too); {@link #append}, still implementing
+ * {@link RunEventAppender} unchanged, for {@code ListenerEventIngestorFactory}'s {@code TEST_*}/
+ * {@code STEP_*} events - the one caller whose events genuinely fit that narrow, status-free
+ * interface.
  */
 @Component
-@Primary
 public class RunEventBroker implements RunEventAppender {
 
-  private final RunEventAppender journalAppender;
-  private final RunEventReader journalReader;
+  private final RunLifecycleStore store;
   private final RunEventHub hub;
-  private final ConcurrentHashMap<String, Object> locksByRun = new ConcurrentHashMap<>();
+  private final RunLockStripes lockStripes = new RunLockStripes();
 
-  public RunEventBroker(
-      RunEventAppender journalAppender, RunEventReader journalReader, RunnerProperties properties) {
-    this.journalAppender = journalAppender;
-    this.journalReader = journalReader;
+  public RunEventBroker(RunLifecycleStore store, RunnerProperties properties) {
+    this.store = store;
     this.hub = new RunEventHub(properties.sseMaxSubscribers());
   }
 
@@ -59,13 +75,56 @@ public class RunEventBroker implements RunEventAppender {
     hub.shutdown();
   }
 
-  @Override
-  public RunnerEvent append(String runId, LongFunction<RunnerEvent> eventFactory) {
+  public CommittedRunChange queue(
+      String runId,
+      Environment environment,
+      Suite suite,
+      Instant requestedAt,
+      List<SelectedTestSnapshot> selectedTests,
+      LongFunction<RunnerEvent> queuedEventFactory) {
     synchronized (lockFor(runId)) {
-      RunnerEvent event = journalAppender.append(runId, eventFactory);
+      CommittedRunChange change =
+          store.queue(runId, environment, suite, requestedAt, selectedTests, queuedEventFactory);
       // Only ever enqueues into each subscriber's own mailbox (see RunEventHub) - never blocks on
       // slow client I/O, so holding the per-run lock here never stalls a concurrent
       // replayAndSubscribe call for longer than that enqueue takes.
+      hub.publish(change.event());
+      return change;
+    }
+  }
+
+  public Optional<CommittedRunChange> transitionIfNonTerminal(
+      String runId, UnaryOperator<Run> transition, LongFunction<RunnerEvent> eventFactory) {
+    synchronized (lockFor(runId)) {
+      Optional<CommittedRunChange> result =
+          store.transitionIfNonTerminal(runId, transition, eventFactory);
+      result.ifPresent(
+          change -> {
+            if (change.event() != null) {
+              hub.publish(change.event());
+            }
+          });
+      return result;
+    }
+  }
+
+  /**
+   * {@code TEST_*}/{@code STEP_*} events only, via {@link
+   * RunLifecycleStore#appendEventIfNonTerminal} - preserves {@link RunEventAppender}'s original
+   * throwing contract (a {@link RunEventJournalConflictException} once the run's timeline is
+   * closed) even though the store itself returns an empty {@link Optional} for that case, so {@code
+   * ListenerEventIngestor} needs no changes at all.
+   */
+  @Override
+  public RunnerEvent append(String runId, LongFunction<RunnerEvent> eventFactory) {
+    synchronized (lockFor(runId)) {
+      RunnerEvent event =
+          store
+              .appendEventIfNonTerminal(runId, eventFactory)
+              .orElseThrow(
+                  () ->
+                      new RunEventJournalConflictException(
+                          "Run " + runId + " no longer accepts events"));
       hub.publish(event);
       return event;
     }
@@ -73,11 +132,11 @@ public class RunEventBroker implements RunEventAppender {
 
   /**
    * Atomically replays every event for {@code runId} after {@code afterSequence} into {@code
-   * subscriber}, then registers it for live events - all under the same per-run lock {@link
-   * #append} uses, so no event can ever land in the gap between "read the replay snapshot" and
-   * "start receiving live ones". Pass {@code afterSequence == 0} for the full history.
+   * subscriber}, then registers it for live events - all under the same per-run lock every write
+   * method uses, so no event can ever land in the gap between "read the replay snapshot" and "start
+   * receiving live ones". Pass {@code afterSequence == 0} for the full history.
    *
-   * <p>{@code afterSequence} is validated against the journal's own current high-water mark, taken
+   * <p>{@code afterSequence} is validated against the store's own current high-water mark, taken
    * under this same lock: a value greater than that is a client claiming to have already seen an
    * event this run never produced (a stale/wrong runId, or a bug), and resuming from it anyway
    * would silently skip whatever the client actually never saw. When {@code afterSequence} already
@@ -87,7 +146,7 @@ public class RunEventBroker implements RunEventAppender {
    * a client disconnect or the emitter's own timeout notices what this call already knows.
    *
    * @throws InvalidEventResumeSequenceException if {@code afterSequence} is greater than the
-   *     journal's current high-water mark for {@code runId}.
+   *     store's current high-water mark for {@code runId}.
    * @throws dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException
    *     if the hub is already at its configured subscriber capacity, or is shutting down - see
    *     {@link RunEventHub#subscribe}.
@@ -95,12 +154,12 @@ public class RunEventBroker implements RunEventAppender {
   public RunEventSubscription replayAndSubscribe(
       String runId, long afterSequence, RunEventSubscriber subscriber) {
     synchronized (lockFor(runId)) {
-      Optional<RunnerEvent> latest = journalReader.latest(runId);
+      Optional<RunnerEvent> latest = store.latestEvent(runId);
       long latestSequence = latest.map(RunnerEvent::sequence).orElse(0L);
       if (afterSequence > latestSequence) {
         throw new InvalidEventResumeSequenceException(runId, afterSequence, latestSequence);
       }
-      List<RunnerEvent> replay = journalReader.readAfter(runId, afterSequence);
+      List<RunnerEvent> replay = store.readEventsAfter(runId, afterSequence);
       RunEventSubscription subscription = hub.subscribe(runId, replay, subscriber);
       boolean runAlreadyTerminal =
           latest.map(event -> event.type() == EventType.RUN_FINISHED).orElse(false);
@@ -112,6 +171,6 @@ public class RunEventBroker implements RunEventAppender {
   }
 
   private Object lockFor(String runId) {
-    return locksByRun.computeIfAbsent(runId, ignored -> new Object());
+    return lockStripes.lockFor(runId);
   }
 }

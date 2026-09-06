@@ -6,14 +6,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
-import dev.vlaisanem.automation.runner.service.events.FailingRunEventAppender;
-import dev.vlaisanem.automation.runner.service.events.RecordingRunEventAppender;
-import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
-import dev.vlaisanem.automation.runner.service.repository.RunRepository;
+import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
+import dev.vlaisanem.automation.runner.service.repository.FailingRunLifecycleStore;
+import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
+import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import java.io.UncheckedIOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,41 +27,50 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
+/**
+ * D2.3 cutover: rewritten against {@link FakeRunLifecycleStore} (behaviorally faithful to {@code
+ * JdbcRunStore}, proven separately against a real Postgres in {@code databaseIntegrationTest})
+ * instead of the retired in-memory {@code RunRepository}/file-backed {@code RunEventAppender} pair.
+ * The old "emergency ERROR" tests (a store write succeeding but the separate journal append then
+ * failing) no longer apply - one atomic store transaction means a failure anywhere rolls back
+ * everything, so this class no longer has any emergency fallback of its own to test; the equivalent
+ * coverage here is simpler: a failing store write leaves the run completely unchanged, and the
+ * exception propagates unmodified for {@code RunService} to handle.
+ */
 class RunLifecycleCoordinatorTest {
 
   private static final Instant NOW = Instant.parse("2026-08-30T12:00:00Z");
 
-  private final RunRepository repository = new RunRepository();
-  private final RecordingRunEventAppender events = new RecordingRunEventAppender();
-  private final RunLifecycleCoordinator coordinator =
-      new RunLifecycleCoordinator(repository, events);
+  private final FakeRunLifecycleStore store = new FakeRunLifecycleStore();
+  private final RunEventBroker broker = new RunEventBroker(store, testProperties());
+  private final RunLifecycleCoordinator coordinator = new RunLifecycleCoordinator(broker);
 
   @Test
   void queueSavesTheRunAndEmitsRunQueuedFirst() {
     Run run = coordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
 
     assertThat(run.status()).isEqualTo(RunStatus.QUEUED);
-    List<RunnerEvent> recorded = events.eventsFor("run-1");
+    List<RunnerEvent> recorded = store.readEventsAfter("run-1", 0);
     assertThat(recorded).hasSize(1);
     assertThat(recorded.getFirst().type()).isEqualTo(EventType.RUN_QUEUED);
     assertThat(recorded.getFirst().sequence()).isEqualTo(1L);
   }
 
   @Test
-  void aRunQueuedEventFailureDoesNotAcceptAZombieRunAndClosesTheJournalDependency() {
-    RunRepository failingRepository = new RunRepository();
+  void aFailingQueueWriteLeavesNoRunBehind() {
+    RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_QUEUED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(
-            failingRepository, new FailingRunEventAppender(EventType.RUN_QUEUED));
+        new RunLifecycleCoordinator(new RunEventBroker(failingStore, testProperties()));
 
     assertThatThrownBy(
             () -> failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW))
-        .isInstanceOf(RunEventPersistenceException.class);
-    assertThat(failingRepository.findById("run-1")).isEmpty();
+        .isInstanceOf(UncheckedIOException.class);
+
+    assertThat(store.findById("run-1")).isEmpty();
 
     assertThatThrownBy(() -> failingCoordinator.queue("run-2", Environment.PUBLIC, Suite.API, NOW))
-        .isInstanceOf(RunEventPersistenceException.class);
-    assertThat(failingRepository.findById("run-2")).isEmpty();
+        .isInstanceOf(UncheckedIOException.class);
+    assertThat(store.findById("run-2")).isEmpty();
   }
 
   @Test
@@ -68,8 +80,8 @@ class RunLifecycleCoordinatorTest {
     boolean applied = coordinator.markStarting("run-1", NOW);
 
     assertThat(applied).isTrue();
-    assertThat(repository.findById("run-1").orElseThrow().status()).isEqualTo(RunStatus.STARTING);
-    assertThat(events.eventsFor("run-1"))
+    assertThat(store.findById("run-1").orElseThrow().status()).isEqualTo(RunStatus.STARTING);
+    assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED);
   }
@@ -82,28 +94,31 @@ class RunLifecycleCoordinatorTest {
     boolean applied = coordinator.markRunning("run-1", NOW);
 
     assertThat(applied).isTrue();
-    assertThat(events.eventsFor("run-1"))
+    assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED);
   }
 
+  /**
+   * Replaces the pre-cutover "emergency ERROR" test for this same failure point: with one atomic
+   * store transaction, a failed write cannot leave a status change un-backed by its event any more
+   * - it leaves the run completely unchanged instead, and the failure propagates for {@code
+   * RunService}'s own existing top-level fallback to handle (unchanged by this cutover).
+   */
   @Test
-  void aRunStartedEventFailureCommitsOnlyAnEmergencyErrorSnapshot() {
-    RunRepository failingRepository = new RunRepository();
-    FailingRunEventAppender failingEvents = new FailingRunEventAppender(EventType.RUN_STARTED);
+  void aFailingRunStartedWriteLeavesTheRunInStartingUnchanged() {
+    RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_STARTED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(failingRepository, failingEvents);
+        new RunLifecycleCoordinator(new RunEventBroker(failingStore, testProperties()));
     failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
     failingCoordinator.markStarting("run-1", NOW);
 
     assertThatThrownBy(() -> failingCoordinator.markRunning("run-1", NOW))
-        .isInstanceOf(RunEventPersistenceException.class);
+        .isInstanceOf(UncheckedIOException.class);
 
-    Run emergency = failingRepository.findById("run-1").orElseThrow();
-    assertThat(emergency.status()).isEqualTo(RunStatus.ERROR);
-    assertThat(emergency.startedAt()).isNull();
-    assertThat(emergency.detail()).contains("event timeline is incomplete");
-    assertThat(failingEvents.eventsFor("run-1"))
+    Run unchanged = store.findById("run-1").orElseThrow();
+    assertThat(unchanged.status()).isEqualTo(RunStatus.STARTING);
+    assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED);
   }
@@ -121,7 +136,7 @@ class RunLifecycleCoordinatorTest {
     boolean applied = coordinator.markRunning("run-1", NOW);
 
     assertThat(applied).isFalse();
-    assertThat(events.eventsFor("run-1"))
+    assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_FINISHED);
   }
@@ -143,7 +158,7 @@ class RunLifecycleCoordinatorTest {
       boolean applied = coordinator.finishIfLive(runId, status, 3, "detail-" + status, NOW);
 
       assertThat(applied).isTrue();
-      RunnerEvent finished = events.eventsFor(runId).getLast();
+      RunnerEvent finished = lastEvent(runId);
       assertThat(finished.type()).isEqualTo(EventType.RUN_FINISHED);
       assertThat(finished.runOutcome()).isEqualTo(expectedOutcome(status));
       assertThat(finished.detail()).isEqualTo("detail-" + status);
@@ -163,7 +178,7 @@ class RunLifecycleCoordinatorTest {
         coordinator.finishIfLive("run-1", RunStatus.CANCELLED, null, "cancelled while queued", NOW);
 
     assertThat(applied).isTrue();
-    List<RunnerEvent> recorded = events.eventsFor("run-1");
+    List<RunnerEvent> recorded = store.readEventsAfter("run-1", 0);
     assertThat(recorded)
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_FINISHED);
@@ -171,25 +186,23 @@ class RunLifecycleCoordinatorTest {
     assertThat(recorded.getLast().runOutcome()).isEqualTo(RunOutcome.CANCELLED);
   }
 
+  /** Same reasoning as {@link #aFailingRunStartedWriteLeavesTheRunInStartingUnchanged}. */
   @Test
-  void aRunFinishedEventFailureCanNeverLeaveTheRunSucceeded() {
-    RunRepository failingRepository = new RunRepository();
-    FailingRunEventAppender failingEvents = new FailingRunEventAppender(EventType.RUN_FINISHED);
+  void aFailingRunFinishedWriteLeavesTheRunRunningNeverSucceeded() {
+    RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_FINISHED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(failingRepository, failingEvents);
+        new RunLifecycleCoordinator(new RunEventBroker(failingStore, testProperties()));
     failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
     failingCoordinator.markStarting("run-1", NOW);
     failingCoordinator.markRunning("run-1", NOW);
 
     assertThatThrownBy(
             () -> failingCoordinator.finishIfLive("run-1", RunStatus.SUCCEEDED, 0, null, NOW))
-        .isInstanceOf(RunEventPersistenceException.class);
+        .isInstanceOf(UncheckedIOException.class);
 
-    Run emergency = failingRepository.findById("run-1").orElseThrow();
-    assertThat(emergency.status()).isEqualTo(RunStatus.ERROR);
-    assertThat(emergency.exitCode()).isNull();
-    assertThat(emergency.detail()).contains("event timeline is incomplete");
-    assertThat(failingEvents.eventsFor("run-1"))
+    Run unchanged = store.findById("run-1").orElseThrow();
+    assertThat(unchanged.status()).isEqualTo(RunStatus.RUNNING);
+    assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED);
   }
@@ -233,7 +246,7 @@ class RunLifecycleCoordinatorTest {
 
     assertThat(appliedCount).isEqualTo(1);
     List<RunnerEvent> finished =
-        events.eventsFor("run-1").stream()
+        store.readEventsAfter("run-1", 0).stream()
             .filter(event -> event.type() == EventType.RUN_FINISHED)
             .toList();
     assertThat(finished).hasSize(1);
@@ -246,10 +259,15 @@ class RunLifecycleCoordinatorTest {
     assertThatThrownBy(() -> coordinator.finishIfLive("run-1", RunStatus.RUNNING, null, null, NOW))
         .isInstanceOf(IllegalArgumentException.class);
 
-    assertThat(repository.findById("run-1").orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
-    assertThat(events.eventsFor("run-1"))
+    assertThat(store.findById("run-1").orElseThrow().status()).isEqualTo(RunStatus.QUEUED);
+    assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED);
+  }
+
+  private RunnerEvent lastEvent(String runId) {
+    List<RunnerEvent> events = store.readEventsAfter(runId, 0);
+    return events.get(events.size() - 1);
   }
 
   private RunOutcome expectedOutcome(RunStatus status) {
@@ -270,5 +288,28 @@ class RunLifecycleCoordinatorTest {
       Thread.currentThread().interrupt();
       throw new IllegalStateException(exception);
     }
+  }
+
+  /**
+   * A minimal-but-valid properties object for constructing a broker directly - only {@code
+   * sseMaxSubscribers()} is ever read from it.
+   */
+  private static RunnerProperties testProperties() {
+    return new RunnerProperties(
+        ".",
+        Duration.ofSeconds(30),
+        "raw",
+        "logs",
+        "src/test/resources/catalog/public-test-catalog.json",
+        "artifacts",
+        1024 * 1024,
+        Duration.ofSeconds(5),
+        Duration.ofSeconds(1),
+        1,
+        Duration.ofMillis(150),
+        Duration.ofSeconds(5),
+        10_000,
+        Duration.ofSeconds(15),
+        Duration.ofMinutes(10));
   }
 }

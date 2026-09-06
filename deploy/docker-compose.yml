@@ -1,8 +1,7 @@
-# Production topology - three long-lived containers, no host ports published by default (this file
-# alone is not enough to actually reach anything from outside the Compose network - see
-# docker-compose.debug.yml for local/D0-spike port publishing, and docs/DEPLOYMENT_ARCHITECTURE.md
-# for what D1 still needs to add before a real deployment: SITE_ADDRESS/80/443 wiring on `web` and
-# persistent volumes for Caddy's own /data and /config, none of which exist yet).
+# Production topology - three long-lived containers. `web` publishes 80/443 (real TLS once
+# SITE_ADDRESS names a real domain in deploy/.env - see deploy/.env.example and
+# docs/DEPLOYMENT_ARCHITECTURE.md section 5); `runner-service`/`postgres` publish nothing at all -
+# see docker-compose.debug.yml for local/D0-spike loopback-only access to those two instead.
 #
 # Run from the repository root:
 #   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up --build
@@ -25,6 +24,28 @@ services:
       - edge
     depends_on:
       - runner-service
+    # SITE_ADDRESS names the real domain once one exists (e.g. "example.com") - Caddy then
+    # automatically obtains and renews a real TLS certificate for it via ACME/Let's Encrypt, using
+    # the persistent caddy-data volume below to avoid re-requesting one (and hitting Let's
+    # Encrypt's rate limits) on every container recreate. Deliberately a bare variable reference,
+    # not `${SITE_ADDRESS:-}` - Compose only OMITS the container env var entirely when the
+    # variable is genuinely undefined (both here and in deploy/.env), which is what lets the
+    # Caddyfile's own {$SITE_ADDRESS::80} placeholder default apply. `${SITE_ADDRESS:-}` would
+    # instead always set the container's SITE_ADDRESS to an empty string, which Caddy treats as a
+    # real (empty) site address rather than falling back to its own default - confirmed live: that
+    # exact form made Caddy fail to start with "unrecognized global option: encode", since an
+    # empty site address parses as a bare global-options block instead of this file's actual site
+    # block. Leave deploy/.env's own SITE_ADDRESS line commented out (see .env.example) until a
+    # real domain exists - today's D0/D1 state keeps serving plain HTTP on :80.
+    environment:
+      - SITE_ADDRESS
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3 (QUIC) - harmless to publish even before SITE_ADDRESS names a domain.
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
     restart: unless-stopped
 
   runner-service:
@@ -34,8 +55,43 @@ services:
     networks:
       - edge
       - data
+    # Docker's own minimal init (tini) becomes PID 1 instead of java - forwards signals through
+    # (docker stop/compose restart still reach the JVM, see the Dockerfile's own CMD comment) and,
+    # more importantly here, reaps any orphaned grandchild process (a Gradle --no-daemon build, a
+    # forked JUnit worker, Chromium's own helper processes) that outlives its immediate parent
+    # during a forced-kill/cancel path - java alone is not a real init/reaper for processes it never
+    # directly re-parents to itself.
+    init: true
+    depends_on:
+      postgres:
+        # Not just `depends_on: [postgres]` (Compose's own default only waits for the container to
+        # start, not for Postgres itself to actually accept connections) - RunnerServiceApplication
+        # no longer excludes DataSourceAutoConfiguration/FlywayAutoConfiguration (D2.3), so it now
+        # tries to open a real connection and run Flyway's migration at startup; without this
+        # condition, a fresh `docker compose up` would start runner-service and postgres at the same
+        # moment and the JVM would fail its very first connection attempt against a Postgres that
+        # hasn't finished its own initialization yet.
+        condition: service_healthy
     environment:
       - RUNNER_QUEUECAPACITY=5
+      # This image's own Dockerfile already defaults RUNNER_DEPLOYMENTPROFILE to PORTFOLIO
+      # (fail-closed - see its own comment for why that must not rely on this line alone). Repeating
+      # the identical value here is deliberate belt-and-braces documentation, not redundant: it's
+      # the one place a human reads to see this deployment's actual profile, and it stays correct
+      # even if the image's own default is ever loosened for some other launch context. Hides
+      # Environment.LOCAL from /api/v1/capabilities and rejects it outright at the validator - see
+      # RunAvailabilityPolicy and docs/DEPLOYMENT_ARCHITECTURE.md section 2. LOCAL needs the
+      # separate seven-container Restful Booker Platform stack running alongside it, which this
+      # deployment does not carry.
+      - RUNNER_DEPLOYMENTPROFILE=PORTFOLIO
+      # D2.3 - points runner-service's own spring.datasource.* (see application.yml's own comment)
+      # at its sibling `postgres` service instead of application.yml's localhost-only bootRun
+      # defaults. Reuses the exact same POSTGRES_DB/POSTGRES_USER/POSTGRES_PASSWORD values the
+      # `postgres` service below is configured from, rather than repeating them as separate literals
+      # that could silently drift apart from what that service actually starts with.
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-runner}
+      - SPRING_DATASOURCE_USERNAME=${POSTGRES_USER:-runner}
+      - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - see deploy/.env.example}
     volumes:
       - runner-data:/data
     restart: unless-stopped
@@ -65,3 +121,5 @@ networks:
 volumes:
   runner-data:
   pgdata:
+  caddy-data:
+  caddy-config:
