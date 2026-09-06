@@ -700,6 +700,284 @@ Verified after all fixes: full gate green throughout (root `test`, `runner-contr
 `runner-service` `test`, `databaseIntegrationTest` - `JdbcRunStoreTest` now 22 cases,
 `RunEventBrokerJdbcAcceptanceTest` now 4), `spotlessCheck` and `git diff --check` clean.
 
+**D2.4 - Artifact metadata - DONE 2026-09-06.** Per the "Artifacts must ingest incrementally" section
+above:
+
+- **New `ArtifactRepository`** (interface) / **`JdbcArtifactRepository`** (real `@Component`,
+  `JdbcTemplate`-backed): `ingest(entries)` batch-inserts with `ON CONFLICT (artifact_id) DO NOTHING`
+  (idempotent by design - the same manifest entry may legitimately be re-read by both an incremental
+  pass and the final drain); `findForRun(runId, testIdFilter)` queries `artifacts` ordered by
+  `created_at` then `artifact_id`.
+- **New `ArtifactIngestionService`**: reads a run's `manifest.jsonl` (via the existing
+  `ArtifactManifestReader`, unchanged - same path-traversal/symlink defenses, same strict-UTF-8
+  decoding, same duplicate-`artifactId` detection) and ingests every entry into `ArtifactRepository`.
+  Always re-reads the whole manifest rather than tracking a byte/line offset, relying entirely on the
+  repository's own idempotency. **Never throws** - a read/parse/database failure is logged and
+  swallowed, since `artifacts` is a derived index, not a source of truth, and losing one pass is
+  always recoverable from the next one.
+- **Incremental hook**: `RunEventBroker#append` calls `ingestAvailableEntries(runId, false)` after
+  every `TEST_FAILED`/`TEST_ABORTED` event, *after* releasing the per-run lock (this ingestion shares
+  no invariant with the replay-atomicity protocol that lock protects, so holding it any longer would
+  only needlessly block a concurrent `replayAndSubscribe`/`append` on the same run).
+- **Final-drain hook**: `RunLifecycleCoordinator#finishIfLive` calls
+  `ingestAvailableEntries(runId, true)` immediately *before* the terminal transition/`RUN_FINISHED`
+  commit - covers a test that failed without a screenshot capture, or any entry the last incremental
+  pass hadn't yet seen.
+- **`ArtifactService` rewritten**: `listForRun`/`download` now query `ArtifactRepository` exclusively
+  - the manifest file itself is no longer read here at all (that's `ArtifactIngestionService`'s own,
+  separately-tested job). `resolveFile`'s filesystem trust boundary (path-traversal/symlink checks) is
+  completely unchanged - an `ArtifactManifestEntry` read back from Postgres still originated from the
+  manifest file, so its `relativePath` is treated exactly as untrusted as it always was.
+- **Test rewiring**: `ArtifactServiceTest` rewritten against a new `FakeArtifactRepository` (in-memory,
+  mirrors the real repository's `ON CONFLICT DO NOTHING` semantics via `putIfAbsent`) instead of
+  writing manifest files for its list tests - the download/symlink/corrupt-file tests still write real
+  files to disk (that trust boundary is unchanged) but seed the fake repository instead of a manifest
+  line. New `ArtifactIngestionServiceTest` (4 cases) directly proves the ingest/idempotent/never-throws
+  contract. `RunEventBrokerTest`/`RunLifecycleCoordinatorTest`/`RunServiceTest`/
+  `RunEventBrokerJdbcAcceptanceTest` each gained a `noopArtifactIngestionService()` helper (a real
+  `ArtifactIngestionService` wired to `FakeArtifactRepository`) to satisfy `RunEventBroker`'s/
+  `RunLifecycleCoordinator`'s new constructor parameter - none of those classes' own scenarios ever
+  produce a `TEST_FAILED`/`TEST_ABORTED`/`RUN_FINISHED` manifest, so the hook never does anything
+  observable in them. `OpenApiContractTest`/`ServerBindingTest` gained a `@MockitoBean
+  ArtifactRepository` for the same reason `RunLifecycleStore` is already mocked there:
+  `JdbcArtifactRepository` also needs a `JdbcTemplate`, which these two Docker-free, real-Postgres-free
+  full-context tests deliberately exclude.
+- **New `JdbcArtifactRepositoryTest`** (`databaseIntegrationTest`, 5 cases) proves the real
+  implementation against a real Postgres: an entry round-trips through the table exactly, a re-ingest
+  with different field values for the same `artifactId` never overwrites the original row,
+  `findForRun` filters by `testId` and orders deterministically. Caught a real bug in the test itself
+  while writing it (not in production code): `artifact_id` is a *global* primary key, not scoped per
+  run, and every test method in the class shares one static Testcontainers Postgres/schema - reusing a
+  bare literal like `"a"` across two test methods silently collided with a leftover row from an
+  earlier, unrelated test via the very `ON CONFLICT DO NOTHING` being tested, producing an empty result
+  instead of a clear failure. Fixed with a `uniqueArtifactId(label)` helper appending a fresh UUID to
+  every artifact id used in the test class.
+
+Verified live, beyond the automated suites (`localPostgresUp` + `bootRun`): submitted a real `FIXTURE`
+run (`StepDrilldownFixtureTest`, which deliberately fails its third step) and polled
+`GET /api/v1/runs/{runId}/artifacts` while the run was still `RUNNING` - it already returned both
+artifacts (a `SCREENSHOT` and a `TRACE`) *before* the run reached its terminal `FAILED` status,
+proving the incremental `TEST_FAILED` ingestion hook actually works end to end, not just in a unit
+test. The final list after `FAILED` matched a direct `psql` query against the `artifacts` table
+exactly (same two rows, same `size_bytes`/`created_at`), and downloading the screenshot through the
+real HTTP endpoint returned the exact byte count Postgres recorded and a genuinely valid PNG - proving
+`ArtifactService#download`'s file-resolution path still works correctly with metadata now sourced from
+the database instead of the manifest file directly.
+
+**D2.4 review round (2026-09-06) - three P1s and one P2, all fixed.** A third review confirmed the
+direction was right but found real gaps the initial pass left open:
+
+- **[P1] `TEST_FAILED`/`TEST_ABORTED` published before artifact ingestion completed.**
+  `RunEventBroker#append` used to call `hub.publish(event)` before (and, in an even earlier version,
+  entirely outside the per-run lock from) `artifactIngestionService.ingestAvailableEntries(...)` - a
+  client that invalidates its artifacts query the instant it observes that event over SSE could win
+  the race and see an empty list, with no further chance to refresh before `RUN_FINISHED`. Fixed by
+  moving ingestion to run first, still inside the same per-run lock, before `hub.publish` - the lock
+  that already exists for the replay-atomicity protocol also now guarantees ingestion is durably
+  complete before any subscriber can possibly observe the event that would make them query for it.
+  Proved deterministically with a new `RunEventBrokerTest` case: a blocking `ArtifactIngestionService`
+  test double holds ingestion open, and while it does, an already-registered live subscriber
+  provably has not received `TEST_FAILED` yet - only once ingestion is released does the event
+  arrive.
+- **[P1] `ON CONFLICT (artifact_id) DO NOTHING` silently accepted a genuine collision.** Idempotency
+  only actually applies to a byte-for-byte-identical re-read of the same entry - the same
+  `artifactId` arriving with a different `runId`, path, type, size, or any other field is a real
+  data-integrity problem, and `DO NOTHING` was silently discarding it with no signal at all.
+  `JdbcArtifactRepository#ingest` now inspects each row's own affected-count from the batch (0 means
+  a conflict), and for those re-reads the existing row and compares it field-for-field against the
+  incoming one - identical wins silently (the legitimate case), anything else throws a new
+  `ArtifactIngestionConflictException`. `FakeArtifactRepository` mirrors the same check. Three new
+  `JdbcArtifactRepositoryTest` cases prove: an identical re-ingest stays a no-op; the same id with
+  changed metadata is rejected (and does not overwrite the original row); the same id reused across
+  two different runs is rejected.
+- **[P1] A failed final drain had no guaranteed next attempt.** Logging and forgetting a failed
+  drain right before `RUN_FINISHED` meant a run could reach its terminal status with permanently
+  incomplete artifact metadata, and nothing durable recorded that fact - the API would show "zero
+  artifacts" indistinguishably from "ingestion never finished". Fixed with: a new
+  `runs.artifacts_ingestion_incomplete` column (`V2` migration - a new versioned migration, not an
+  edit to `V1`); `ArtifactIngestionService#ingestAvailableEntries` now returns an explicit
+  `ArtifactIngestionOutcome` and, only for the final (`runTerminal`) drain, marks/clears that flag via
+  `ArtifactRepository#markIngestionIncomplete`/`markIngestionComplete`; a bounded background
+  reconciliation loop (`@PostConstruct`-started, so a directly-constructed test instance never gets a
+  live thread it can't shut down) retries every currently-flagged run up to 5 times each, giving up
+  permanently (not infinitely) on one that never recovers; `ArtifactService#isIngestionIncomplete` and
+  a new `X-Artifacts-Ingestion-Incomplete` response header on `GET .../artifacts` let a client tell
+  the two states apart without changing the endpoint's existing array response shape. Six new
+  `ArtifactIngestionServiceTest` cases cover the outcome value, the flag being set/cleared, the
+  reconciliation loop actually recovering a fixed manifest, and the bounded cap actually stopping
+  retries (via a package-private, test-only attempt-count accessor).
+- **[P2] `TIMESTAMPTZ` truncates `createdAt` to microseconds.** The manifest writer records
+  `Instant.now()` at nanosecond precision; without normalizing, a genuinely-identical re-ingest of a
+  real (nanosecond-precision) entry would look like a [P1] conflict purely from a precision
+  difference that was never a real one - the original test fixtures used whole-second timestamps and
+  never exercised this. Fixed by truncating `createdAt` to microseconds before both the write and the
+  conflict-comparison in `JdbcArtifactRepository` (mirroring `JdbcRunStore`'s own precedent for
+  `Run`'s timestamps). A new `JdbcArtifactRepositoryTest` case uses a real nanosecond-precision
+  literal and asserts both the round-tripped value and a repeated re-ingest of the exact same entry.
+
+Verified after all fixes: full gate green throughout (root `test`, `runner-contract`,
+`runner-listener`, `runner-service` `test`, `databaseIntegrationTest` - a stale
+`RunnerSchemaMigrationTest` assertion hardcoding "1 migration executed" updated to 2 once `V2`
+landed), `spotlessCheck`/`git diff --check` clean. Verified live again (`localPostgresUp` + `bootRun`
++ a real `FIXTURE` run): artifacts still appeared while `RUNNING`, no `X-Artifacts-Ingestion-Incomplete`
+header on the normal (successful-ingestion) path, and `runs.artifacts_ingestion_incomplete = false`
+confirmed directly via `psql` for that run.
+
+**D2.5 - Restart recovery - DONE 2026-09-06.** Per the "Restart behavior" section above:
+
+- **New `RunRecoveryService`** (`@Component implements ApplicationRunner`): on startup, loads every
+  non-terminal `Run` (see `RunLifecycleStore#findNonTerminal`, added by the review round below) and
+  recovers each one to `ERROR` via `RunLifecycleCoordinator#finishIfLive` - the exact same one-transaction
+  status+event commit every other terminal transition already uses, so the "status and its
+  `RUN_FINISHED` event share a transaction" invariant applies to a recovery-produced transition too,
+  with no separate write path. No attempt is made to reattach to the run's old external process - it
+  is presumed gone, per the architecture rule above.
+- **Readiness gate, not a startup-ordering assumption**: `ApplicationRunner` runs after the context
+  refreshes, which is *after* Tomcat has already opened its listening socket - so the socket itself
+  cannot be held closed during recovery. Instead, an `AtomicBoolean recoveryComplete` (set in a
+  `finally` block once the pass finishes, success or failure) backs a `requireRecoveryComplete()`
+  method that both `RunService#submit` and `RunEventStreamController#stream` call before doing
+  anything else, throwing a new `RunnerRecoveringException` mapped to `503` by `RunExceptionHandler`
+  - exactly mirroring the existing `RunnerDegradedException` pattern. Read-only endpoints
+  (`GET /runs`, `GET /runs/{id}`, log/artifact downloads) are deliberately left ungated, per the
+  architecture doc's own precise scope naming only `submit`/SSE-subscribe.
+- **Idempotent by construction, no extra bookkeeping**: a run already recovered to `ERROR` on a
+  previous startup is already terminal, so a later restart's pass filters it out the same way any
+  other terminal run is - never a second `RUN_FINISHED`.
+- **One run's own recovery failure never blocks the rest of the pass, but does fail the pass as a
+  whole** (revised by the review round below - the original version instead swallowed every failure
+  and always marked recovery complete, which was the bug): a per-run `try/catch` around each
+  `finishIfLive` call logs the failure and continues to the next run rather than stopping early, but
+  the pass only ever marks `recoveryComplete = true` once every run in it actually succeeded.
+- **New `RunRecoveryServiceTest`** (6 cases, final count after the review round below): every
+  non-terminal status (`QUEUED`/`STARTING`/`RUNNING`) recovers to `ERROR` with the expected detail
+  and a trailing `RUN_FINISHED(ERROR)`, while an already-`SUCCEEDED` run is left completely untouched
+  (same status, same event count); a second recovery pass is a no-op; `requireRecoveryComplete()`
+  throws before the pass has run and stops throwing once it has; a run whose own recovery attempt is
+  made to fail still lets every other run in the same pass recover, but fails the pass as a whole and
+  keeps `requireRecoveryComplete()` rejecting traffic; a failure loading the non-terminal set itself
+  has the same fail-closed effect.
+- **Existing-test rewiring**: `RunService`/`RunEventStreamController` both gained a
+  `RunRecoveryService` constructor parameter; `RunServiceTest`'s three direct-construction call sites
+  use a new `recoveryAlreadyComplete(store, lifecycle)` helper (builds a real `RunRecoveryService` and
+  immediately calls `.run(null)` against an empty/all-terminal store so it completes instantly);
+  `RunEventStreamControllerTest`/`OpenApiContractTest`/`ServerBindingTest` add a
+  `@MockitoBean RunRecoveryService` (a safe no-op by default, since none of their scenarios stub
+  `requireRecoveryComplete()` to throw).
+
+Verified live (`localPostgresUp` + `bootRun`, real crash/restart cycle, not just the automated
+suite): submitted a real `PUBLIC`/`SMOKE` run, confirmed it reached `RUNNING` via
+`GET /api/v1/runs/{id}`, then force-killed the `bootRun` JVM (`taskkill /F`, simulating a crash mid-run,
+no graceful shutdown). Restarting `bootRun` logged `Recovered 1 non-terminal run(s) to ERROR on
+startup`; the run's status was `ERROR` with the exact expected detail text, and its SSE event history
+showed the complete, un-truncated timeline (`RUN_QUEUED` -> `RUN_STARTED` -> the two `TEST_STARTED`
+events already committed before the crash -> a trailing `RUN_FINISHED(ERROR)`) - proving recovery
+reuses the same durable event history rather than replacing it. A third restart (no crash this time,
+an ordinary clean restart of an already-`ERROR` run) logged no "Recovered" line at all and left the
+event stream at the same 5 events - confirmed idempotent live, not just in the unit test. `GET
+/api/v1/runs` (a read-only endpoint) continued to work throughout, including immediately after the
+crash-restart.
+
+**D2.5 review round (2026-09-06) - two P1s and two P2s, all fixed.** A review of the happy-path
+implementation above found real gaps in the failure path and in recovery's own read cost:
+
+- **[P1] A recovery failure used to open the gate, not keep it closed.** The original version
+  logged and swallowed both one run's own `finishIfLive` failure and a total `findAll()` failure,
+  then unconditionally set `recoveryComplete = true` in a `finally` block regardless - letting the
+  service accept new submissions, cancellations, and SSE subscriptions while a stale non-terminal
+  run sat un-reconciled, exactly the state the gate exists to prevent. Fixed: `RunRecoveryService`
+  now still attempts every run in the pass even after one fails (collecting failures rather than
+  stopping early), never sets `recoveryComplete` if any run failed to recover or if loading the
+  non-terminal set itself failed, and throws out of `ApplicationRunner#run` in either case - a
+  deliberate choice this time, not an accepted side effect. An `ApplicationRunner` throwing fails
+  the whole application's startup; `deploy/docker-compose.yml`'s existing `restart: unless-stopped`
+  policy then restarts the process, which retries the pass from scratch. Every run that did
+  successfully recover before the failure is already durably `ERROR` (its own transaction already
+  committed), so the retry only ever has the genuinely-still-failing run(s) left to attempt. The
+  previously fail-open unit test was inverted to assert the new fail-closed contract (it now expects
+  `run()` to throw and `requireRecoveryComplete()` to keep rejecting afterward), and a new
+  `aFailureLoadingTheNonTerminalRunsFailsThePassAndKeepsTheGateClosed` unit test covers the
+  load-failure half of the same contract.
+- **[P1] `cancel()` was not gated.** Tomcat already accepts connections while `ApplicationRunner`
+  recovery is still executing; a cancel request landing in that window could reach a stale run this
+  fresh JVM has no `ActiveRun` tracking for, throwing an `IllegalStateException` that surfaced as a
+  raw `500` instead of a clear `503`. Fixed by calling `recoveryService.requireRecoveryComplete()` at
+  the very start of `RunService#cancel`, mirroring `submit`'s own gate exactly - both mutating
+  endpoints are now genuinely closed during the recovery window, not just one of them.
+  `RunController`'s `cancelRun` `503` doc and a new `RunControllerTest` regression case
+  (`cancelReturns503WhenTheRunnerIsStillRecoveringFromARestart`) lock this in.
+- **[P2] Startup recovery used to load the whole run history.** `findAll()` loads every historical
+  run and its `CUSTOM` selections just to discard the terminal majority of them in Java - recovery
+  time grew with the whole run history, not with the (normally tiny) number of runs actually left to
+  recover. Fixed with a new `RunLifecycleStore#findNonTerminal` method, backed by a new partial index
+  (`V3__add_runs_non_terminal_partial_index.sql`) that stays tiny regardless of how large the
+  terminal run history grows, since only non-terminal rows are ever indexed - see the follow-up
+  review round below for the query/index-shape corrections this first version still needed.
+  `RunRecoveryService` now calls this instead of `findAll` plus a Java-side `isTerminal()` filter.
+- **[P2] No automated PostgreSQL acceptance test for recovery.** Every existing
+  `RunRecoveryServiceTest` case ran against `FakeRunLifecycleStore` only - the real behavior against a
+  real Postgres (row locking, the new partial-index-backed query, a real committed transaction per
+  recovered run) had only ever been proven by hand, which never repeats in CI. Fixed with a new
+  `RunRecoveryServiceJdbcAcceptanceTest` (`databaseIntegrationTest`) against a real `JdbcRunStore` -
+  see the follow-up review round below for how its own fail-closed case was itself corrected to
+  force a genuine database-level failure.
+
+Verified after all fixes: full gate green (root `test`, `runner-contract`, `runner-listener`,
+`runner-service` `test` and `databaseIntegrationTest` - `RunnerSchemaMigrationTest`'s migration-count
+assertion updated to 3 once `V3` landed), `spotlessCheck`/`git diff --check` clean. Verified the
+fail-closed path live, beyond the automated suites: submitted a run, force-killed `bootRun` while it
+was still `RUNNING`, then installed a temporary Postgres trigger that raises an exception on exactly
+that run's own recovery `UPDATE ... SET status = 'ERROR'` before restarting - `bootRun` failed to
+start (`IllegalStateException: Startup run-recovery pass failed to recover run(s) [...]`), Spring
+Boot logged `Application run failed`, Tomcat/HikariCP shut back down, and the process exited
+non-zero with no listening socket at all (`curl` connection refused) - not a silently-up service
+serving a permanent `503`. Removing the trigger and restarting again then recovered cleanly
+(`Recovered 1 non-terminal run(s) to ERROR on startup`), and the service accepted new submissions
+immediately afterward, confirming the retry-after-restart path genuinely works end to end, not just
+in principle.
+
+**D2.5 hardening round (2026-09-06) - two P2s and one P3, all fixed.** A follow-up review confirmed
+the fail-closed correctness fixes above were sound and found no new P1s, but flagged two hardening
+gaps in the P2/P2 work above plus one observability gap:
+
+- **[P2] The parameterized query might not use the partial index.** `findNonTerminal`'s original
+  query used `status IN (?, ?, ?)` - PostgreSQL's own partial-index documentation is explicit that
+  predicate matching happens during planning, against constant expressions, and a parameterized
+  condition cannot be reliably proven to imply a partial index's own literal predicate, especially
+  once the planner switches a prepared statement to a generic plan. Since the three statuses here
+  are a fixed part of the recovery protocol, never caller-supplied, `JdbcRunStore#findNonTerminal`
+  now builds the same literal `IN ('QUEUED', 'STARTING', 'RUNNING')` list the index predicate itself
+  uses - no bind parameters for this clause at all. The index itself was also re-keyed: it was
+  originally `ON runs (status) WHERE status IN (...)`, which could only use the index to satisfy the
+  `WHERE` clause and still needed a separate sort for `ORDER BY requested_at`; re-keyed to
+  `ON runs (requested_at) WHERE status IN (...)` (edited directly in `V3`, since it had not yet
+  shipped to any real deployment - same rule `V1`'s own migration already documents), so the index
+  can now satisfy the ordering too. A new `RunRecoveryServiceJdbcAcceptanceTest` case
+  (`findNonTerminalUsesThePartialIndex`) runs a real `EXPLAIN` against the query and asserts the plan
+  actually names `idx_runs_non_terminal`, rather than trusting the fix by inspection alone.
+- **[P2] The fail-closed acceptance test never triggered a real database failure.** The
+  `RunRecoveryServiceJdbcAcceptanceTest` fail-closed case used a wrapping `RunLifecycleStore` double
+  that threw before `JdbcRunStore` or PostgreSQL ever saw the call - it only proved
+  `RunRecoveryService` tolerates an exception from some store, not the scenario its own name
+  promised: a real recovery `UPDATE`/event `INSERT` transaction failing at the database level. Fixed
+  by installing a genuine, temporary Postgres trigger (the same technique the live verification
+  above already used, and the same established idiom
+  `JdbcRunStoreTest#aFailingRunsRowUpdateRollsBackTheAlreadyInsertedEventToo` already uses for a
+  different scenario) that rejects exactly the bad run's own recovery `UPDATE`, always removed in a
+  `finally` block since this test class shares one static container across every method.
+- **[P3] The aggregate exception lost each run's own original cause.** `RunRecoveryService` only
+  collected failed run ids; the actual exceptions were reachable only through the earlier log lines,
+  not through the exception an observability tool might capture. Fixed with a small
+  `RecoveryFailure(runId, cause)` record collected alongside the id, with every collected cause
+  attached to the final aggregate `IllegalStateException` as a suppressed exception - the thrown
+  exception itself now carries the complete causal chain for every failed run, not just their ids,
+  without changing anything a client ever sees (this exception never crosses the HTTP boundary; it
+  fails application startup before any request is served).
+
+Verified after all fixes: full gate green (root `test`, `runner-contract`, `runner-listener`,
+`runner-service` `test` and `databaseIntegrationTest`, including the new `EXPLAIN`-backed index test
+and the real-trigger-backed fail-closed test), `spotlessCheck`/`git diff --check` clean.
+
 ## 4. Security boundary
 
 | Surface | Access |

@@ -5,9 +5,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.contract.ArtifactType;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
@@ -19,10 +16,8 @@ import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorrupt
 import dev.vlaisanem.automation.runner.service.exception.ArtifactNotFoundException;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -30,18 +25,23 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * D2.4 - rewritten against {@link FakeArtifactRepository}: {@link ArtifactService} now reads
+ * exclusively from {@link ArtifactRepository}, never the manifest file directly (that is {@link
+ * ArtifactIngestionService}'s own, separately-tested job). Tests that exercise {@link
+ * ArtifactService#download}'s filesystem-safety checks (symlink escape, non-regular file, missing
+ * file) still write real files to disk - that trust boundary is unchanged - but seed the
+ * corresponding {@link ArtifactManifestEntry} into the fake repository instead of writing a
+ * manifest line for it.
+ */
 class ArtifactServiceTest {
 
-  private static final ObjectMapper OBJECT_MAPPER =
-      new ObjectMapper()
-          .registerModule(new JavaTimeModule())
-          .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
   private static final String RUN_ID = "run-1";
 
   @Test
-  void listsEveryEntryForARunningRun(@TempDir Path artifactsRoot) throws IOException {
-    writeManifest(artifactsRoot, entry("a", "test-1"), entry("b", "test-2"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.RUNNING);
+  void listsEveryEntryForARunningRun(@TempDir Path artifactsRoot) {
+    ArtifactService service =
+        serviceFor(artifactsRoot, RunStatus.RUNNING, entry("a", "test-1"), entry("b", "test-2"));
 
     List<ArtifactManifestEntry> entries = service.listForRun(RUN_ID, null);
 
@@ -49,9 +49,9 @@ class ArtifactServiceTest {
   }
 
   @Test
-  void filtersByTestIdWhenGiven(@TempDir Path artifactsRoot) throws IOException {
-    writeManifest(artifactsRoot, entry("a", "test-1"), entry("b", "test-2"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.RUNNING);
+  void filtersByTestIdWhenGiven(@TempDir Path artifactsRoot) {
+    ArtifactService service =
+        serviceFor(artifactsRoot, RunStatus.RUNNING, entry("a", "test-1"), entry("b", "test-2"));
 
     List<ArtifactManifestEntry> entries = service.listForRun(RUN_ID, "test-2");
 
@@ -64,8 +64,7 @@ class ArtifactServiceTest {
     Path runRoot = artifactsRoot.resolve(RUN_ID);
     Files.createDirectories(runRoot);
     Files.writeString(runRoot.resolve("a.png"), "fake png bytes");
-    writeManifest(artifactsRoot, entry("a", "test-1"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED);
+    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED, entry("a", "test-1"));
 
     ArtifactDownload download = service.download(RUN_ID, "a");
 
@@ -74,20 +73,17 @@ class ArtifactServiceTest {
   }
 
   @Test
-  void downloadThrowsWhenTheArtifactIdIsUnknown(@TempDir Path artifactsRoot) throws IOException {
-    writeManifest(artifactsRoot, entry("a", "test-1"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED);
+  void downloadThrowsWhenTheArtifactIdIsUnknown(@TempDir Path artifactsRoot) {
+    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED, entry("a", "test-1"));
 
     assertThatThrownBy(() -> service.download(RUN_ID, "does-not-exist"))
         .isInstanceOf(ArtifactNotFoundException.class);
   }
 
   @Test
-  void downloadThrowsWhenTheManifestedFileDoesNotActuallyExistOnDisk(@TempDir Path artifactsRoot)
-      throws IOException {
-    // Manifest references a.png, but no such file was ever written to disk.
-    writeManifest(artifactsRoot, entry("a", "test-1"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED);
+  void downloadThrowsWhenTheManifestedFileDoesNotActuallyExistOnDisk(@TempDir Path artifactsRoot) {
+    // The repository has an entry for a.png, but no such file was ever written to disk.
+    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED, entry("a", "test-1"));
 
     assertThatThrownBy(() -> service.download(RUN_ID, "a"))
         .isInstanceOf(ArtifactNotFoundException.class);
@@ -104,8 +100,7 @@ class ArtifactServiceTest {
       throws IOException {
     Path runRoot = artifactsRoot.resolve(RUN_ID);
     Files.createDirectories(runRoot.resolve("a.png"));
-    writeManifest(artifactsRoot, entry("a", "test-1"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED);
+    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED, entry("a", "test-1"));
 
     assertThatThrownBy(() -> service.download(RUN_ID, "a"))
         .isInstanceOf(ArtifactManifestCorruptException.class)
@@ -139,8 +134,8 @@ class ArtifactServiceTest {
               + cannotCreateSymlink.getMessage());
       return;
     }
-    writeManifest(artifactsRoot, entry("escape", "test-1", "escape.png"));
-    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED);
+    ArtifactService service =
+        serviceFor(artifactsRoot, RunStatus.SUCCEEDED, entry("escape", "test-1", "escape.png"));
 
     assertThatThrownBy(() -> service.download(RUN_ID, "escape"))
         .isInstanceOf(ArtifactManifestCorruptException.class)
@@ -150,11 +145,13 @@ class ArtifactServiceTest {
                     .contains("symlink"));
   }
 
-  private static ArtifactService serviceFor(Path artifactsRoot, RunStatus status) {
+  private static ArtifactService serviceFor(
+      Path artifactsRoot, RunStatus status, ArtifactManifestEntry... entries) {
     RunService runService = mock(RunService.class);
     when(runService.find(RUN_ID)).thenReturn(runWithStatus(status));
-    return new ArtifactService(
-        runService, OBJECT_MAPPER, propertiesWithArtifactsDir(artifactsRoot));
+    FakeArtifactRepository repository = new FakeArtifactRepository();
+    repository.ingest(List.of(entries));
+    return new ArtifactService(runService, repository, propertiesWithArtifactsDir(artifactsRoot));
   }
 
   private static Run runWithStatus(RunStatus status) {
@@ -211,21 +208,5 @@ class ArtifactServiceTest {
         "image/png",
         1024,
         Instant.parse("2026-01-01T00:00:00Z"));
-  }
-
-  private static void writeManifest(Path artifactsRoot, ArtifactManifestEntry... entries)
-      throws IOException {
-    Path runRoot = artifactsRoot.resolve(RUN_ID);
-    Files.createDirectories(runRoot);
-    Path manifest = runRoot.resolve("manifest.jsonl");
-    StringBuilder content = new StringBuilder();
-    for (ArtifactManifestEntry entry : entries) {
-      content.append(OBJECT_MAPPER.writeValueAsString(entry)).append('\n');
-    }
-    Files.write(
-        manifest,
-        content.toString().getBytes(StandardCharsets.UTF_8),
-        StandardOpenOption.CREATE,
-        StandardOpenOption.WRITE);
   }
 }

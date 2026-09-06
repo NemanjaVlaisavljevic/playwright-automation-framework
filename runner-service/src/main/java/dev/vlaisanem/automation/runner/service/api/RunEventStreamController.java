@@ -5,6 +5,7 @@ import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscriber;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscription;
+import dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.PreDestroy;
@@ -42,6 +43,7 @@ public class RunEventStreamController {
 
   private final RunService runService;
   private final RunEventBroker broker;
+  private final RunRecoveryService recoveryService;
   private final long heartbeatIntervalMillis;
   private final long emitterTimeoutMillis;
   private final ScheduledExecutorService heartbeatScheduler =
@@ -54,9 +56,13 @@ public class RunEventStreamController {
           });
 
   public RunEventStreamController(
-      RunService runService, RunEventBroker broker, RunnerProperties properties) {
+      RunService runService,
+      RunEventBroker broker,
+      RunRecoveryService recoveryService,
+      RunnerProperties properties) {
     this.runService = runService;
     this.broker = broker;
+    this.recoveryService = recoveryService;
     this.heartbeatIntervalMillis = properties.sseHeartbeatInterval().toMillis();
     this.emitterTimeoutMillis = properties.sseEmitterTimeout().toMillis();
   }
@@ -76,6 +82,9 @@ public class RunEventStreamController {
   public SseEmitter stream(
       @PathVariable String runId,
       @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId) {
+    // D2.5 - must never let a client subscribe to (and so possibly observe, mid-rewrite) a stale
+    // non-terminal run RunRecoveryService's own startup pass hasn't finished reconciling yet.
+    recoveryService.requireRecoveryComplete();
     runService.find(runId); // 404s via RunNotFoundException for an unknown runId
     long afterSequence = parseLastEventId(lastEventId);
 

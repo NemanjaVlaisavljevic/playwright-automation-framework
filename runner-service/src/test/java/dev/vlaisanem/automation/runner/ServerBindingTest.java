@@ -2,6 +2,7 @@ package dev.vlaisanem.automation.runner;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -30,6 +31,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 class ServerBindingTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
+  @MockitoBean private ArtifactRepository artifactRepository;
 
   @Value("${server.address}")
   private String configuredAddress;

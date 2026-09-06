@@ -1,0 +1,16 @@
+-- D2.5 review (docs/DEPLOYMENT_ARCHITECTURE.md's "Restart behavior" section) - backs
+-- JdbcRunStore#findNonTerminal, the query RunRecoveryService's startup pass runs to find every
+-- run left to recover. A partial index (rather than a plain index on the full status column)
+-- stays tiny and cheap to maintain regardless of how large the run history grows, since only
+-- QUEUED/STARTING/RUNNING rows are ever indexed - the terminal majority of runs, which this query
+-- never matches, contributes nothing to it.
+--
+-- Reviewed once already (2026-09-06), before this migration had shipped to any real deployment, and
+-- corrected directly in this same V3 file rather than a follow-up V4 (only appropriate this early -
+-- see V1's own note on the same rule). The original version keyed the index on `status`; the
+-- query's own `ORDER BY requested_at` could then only use the index to satisfy the WHERE clause and
+-- still needed a separate sort step. Keying on `requested_at` instead lets PostgreSQL walk the
+-- index in already-sorted order and skip the sort entirely - confirmed via EXPLAIN against a real
+-- table (see JdbcRunStoreTest/RunRecoveryServiceJdbcAcceptanceTest's own databaseIntegrationTest
+-- Postgres).
+CREATE INDEX idx_runs_non_terminal ON runs (requested_at) WHERE status IN ('QUEUED', 'STARTING', 'RUNNING');

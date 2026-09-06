@@ -2,6 +2,7 @@ package dev.vlaisanem.automation.runner.service.events;
 
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
@@ -57,11 +58,16 @@ public class RunEventBroker implements RunEventAppender {
 
   private final RunLifecycleStore store;
   private final RunEventHub hub;
+  private final ArtifactIngestionService artifactIngestionService;
   private final RunLockStripes lockStripes = new RunLockStripes();
 
-  public RunEventBroker(RunLifecycleStore store, RunnerProperties properties) {
+  public RunEventBroker(
+      RunLifecycleStore store,
+      RunnerProperties properties,
+      ArtifactIngestionService artifactIngestionService) {
     this.store = store;
     this.hub = new RunEventHub(properties.sseMaxSubscribers());
+    this.artifactIngestionService = artifactIngestionService;
   }
 
   /**
@@ -114,6 +120,17 @@ public class RunEventBroker implements RunEventAppender {
    * throwing contract (a {@link RunEventJournalConflictException} once the run's timeline is
    * closed) even though the store itself returns an empty {@link Optional} for that case, so {@code
    * ListenerEventIngestor} needs no changes at all.
+   *
+   * <p>D2.4 - a {@code TEST_FAILED}/{@code TEST_ABORTED} event additionally triggers an incremental
+   * {@link ArtifactIngestionService} pass for this run, <em>before</em> {@code hub.publish}, under
+   * the same per-run lock (a review finding, correcting an earlier version of this method that ran
+   * ingestion after publishing and after releasing the lock): a client that invalidates its
+   * artifacts query the instant it observes {@code TEST_FAILED}/{@code TEST_ABORTED} over SSE must
+   * never be able to win that race and see an empty list, with no further chance to refresh before
+   * {@code RUN_FINISHED}. Running ingestion first, still inside the lock, guarantees the artifact
+   * metadata is already durably ingested by the time any subscriber can possibly observe this event
+   * at all - see {@link ArtifactIngestionService}'s own Javadoc for why this call can never itself
+   * fail this method regardless.
    */
   @Override
   public RunnerEvent append(String runId, LongFunction<RunnerEvent> eventFactory) {
@@ -125,6 +142,9 @@ public class RunEventBroker implements RunEventAppender {
                   () ->
                       new RunEventJournalConflictException(
                           "Run " + runId + " no longer accepts events"));
+      if (event.type() == EventType.TEST_FAILED || event.type() == EventType.TEST_ABORTED) {
+        artifactIngestionService.ingestAvailableEntries(runId, false);
+      }
       hub.publish(event);
       return event;
     }

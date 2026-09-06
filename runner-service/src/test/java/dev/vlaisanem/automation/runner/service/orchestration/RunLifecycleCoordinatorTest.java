@@ -3,9 +3,12 @@ package dev.vlaisanem.automation.runner.service.orchestration;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
+import dev.vlaisanem.automation.runner.service.artifacts.FakeArtifactRepository;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
@@ -42,8 +45,9 @@ class RunLifecycleCoordinatorTest {
   private static final Instant NOW = Instant.parse("2026-08-30T12:00:00Z");
 
   private final FakeRunLifecycleStore store = new FakeRunLifecycleStore();
-  private final RunEventBroker broker = new RunEventBroker(store, testProperties());
-  private final RunLifecycleCoordinator coordinator = new RunLifecycleCoordinator(broker);
+  private final RunEventBroker broker = newBroker(store);
+  private final RunLifecycleCoordinator coordinator =
+      new RunLifecycleCoordinator(broker, noopArtifactIngestionService());
 
   @Test
   void queueSavesTheRunAndEmitsRunQueuedFirst() {
@@ -60,7 +64,7 @@ class RunLifecycleCoordinatorTest {
   void aFailingQueueWriteLeavesNoRunBehind() {
     RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_QUEUED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(new RunEventBroker(failingStore, testProperties()));
+        new RunLifecycleCoordinator(newBroker(failingStore), noopArtifactIngestionService());
 
     assertThatThrownBy(
             () -> failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW))
@@ -109,7 +113,7 @@ class RunLifecycleCoordinatorTest {
   void aFailingRunStartedWriteLeavesTheRunInStartingUnchanged() {
     RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_STARTED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(new RunEventBroker(failingStore, testProperties()));
+        new RunLifecycleCoordinator(newBroker(failingStore), noopArtifactIngestionService());
     failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
     failingCoordinator.markStarting("run-1", NOW);
 
@@ -191,7 +195,7 @@ class RunLifecycleCoordinatorTest {
   void aFailingRunFinishedWriteLeavesTheRunRunningNeverSucceeded() {
     RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_FINISHED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(new RunEventBroker(failingStore, testProperties()));
+        new RunLifecycleCoordinator(newBroker(failingStore), noopArtifactIngestionService());
     failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
     failingCoordinator.markStarting("run-1", NOW);
     failingCoordinator.markRunning("run-1", NOW);
@@ -288,6 +292,23 @@ class RunLifecycleCoordinatorTest {
       Thread.currentThread().interrupt();
       throw new IllegalStateException(exception);
     }
+  }
+
+  private static RunEventBroker newBroker(RunLifecycleStore store) {
+    return new RunEventBroker(store, testProperties(), noopArtifactIngestionService());
+  }
+
+  /**
+   * None of this test class's scenarios ever append a {@code TEST_FAILED}/{@code TEST_ABORTED}
+   * event (this class only exercises lifecycle transitions, never the {@code TEST_*}/{@code STEP_*}
+   * append path), so {@link RunEventBroker}'s own D2.4 artifact-ingestion hook never actually fires
+   * here - a real {@link ArtifactIngestionService} wired to an in-memory {@link
+   * FakeArtifactRepository} satisfies the constructor without needing a real manifest file or
+   * database.
+   */
+  private static ArtifactIngestionService noopArtifactIngestionService() {
+    return new ArtifactIngestionService(
+        new ObjectMapper(), new FakeArtifactRepository(), testProperties());
   }
 
   /**

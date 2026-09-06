@@ -4,9 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionOutcome;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
+import dev.vlaisanem.automation.runner.service.artifacts.FakeArtifactRepository;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
@@ -178,7 +182,7 @@ class RunEventBrokerTest {
         List.of(),
         seq -> RunnerEvent.runQueued("run-1", seq, NOW)); // pre-existing
     BlockingLifecycleStore blockingStore = new BlockingLifecycleStore(store);
-    RunEventBroker broker = new RunEventBroker(blockingStore, testProperties());
+    RunEventBroker broker = newBroker(blockingStore);
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     ExecutorService executor = Executors.newFixedThreadPool(2);
     try {
@@ -297,12 +301,75 @@ class RunEventBrokerTest {
     assertThat(subscriber.completedLatch.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
+  /**
+   * [P1] fix - {@code append} used to call {@code hub.publish} before artifact ingestion, and only
+   * after releasing the per-run lock: a client that invalidates its artifacts query the instant it
+   * observes {@code TEST_FAILED}/{@code TEST_ABORTED} over SSE could win that race and see an empty
+   * list, with no further chance to refresh before {@code RUN_FINISHED}. Proves the fix
+   * deterministically: a blocking {@link ArtifactIngestionService} holds ingestion open, and while
+   * it does, a subscriber already registered for live events must not have received the {@code
+   * TEST_FAILED} event yet - only once ingestion is released does the event actually arrive.
+   */
+  @Test
+  void appendDoesNotPublishATestFailedEventUntilArtifactIngestionCompletes() throws Exception {
+    BlockingArtifactIngestionService blockingIngestion = new BlockingArtifactIngestionService();
+    RunEventBroker broker =
+        new RunEventBroker(new FakeRunLifecycleStore(), testProperties(), blockingIngestion);
+    queue(broker, "run-1");
+    startRunning(broker, "run-1");
+    RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
+    broker.replayAndSubscribe("run-1", 0, subscriber);
+    awaitReceivedCount(subscriber, 2); // RUN_QUEUED, RUN_STARTED already delivered
+
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      Future<RunnerEvent> appending =
+          executor.submit(
+              () ->
+                  broker.append(
+                      "run-1",
+                      seq ->
+                          RunnerEvent.testFailed(
+                              "run-1", seq, NOW, "test-1", "Some test", "boom")));
+      assertThat(blockingIngestion.entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // Ingestion is still blocked - the subscriber, already registered for live events, must not
+      // have received TEST_FAILED yet.
+      Thread.sleep(200);
+      assertThat(subscriber.received)
+          .extracting(RunnerEvent::type)
+          .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED);
+
+      blockingIngestion.release.countDown();
+      appending.get(5, TimeUnit.SECONDS);
+
+      awaitReceivedCount(subscriber, 3);
+      assertThat(subscriber.received)
+          .extracting(RunnerEvent::type)
+          .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED, EventType.TEST_FAILED);
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
   private RunEventBroker newBroker() {
     return newBroker(new FakeRunLifecycleStore());
   }
 
   private RunEventBroker newBroker(RunLifecycleStore store) {
-    return new RunEventBroker(store, testProperties());
+    return new RunEventBroker(store, testProperties(), noopArtifactIngestionService());
+  }
+
+  /**
+   * None of this test class's scenarios ever append a {@code TEST_FAILED}/{@code TEST_ABORTED}
+   * event (only {@code TEST_STARTED}, via {@link #appendTestEvent}), so {@link RunEventBroker}'s
+   * own D2.4 artifact-ingestion hook never actually fires here - a real {@link
+   * ArtifactIngestionService} wired to an in-memory {@link FakeArtifactRepository} satisfies the
+   * constructor without needing a real manifest file or database.
+   */
+  private ArtifactIngestionService noopArtifactIngestionService() {
+    return new ArtifactIngestionService(
+        new ObjectMapper(), new FakeArtifactRepository(), testProperties());
   }
 
   private void queue(RunEventBroker broker, String runId) {
@@ -345,7 +412,7 @@ class RunEventBrokerTest {
    * A minimal-but-valid properties object for constructing a broker directly - only {@code
    * sseMaxSubscribers()} is ever read from it.
    */
-  private RunnerProperties testProperties() {
+  private static RunnerProperties testProperties() {
     return new RunnerProperties(
         ".",
         Duration.ofSeconds(30),
@@ -362,6 +429,32 @@ class RunEventBrokerTest {
         10_000,
         Duration.ofSeconds(15),
         Duration.ofMinutes(10));
+  }
+
+  /**
+   * Test double that blocks inside {@link #ingestAvailableEntries} until released, so a test can
+   * deterministically prove {@link RunEventBroker#append}'s own ordering guarantee (ingest, then
+   * publish, under the same lock) - not just usually working out under timing that happens to favor
+   * it.
+   */
+  private static final class BlockingArtifactIngestionService extends ArtifactIngestionService {
+    private final CountDownLatch entered = new CountDownLatch(1);
+    private final CountDownLatch release = new CountDownLatch(1);
+
+    BlockingArtifactIngestionService() {
+      super(new ObjectMapper(), new FakeArtifactRepository(), testProperties());
+    }
+
+    @Override
+    public ArtifactIngestionOutcome ingestAvailableEntries(String runId, boolean runTerminal) {
+      entered.countDown();
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return ArtifactIngestionOutcome.SUCCEEDED;
+    }
   }
 
   /**
@@ -413,6 +506,11 @@ class RunEventBrokerTest {
     @Override
     public List<Run> findAll() {
       return delegate.findAll();
+    }
+
+    @Override
+    public List<Run> findNonTerminal() {
+      return delegate.findNonTerminal();
     }
 
     @Override

@@ -10,6 +10,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
+import dev.vlaisanem.automation.runner.service.artifacts.FakeArtifactRepository;
 import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
 import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy.DeploymentProfile;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
@@ -74,6 +76,34 @@ class RunServiceTest {
       new ObjectMapper()
           .registerModule(new JavaTimeModule())
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+  /**
+   * None of this class's scenarios ever produce a real {@code TEST_FAILED}/{@code TEST_ABORTED}/
+   * {@code RUN_FINISHED} manifest to ingest, so {@link RunEventBroker}'s and {@link
+   * RunLifecycleCoordinator}'s own D2.4 artifact-ingestion hooks never do anything observable here
+   * - a real {@link ArtifactIngestionService} wired to an in-memory {@link FakeArtifactRepository}
+   * satisfies each constructor without needing a real manifest file or database.
+   */
+  private static ArtifactIngestionService noopArtifactIngestionService(
+      RunnerProperties properties) {
+    return new ArtifactIngestionService(OBJECT_MAPPER, new FakeArtifactRepository(), properties);
+  }
+
+  /**
+   * D2.5 - {@code RunService#submit} now requires {@link
+   * RunRecoveryService#requireRecoveryComplete} to have already passed. None of this class's
+   * scenarios exercise recovery itself (that lives in {@code RunRecoveryServiceTest}), so this runs
+   * the real, one-time recovery pass immediately against the given (already fully set up)
+   * store/coordinator - against an empty or already-terminal-only store, it finds nothing to
+   * recover and completes instantly, exactly as it would against a real fresh Postgres with no
+   * stale runs.
+   */
+  private static RunRecoveryService recoveryAlreadyComplete(
+      RunLifecycleStore store, RunLifecycleCoordinator lifecycle) {
+    RunRecoveryService recoveryService = new RunRecoveryService(store, lifecycle);
+    recoveryService.run(null);
+    return recoveryService;
+  }
 
   private RunService service;
   private FakeRunLifecycleStore store;
@@ -666,8 +696,10 @@ class RunServiceTest {
             Duration.ofSeconds(15),
             Duration.ofMinutes(10));
     store = new FakeRunLifecycleStore();
-    RunEventBroker broker = new RunEventBroker(store, properties);
-    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(broker);
+    RunEventBroker broker =
+        new RunEventBroker(store, properties, noopArtifactIngestionService(properties));
+    RunLifecycleCoordinator lifecycle =
+        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties));
     ListenerEventIngestorFactory blockingIngestorFactory =
         new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties) {
           @Override
@@ -681,6 +713,7 @@ class RunServiceTest {
         new RunService(
             store,
             lifecycle,
+            recoveryAlreadyComplete(store, lifecycle),
             launcher,
             blockingIngestorFactory,
             new TestCatalogService(properties, OBJECT_MAPPER),
@@ -1019,8 +1052,10 @@ class RunServiceTest {
             10_000,
             Duration.ofSeconds(15),
             Duration.ofMinutes(10));
-    RunEventBroker broker = new RunEventBroker(lifecycleStore, properties);
-    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(broker);
+    RunEventBroker broker =
+        new RunEventBroker(lifecycleStore, properties, noopArtifactIngestionService(properties));
+    RunLifecycleCoordinator lifecycle =
+        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties));
     ListenerEventIngestorFactory ingestorFactory =
         new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties);
     if (lifecycleStore instanceof FakeRunLifecycleStore fake) {
@@ -1029,6 +1064,7 @@ class RunServiceTest {
     return new RunService(
         lifecycleStore,
         lifecycle,
+        recoveryAlreadyComplete(lifecycleStore, lifecycle),
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
@@ -1066,13 +1102,16 @@ class RunServiceTest {
             10_000,
             Duration.ofSeconds(15),
             Duration.ofMinutes(10));
-    RunEventBroker broker = new RunEventBroker(fakeStore, properties);
-    RunLifecycleCoordinator lifecycle = new RunLifecycleCoordinator(broker);
+    RunEventBroker broker =
+        new RunEventBroker(fakeStore, properties, noopArtifactIngestionService(properties));
+    RunLifecycleCoordinator lifecycle =
+        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties));
     ListenerEventIngestorFactory ingestorFactory =
         new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties);
     return new RunService(
         fakeStore,
         lifecycle,
+        recoveryAlreadyComplete(fakeStore, lifecycle),
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),

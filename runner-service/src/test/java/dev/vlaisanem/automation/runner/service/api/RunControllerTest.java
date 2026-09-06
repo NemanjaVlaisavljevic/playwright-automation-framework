@@ -22,6 +22,7 @@ import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceExce
 import dev.vlaisanem.automation.runner.service.exception.RunLogNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
+import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
 import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import java.nio.file.Files;
@@ -183,6 +184,18 @@ class RunControllerTest {
   }
 
   @Test
+  void createReturns503WhenTheRunnerIsStillRecoveringFromARestart() throws Exception {
+    when(runService.submit(any(), any(), any())).thenThrow(new RunnerRecoveringException());
+
+    mockMvc
+        .perform(
+            post("/api/v1/runs")
+                .contentType("application/json")
+                .content("{\"environment\":\"PUBLIC\",\"suite\":\"SMOKE\"}"))
+        .andExpect(status().isServiceUnavailable());
+  }
+
+  @Test
   void createReturns503WhenTheCanonicalEventJournalIsUnavailable() throws Exception {
     when(runService.submit(any(), any(), any()))
         .thenThrow(
@@ -237,6 +250,19 @@ class RunControllerTest {
     when(runService.processLog("run-1")).thenThrow(new RunLogNotFoundException("run-1"));
 
     mockMvc.perform(get("/api/v1/runs/run-1/log")).andExpect(status().isNotFound());
+  }
+
+  /**
+   * Regression test for the D2.5 review's finding: {@code cancel()} was not gated by {@link
+   * dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService}, so a cancel request
+   * arriving while the runner is still recovering non-terminal runs from a restart could reach a
+   * stale, no-longer-tracked run and surface as a raw {@code 500} instead of a clear {@code 503}.
+   */
+  @Test
+  void cancelReturns503WhenTheRunnerIsStillRecoveringFromARestart() throws Exception {
+    when(runService.cancel("run-1")).thenThrow(new RunnerRecoveringException());
+
+    mockMvc.perform(post("/api/v1/runs/run-1/cancel")).andExpect(status().isServiceUnavailable());
   }
 
   /**

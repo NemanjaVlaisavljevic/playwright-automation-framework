@@ -84,6 +84,7 @@ public class RunService {
 
   private final RunLifecycleStore store;
   private final RunLifecycleCoordinator lifecycle;
+  private final RunRecoveryService recoveryService;
   private final ProcessLauncher processLauncher;
   private final ListenerEventIngestorFactory ingestorFactory;
   private final TestCatalogService testCatalogService;
@@ -115,6 +116,7 @@ public class RunService {
   public RunService(
       RunLifecycleStore store,
       RunLifecycleCoordinator lifecycle,
+      RunRecoveryService recoveryService,
       ProcessLauncher processLauncher,
       ListenerEventIngestorFactory ingestorFactory,
       TestCatalogService testCatalogService,
@@ -122,6 +124,7 @@ public class RunService {
       RunnerProperties properties) {
     this.store = store;
     this.lifecycle = lifecycle;
+    this.recoveryService = recoveryService;
     this.processLauncher = processLauncher;
     this.ingestorFactory = ingestorFactory;
     this.testCatalogService = testCatalogService;
@@ -157,6 +160,7 @@ public class RunService {
   }
 
   public Run submit(Environment environment, Suite suite, List<String> testKeys) {
+    recoveryService.requireRecoveryComplete();
     if (availability.get() == Availability.DEGRADED) {
       throw new RunnerDegradedException(degradedSurvivingPids());
     }
@@ -210,6 +214,7 @@ public class RunService {
    * synchronously as {@code CANCELLED}, since no worker or process remains to acknowledge it.
    */
   public Run cancel(String runId) {
+    recoveryService.requireRecoveryComplete();
     Run current = find(runId);
     if (current.status().isTerminal()) {
       return current;

@@ -2,6 +2,7 @@ package dev.vlaisanem.automation.runner.service.orchestration;
 
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
@@ -38,9 +39,12 @@ import org.springframework.stereotype.Component;
 public class RunLifecycleCoordinator {
 
   private final RunEventBroker broker;
+  private final ArtifactIngestionService artifactIngestionService;
 
-  public RunLifecycleCoordinator(RunEventBroker broker) {
+  public RunLifecycleCoordinator(
+      RunEventBroker broker, ArtifactIngestionService artifactIngestionService) {
     this.broker = broker;
+    this.artifactIngestionService = artifactIngestionService;
   }
 
   /** Durably accepts a new run and emits its {@code RUN_QUEUED} - always the first event. */
@@ -94,6 +98,12 @@ public class RunLifecycleCoordinator {
    * Transitions to a terminal {@code status} and, only if that transition actually applied, emits
    * exactly one {@code RUN_FINISHED}. Returns whether the transition applied, mirroring {@link
    * RunEventBroker#transitionIfNonTerminal}.
+   *
+   * <p>D2.4 - runs {@link ArtifactIngestionService}'s final drain <em>before</em> the transition
+   * below, per docs/DEPLOYMENT_ARCHITECTURE.md's "Artifacts must ingest incrementally" section: a
+   * manifest entry for a test that failed without a screenshot capture, or any entry the last
+   * incremental {@code TEST_FAILED}/{@code TEST_ABORTED} pass hadn't yet seen, must already be
+   * ingested by the time a client observes {@code RUN_FINISHED} and queries this run's artifacts.
    */
   public boolean finishIfLive(
       String runId, RunStatus status, Integer exitCode, String detail, Instant now) {
@@ -103,6 +113,7 @@ public class RunLifecycleCoordinator {
       // undo it.
       throw new IllegalArgumentException("finishIfLive requires a terminal status, was: " + status);
     }
+    artifactIngestionService.ingestAvailableEntries(runId, true);
     RunOutcome outcome = RunEventValidation.outcomeFor(status);
     return broker
         .transitionIfNonTerminal(

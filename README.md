@@ -126,13 +126,14 @@ This is a working release candidate, not a production deployment - the boundarie
 deliberate scope decisions for this stage, not hidden defects, and Faza D (packaging, persistence,
 security, deployment) is where each of them gets addressed:
 
-- **A run still stuck `RUNNING` at the moment of a crash/restart is not yet reconciled** - run/event
-  history itself is now persisted to PostgreSQL (Faza D2) and survives a `runner-service` restart
-  intact (nothing is lost, and nothing needs re-indexing), but a run that was mid-flight when the
-  process died stays stuck at its last-known status rather than being marked `ERROR`/reconciled on
-  the next startup - that reconciliation is Faza D2.5's explicit job, not yet done.
-- **Artifacts (screenshots/traces/logs) are still local-disk-only** - `build/runner-artifacts/<runId>/`,
-  not yet in the database; artifact metadata persistence is Faza D2.4's job.
+- **A run stuck `RUNNING` at the moment of a crash/restart is now reconciled to `ERROR` on the next
+  startup (Faza D2.5)** - run/event history is persisted to PostgreSQL (Faza D2) and survives a
+  `runner-service` restart intact, and any run still `QUEUED`/`STARTING`/`RUNNING` when the process
+  comes back up is recovered to `ERROR` (with a same-transaction `RUN_FINISHED(ERROR)` event) before
+  the service accepts any new run submissions or SSE subscriptions - no manual reconciliation needed.
+- **Artifact metadata is now in PostgreSQL (Faza D2.4), but the files themselves stay local-disk-only** -
+  `build/runner-artifacts/<runId>/` (screenshots/traces/logs) is never inlined into the database,
+  by design; only the artifact list is served from Postgres now.
 - **Single-instance only** - one `runner-service` process, one in-process run queue. There is no
   clustering, leader election, or horizontal scaling.
 - **No authentication or authorization** - anyone who can reach the dashboard/API can launch,

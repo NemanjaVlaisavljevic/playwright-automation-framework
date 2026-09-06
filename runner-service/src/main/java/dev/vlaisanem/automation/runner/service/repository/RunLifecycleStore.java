@@ -62,6 +62,14 @@ public interface RunLifecycleStore {
   List<Run> findAll();
 
   /**
+   * Every run whose status is {@code QUEUED}/{@code STARTING}/{@code RUNNING} right now - the exact
+   * set {@code RunRecoveryService}'s startup pass needs, without paying for every already-terminal
+   * run's own history the way {@link #findAll} does. Never {@code null}; empty once nothing is left
+   * to recover.
+   */
+  List<Run> findNonTerminal();
+
+  /**
    * Every event recorded for {@code runId} with a sequence strictly greater than {@code
    * afterSequence}, in order. Empty if the run has no recorded events at all, or nothing new has
    * been recorded since {@code afterSequence}. Pass {@code 0} to read the full history.

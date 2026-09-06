@@ -1,9 +1,7 @@
 package dev.vlaisanem.automation.runner.service.artifacts;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
-import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactNotFoundException;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
@@ -16,23 +14,25 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 
 /**
- * Reads and safely resolves a run's artifacts, treating both the manifest file and its own entries
- * as untrusted input - see {@link ArtifactManifestReader} for the manifest's own trust boundary,
- * and {@link #resolveFile} for the filesystem one.
+ * Reads and safely resolves a run's artifacts. D2.4 - {@link #listForRun}/{@link #download} query
+ * the {@code artifacts} table via {@link ArtifactRepository} exclusively; the manifest file itself
+ * is no longer read here at all - {@link ArtifactIngestionService} is the sole component that still
+ * reads it, to keep {@code artifacts} populated. See {@link #resolveFile} for this class's own
+ * remaining trust boundary: an {@link ArtifactManifestEntry} read back from the database still
+ * originated from the manifest file, so its {@code relativePath} is treated exactly as untrusted as
+ * it always was.
  */
 @Service
 public class ArtifactService {
 
-  private static final String MANIFEST_FILE_NAME = "manifest.jsonl";
-
   private final RunService runService;
-  private final ArtifactManifestReader manifestReader;
+  private final ArtifactRepository repository;
   private final Path artifactsRootDir;
 
   public ArtifactService(
-      RunService runService, ObjectMapper objectMapper, RunnerProperties properties) {
+      RunService runService, ArtifactRepository repository, RunnerProperties properties) {
     this.runService = runService;
-    this.manifestReader = new ArtifactManifestReader(objectMapper);
+    this.repository = repository;
     this.artifactsRootDir = Path.of(properties.artifactsDir()).toAbsolutePath().normalize();
   }
 
@@ -42,13 +42,23 @@ public class ArtifactService {
    * {@code /} characters, which would make it an unusable REST path segment.
    */
   public List<ArtifactManifestEntry> listForRun(String runId, String testIdFilter) {
-    Run run = runService.find(runId);
-    List<ArtifactManifestEntry> entries =
-        manifestReader.read(manifestFileFor(runId), runId, run.status().isTerminal());
-    if (testIdFilter == null || testIdFilter.isBlank()) {
-      return entries;
-    }
-    return entries.stream().filter(entry -> testIdFilter.equals(entry.testId())).toList();
+    // find() alone is what 404s for an unknown runId - the returned Run itself is otherwise unused
+    // now that artifacts are read from Postgres directly, which needs no "is this run terminal"
+    // tolerance the way reading a still-being-appended manifest file directly used to.
+    runService.find(runId);
+    return repository.findForRun(runId, testIdFilter);
+  }
+
+  /**
+   * Whether {@code runId}'s artifact metadata may be incomplete because its final ingestion drain
+   * failed and has not yet been recovered by {@code ArtifactIngestionService}'s own bounded
+   * background reconciliation - lets {@link
+   * dev.vlaisanem.automation.runner.service.api.ArtifactController} distinguish "this run genuinely
+   * has zero artifacts" from "ingestion for this run has not finished yet" instead of conflating
+   * the two (a review finding).
+   */
+  public boolean isIngestionIncomplete(String runId) {
+    return repository.isIngestionIncomplete(runId);
   }
 
   public ArtifactDownload download(String runId, String artifactId) {
@@ -58,10 +68,6 @@ public class ArtifactService {
             .findFirst()
             .orElseThrow(() -> new ArtifactNotFoundException(runId, artifactId));
     return new ArtifactDownload(entry, resolveFile(runId, entry));
-  }
-
-  private Path manifestFileFor(String runId) {
-    return artifactsRootDir.resolve(runId).resolve(MANIFEST_FILE_NAME);
   }
 
   /**

@@ -1,0 +1,12 @@
+-- D2.4 review fix: a final artifact-ingestion drain (ArtifactIngestionService, run right before
+-- RUN_FINISHED - see docs/DEPLOYMENT_ARCHITECTURE.md's "Artifacts must ingest incrementally"
+-- section) that fails must leave a durable, queryable signal, not just a log line nobody reads
+-- again - a run reaching a terminal status with its artifact metadata still incomplete is a real
+-- data-integrity fact, not something the next request should have to guess at from an empty
+-- artifact list. ArtifactIngestionService's own bounded background reconciliation clears this flag
+-- once a later retry actually succeeds; until then, it lets the API distinguish "this run genuinely
+-- has zero artifacts" from "ingestion for this run has not finished yet" instead of conflating them.
+--
+-- A new versioned migration, not an edit to V1 - V1's own header comment already reserves in-place
+-- editing for before this schema's first real deployment; this is not that.
+ALTER TABLE runs ADD COLUMN artifacts_ingestion_incomplete BOOLEAN NOT NULL DEFAULT false;

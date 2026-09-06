@@ -65,7 +65,10 @@ class RunnerSchemaMigrationTest {
 
       MigrateResult first = freshFlyway.migrate();
       assertThat(first.success).isTrue();
-      assertThat(first.migrationsExecuted).isEqualTo(1);
+      // V1 (the four core tables) + V2 (D2.4's runs.artifacts_ingestion_incomplete column) + V3
+      // (D2.5's idx_runs_non_terminal partial index) - update this count whenever a new migration
+      // is added, same as the table/column list below.
+      assertThat(first.migrationsExecuted).isEqualTo(3);
       assertThat(tableNames(fresh))
           .containsExactlyInAnyOrder(
               "runs", "run_selected_tests", "run_events", "artifacts", "flyway_schema_history");

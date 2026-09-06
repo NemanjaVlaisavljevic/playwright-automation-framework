@@ -11,6 +11,7 @@ import dev.vlaisanem.automation.runner.service.exception.RunLogNotFoundException
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
+import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
 import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
 import dev.vlaisanem.automation.runner.service.orchestration.InvalidTestSelectionException;
 import org.slf4j.Logger;
@@ -66,6 +67,11 @@ public class RunExceptionHandler {
 
   @ExceptionHandler(RunnerDegradedException.class)
   public ProblemDetail handleDegraded(RunnerDegradedException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
+  }
+
+  @ExceptionHandler(RunnerRecoveringException.class)
+  public ProblemDetail handleRecovering(RunnerRecoveringException exception) {
     return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
   }
 

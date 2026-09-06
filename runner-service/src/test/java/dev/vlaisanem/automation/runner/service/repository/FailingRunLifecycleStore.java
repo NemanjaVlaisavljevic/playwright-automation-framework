@@ -70,6 +70,11 @@ public final class FailingRunLifecycleStore implements RunLifecycleStore {
   }
 
   @Override
+  public List<Run> findNonTerminal() {
+    return delegate.findNonTerminal();
+  }
+
+  @Override
   public List<RunnerEvent> readEventsAfter(String runId, long afterSequence) {
     return delegate.readEventsAfter(runId, afterSequence);
   }

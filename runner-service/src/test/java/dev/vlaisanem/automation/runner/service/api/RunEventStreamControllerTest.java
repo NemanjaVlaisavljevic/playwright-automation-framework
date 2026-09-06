@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -18,6 +19,8 @@ import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscriber;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
+import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
+import dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
@@ -45,6 +48,10 @@ class RunEventStreamControllerTest {
 
   @MockitoBean private RunEventBroker broker;
 
+  // D2.5 - requireRecoveryComplete() is a no-op on a plain Mockito mock (void method, nothing
+  // stubbed), so every test here proceeds exactly as it did before this dependency existed.
+  @MockitoBean private RunRecoveryService recoveryService;
+
   @Test
   void streamReturns404ForAnUnknownRunId() throws Exception {
     when(runService.find("missing")).thenThrow(new RunNotFoundException("missing"));
@@ -61,6 +68,13 @@ class RunEventStreamControllerTest {
         .thenThrow(
             new RunEventSubscriptionRejectedException(
                 "Maximum of 100 concurrent event subscribers reached"));
+
+    mockMvc.perform(get("/api/v1/runs/run-1/events")).andExpect(status().isServiceUnavailable());
+  }
+
+  @Test
+  void streamReturns503WhenTheRunnerIsStillRecoveringFromARestart() throws Exception {
+    doThrow(new RunnerRecoveringException()).when(recoveryService).requireRecoveryComplete();
 
     mockMvc.perform(get("/api/v1/runs/run-1/events")).andExpect(status().isServiceUnavailable());
   }

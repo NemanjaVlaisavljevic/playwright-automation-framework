@@ -139,6 +139,15 @@ public final class FakeRunLifecycleStore implements RunLifecycleStore {
   }
 
   @Override
+  public List<Run> findNonTerminal() {
+    return runs.values().stream()
+        .map(record -> record.run)
+        .filter(run -> !run.status().isTerminal())
+        .sorted(Comparator.comparing(Run::requestedAt))
+        .toList();
+  }
+
+  @Override
   public List<RunnerEvent> readEventsAfter(String runId, long afterSequence) {
     RunRecord record = runs.get(runId);
     if (record == null) {

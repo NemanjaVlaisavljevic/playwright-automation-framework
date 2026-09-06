@@ -67,14 +67,26 @@ public class ArtifactController {
                 schema = @Schema(implementation = ProblemDetail.class)))
   })
   @GetMapping("/{runId}/artifacts")
-  public List<ArtifactSummaryResponse> list(
+  public ResponseEntity<List<ArtifactSummaryResponse>> list(
       @PathVariable String runId,
       @Parameter(description = "Narrows the result to one test's own artifacts, if given.")
           @RequestParam(required = false)
           String testId) {
-    return artifactService.listForRun(runId, testId).stream()
-        .map(ArtifactSummaryResponse::from)
-        .toList();
+    List<ArtifactSummaryResponse> body =
+        artifactService.listForRun(runId, testId).stream()
+            .map(ArtifactSummaryResponse::from)
+            .toList();
+    ResponseEntity.BodyBuilder response = ResponseEntity.ok();
+    // D2.4 review finding - an empty body alone cannot distinguish "this run genuinely has zero
+    // artifacts" from "artifact ingestion for this run has not finished yet" (its final drain
+    // failed and a bounded background reconciliation hasn't recovered it - see
+    // ArtifactIngestionService). A response header, not a body-shape change: keeps this endpoint's
+    // existing array response (and generated OpenAPI schema) unchanged for every client that
+    // doesn't care about this distinction.
+    if (artifactService.isIngestionIncomplete(runId)) {
+      response.header("X-Artifacts-Ingestion-Incomplete", "true");
+    }
+    return response.body(body);
   }
 
   @Operation(operationId = "downloadRunArtifact")

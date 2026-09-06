@@ -8,6 +8,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
+import dev.vlaisanem.automation.runner.service.artifacts.FakeArtifactRepository;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
@@ -327,7 +329,19 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   private RunEventBroker newBroker(RunLifecycleStore delegateStore) {
-    return new RunEventBroker(delegateStore, testProperties());
+    return new RunEventBroker(delegateStore, testProperties(), noopArtifactIngestionService());
+  }
+
+  /**
+   * None of this class's acceptance scenarios ever append a {@code TEST_FAILED}/{@code
+   * TEST_ABORTED} event (only {@code TEST_STARTED}, via {@link #appendTestEvent}), so {@link
+   * RunEventBroker}'s own D2.4 artifact-ingestion hook never actually fires here - a real {@link
+   * ArtifactIngestionService} wired to an in-memory {@link FakeArtifactRepository} satisfies the
+   * constructor without needing a real manifest file.
+   */
+  private ArtifactIngestionService noopArtifactIngestionService() {
+    return new ArtifactIngestionService(
+        new ObjectMapper(), new FakeArtifactRepository(), testProperties());
   }
 
   private void queue(RunEventBroker broker, String runId) {
@@ -448,6 +462,11 @@ class RunEventBrokerJdbcAcceptanceTest {
     @Override
     public List<Run> findAll() {
       return delegate.findAll();
+    }
+
+    @Override
+    public List<Run> findNonTerminal() {
+      return delegate.findNonTerminal();
     }
 
     @Override

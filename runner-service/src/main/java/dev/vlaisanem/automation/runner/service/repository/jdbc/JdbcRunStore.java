@@ -266,6 +266,45 @@ public class JdbcRunStore implements RunLifecycleStore {
   }
 
   /**
+   * D2.5 review [P2] - the {@code IN (?, ?, ?)} form this originally used bound the three statuses
+   * as query parameters, which a generic prepared-statement plan (PostgreSQL's own planner may
+   * switch to one after a handful of executions) cannot reliably prove implies {@code
+   * idx_runs_non_terminal}'s own literal predicate - partial-index predicate matching happens
+   * during planning, against constant expressions, not parameter placeholders (see PostgreSQL's own
+   * partial indexes documentation). Since these three statuses are a fixed part of the recovery
+   * protocol, never caller-supplied, this literal {@code IN} list matches the migration's predicate
+   * exactly instead, so the planner can always use the index regardless of which plan it picks.
+   * Verified via {@code EXPLAIN} against a real table (see {@code
+   * RunRecoveryServiceJdbcAcceptanceTest}).
+   */
+  private static final String NON_TERMINAL_STATUS_LIST =
+      "'"
+          + RunStatus.QUEUED.name()
+          + "', '"
+          + RunStatus.STARTING.name()
+          + "', '"
+          + RunStatus.RUNNING.name()
+          + "'";
+
+  /**
+   * D2.5 - backs {@code RunRecoveryService}'s startup pass with a dedicated, indexed query (see
+   * {@code idx_runs_non_terminal}) instead of {@link #findAll} plus a Java-side filter, which would
+   * otherwise load every historical run's own {@code run_selected_tests} just to discard the
+   * terminal majority of them - recovery time would then grow with the whole run history instead of
+   * with the (normally tiny) number of runs actually left to recover.
+   */
+  @Override
+  public List<Run> findNonTerminal() {
+    List<RunRow> rows =
+        jdbcTemplate.query(
+            "SELECT * FROM runs WHERE status IN ("
+                + NON_TERMINAL_STATUS_LIST
+                + ") ORDER BY requested_at",
+            (rs, rowNum) -> toRunRow(rs));
+    return rows.stream().map(row -> row.toRun(selectedTestsFor(row.runId()))).toList();
+  }
+
+  /**
    * D2.3 - backs {@code RunEventBroker#replayAndSubscribe}'s replay half, reading from {@code
    * run_events} instead of the file-backed journal. Deserializes each row's own {@code payload}
    * (jsonb) back into a {@link RunnerEvent} via the same {@link ObjectMapper} every write goes

@@ -58,8 +58,9 @@ public class RunController {
     @ApiResponse(
         responseCode = "503",
         description =
-            "The run queue is full, the runner is degraded, or the canonical event"
-                + " journal is unavailable.",
+            "The run queue is full, the runner is degraded, the runner is still recovering"
+                + " non-terminal runs from a restart, or the canonical event journal is"
+                + " unavailable.",
         content =
             @Content(
                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
@@ -177,7 +178,9 @@ public class RunController {
                 schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "503",
-        description = "The runner is degraded or the canonical event journal is unavailable.",
+        description =
+            "The runner is degraded, the runner is still recovering non-terminal runs from a"
+                + " restart, or the canonical event journal is unavailable.",
         content =
             @Content(
                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,7 +42,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 // generated OpenAPI document, not the store's own behavior, and must never need a real Postgres to
 // even start. @MockitoBean below covers the other half: with no DataSource/JdbcTemplate/
 // TransactionTemplate beans, JdbcRunStore's own constructor could not be satisfied even if it were
-// still eligible to run - RunEventBroker/RunLifecycleCoordinator get a mock instead.
+// still eligible to run - RunEventBroker/RunLifecycleCoordinator get a mock instead. D2.4 adds the
+// exact same problem one level down: JdbcArtifactRepository also needs a JdbcTemplate, and
+// ArtifactService/ArtifactIngestionService/RunEventBroker/RunLifecycleCoordinator all now depend on
+// ArtifactRepository transitively - mocked here for the same reason.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
     properties =
@@ -51,6 +55,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 class OpenApiContractTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
+  @MockitoBean private ArtifactRepository artifactRepository;
 
   private static final List<String> EXPECTED_OPERATION_IDS =
       List.of(
