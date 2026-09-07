@@ -9,7 +9,10 @@ import { server } from "../../test/msw/server";
 import { RunLaunchForm } from "./RunLaunchForm";
 
 function renderForm(
-  props: Partial<{ capabilitiesRetryIntervalMs: number }> = {},
+  props: Partial<{
+    capabilitiesRetryIntervalMs: number;
+    csrfRetryIntervalMs: number;
+  }> = {},
 ) {
   return render(
     <QueryClientProvider client={createQueryClient()}>
@@ -68,6 +71,49 @@ describe("RunLaunchForm", () => {
     expect(
       await screen.findByRole("button", { name: "Run" }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * Regression test for the review finding: `canManageRuns` must also depend on the CSRF token
+   * actually being primed, not just on `currentUser.canManageRuns` - an admin whose CSRF priming
+   * is failing (backend unreachable at bootstrap) must not be able to submit a request that would
+   * only fail downstream with a 403 for a missing/invalid `X-XSRF-TOKEN` header. Proves the full
+   * recovery path end to end: priming fails -> submit is disabled -> priming recovers on its own
+   * -> submit becomes enabled -> the resulting request actually carries the real CSRF header value.
+   */
+  it("disables submit while CSRF priming is failing, then recovers and sends a valid X-XSRF-TOKEN header on submit", async () => {
+    const user = userEvent.setup();
+    document.cookie = "XSRF-TOKEN=test-token-value";
+    let capturedToken: string | null = null;
+    server.use(
+      http.get("/api/v1/auth/csrf", () => HttpResponse.error()),
+      http.post("/api/v1/runs", ({ request }) => {
+        capturedToken = request.headers.get("X-XSRF-TOKEN");
+        return HttpResponse.json(runResponse(), { status: 202 });
+      }),
+    );
+
+    renderForm({ csrfRetryIntervalMs: 20 });
+
+    const submitButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(submitButton).toBeDisabled());
+
+    // Overrides only the CSRF handler - the /api/v1/runs handler registered above stays active,
+    // since server.use() layers new handlers on top rather than clearing existing ones.
+    server.use(
+      http.get(
+        "/api/v1/auth/csrf",
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+    );
+
+    await waitFor(() => expect(submitButton).not.toBeDisabled());
+
+    await user.click(submitButton);
+
+    await waitFor(() => expect(capturedToken).toBe("test-token-value"));
+
+    document.cookie = "XSRF-TOKEN=; Max-Age=0";
   });
 
   it("populates the suite options from capabilities and submits the selected combination", async () => {

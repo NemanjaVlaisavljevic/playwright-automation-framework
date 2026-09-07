@@ -1,6 +1,7 @@
 package dev.vlaisanem.automation.runner;
 
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.config.RunnerSecurityProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -19,7 +20,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
  * and mock {@code RunLifecycleStore} - see their own class Javadoc.
  */
 @SpringBootApplication
-@EnableConfigurationProperties(RunnerProperties.class)
+@EnableConfigurationProperties({RunnerProperties.class, RunnerSecurityProperties.class})
 public class RunnerServiceApplication {
 
   public static void main(String[] args) {

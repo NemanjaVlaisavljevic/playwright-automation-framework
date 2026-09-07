@@ -162,6 +162,17 @@ check); capabilities only while it's in its error state (its data doesn't change
 there's nothing to gain polling it once loaded). Both intervals are accepted as optional props
 purely for test speed - the same pattern `App`'s optional `router` prop uses for isolation.
 
+**Authentication (D3.2)**: `src/api/auth-api.ts` is the same kind of hand-maintained, non-generated
+module as `getHealth` - `/api/v1/auth/me`/`/api/v1/auth/csrf` are deliberately kept out of the
+backend's OpenAPI document (a simple, stable, rarely-changing shape not worth
+`api:check:contract` churn). `runner-api.ts`'s exported `client` is wrapped in a `csrfAwareFetcher`
+(reads `src/api/csrf.ts`'s `getCsrfTokenFromCookie()` and attaches `X-XSRF-TOKEN` when present) so
+every mutating call the generated client makes - `createRun`/`cancelRun` today, anything added
+later - carries the header automatically, with no per-call-site change needed. `AuthControls`
+(`src/features/auth/`) primes the CSRF cookie once on mount and again after logout (a session
+rotates its CSRF token on both login and logout; login's own full-page redirect back to `/`
+re-triggers this same mount-time priming for the new session automatically).
+
 Both queries also set `refetchIntervalInBackground: true`. Verified live, not just in jsdom: with
 that flag left at its default (`false`), a real browser tab that is open but not the focused/visible
 one (`document.visibilityState === "hidden"`) never polls at all - TanStack Query pauses

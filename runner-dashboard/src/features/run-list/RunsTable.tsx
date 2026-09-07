@@ -3,10 +3,14 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { cancelRun, listRuns, type RunResponse } from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
-import { RunnerApiError } from "../../api/problem-detail";
+import {
+  RunnerApiError,
+  describePermissionError,
+} from "../../api/problem-detail";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { StatusBadge } from "../../components/ui/StatusBadge";
+import { useCanManageRuns } from "../auth/useCanManageRuns";
 import { formatLocalDateTime } from "../../domain/datetime";
 import { formatDuration, runDurationMs } from "../../domain/duration";
 import { isTerminalRunStatus } from "../../domain/run";
@@ -23,6 +27,7 @@ type SortDirection = "asc" | "desc";
 const ALL = "ALL";
 
 export function RunsTable({ pollIntervalMs = 2000 }: RunsTableProps = {}) {
+  const canManageRuns = useCanManageRuns();
   const runs = useQuery({
     queryKey: queryKeys.runs,
     queryFn: listRuns,
@@ -176,7 +181,11 @@ export function RunsTable({ pollIntervalMs = 2000 }: RunsTableProps = {}) {
             </thead>
             <tbody>
               {visible.map((run) => (
-                <RunTableRow key={run.runId} run={run} />
+                <RunTableRow
+                  key={run.runId}
+                  run={run}
+                  canManageRuns={canManageRuns}
+                />
               ))}
             </tbody>
           </table>
@@ -243,7 +252,13 @@ function compareRuns(sort: { key: SortKey; direction: SortDirection }) {
  * A's button (`variables` now points at B) and lose A's own pending/error state entirely - a real
  * bug found by a concurrent-cancel scenario no test happened to cover yet.
  */
-function RunTableRow({ run }: { run: RunResponse }) {
+function RunTableRow({
+  run,
+  canManageRuns,
+}: {
+  run: RunResponse;
+  canManageRuns: boolean;
+}) {
   const queryClient = useQueryClient();
   const cancel = useMutation({
     mutationFn: () => cancelRun(run.runId),
@@ -277,7 +292,8 @@ function RunTableRow({ run }: { run: RunResponse }) {
               variant="secondary"
               size="compact"
               onClick={() => cancel.mutate()}
-              disabled={cancel.isPending}
+              disabled={cancel.isPending || !canManageRuns}
+              title={canManageRuns ? undefined : "Admin login required"}
             >
               Cancel
             </Button>
@@ -295,5 +311,8 @@ function RunTableRow({ run }: { run: RunResponse }) {
 }
 
 function describeError(error: unknown): string {
-  return error instanceof RunnerApiError ? error.message : "Unknown error";
+  return (
+    describePermissionError(error) ??
+    (error instanceof RunnerApiError ? error.message : "Unknown error")
+  );
 }

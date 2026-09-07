@@ -7,9 +7,13 @@ import {
   type CreateRunRequest,
 } from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
-import { RunnerApiError } from "../../api/problem-detail";
+import {
+  RunnerApiError,
+  describePermissionError,
+} from "../../api/problem-detail";
 import { Alert } from "../../components/ui/Alert";
 import { Button } from "../../components/ui/Button";
+import { useCanManageRuns } from "../auth/useCanManageRuns";
 import type { Environment, Suite } from "../../domain/run";
 import { CustomTestPicker } from "./CustomTestPicker";
 import styles from "./RunLaunchForm.module.css";
@@ -19,10 +23,13 @@ const CUSTOM_SUITE: Suite = "CUSTOM";
 interface RunLaunchFormProps {
   /** Overridable for tests - see RunLaunchForm.test.tsx. */
   capabilitiesRetryIntervalMs?: number;
+  /** Overridable for tests - see RunLaunchForm.test.tsx's CSRF-recovery test. */
+  csrfRetryIntervalMs?: number;
 }
 
 export function RunLaunchForm({
   capabilitiesRetryIntervalMs = 5_000,
+  csrfRetryIntervalMs,
 }: RunLaunchFormProps = {}) {
   const capabilities = useQuery({
     queryKey: queryKeys.capabilities,
@@ -36,6 +43,7 @@ export function RunLaunchForm({
   });
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const canManageRuns = useCanManageRuns({ csrfRetryIntervalMs });
 
   // Empty string means "no explicit user choice yet" - the actual selected value used for
   // rendering/submission always falls back to the first available option (see below), so the
@@ -77,6 +85,7 @@ export function RunLaunchForm({
     suites.find((candidate) => candidate === suiteChoice) ?? suites[0];
   const isCustom = selectedSuite === CUSTOM_SUITE;
   const canSubmit =
+    canManageRuns &&
     !launch.isPending &&
     selectedEnvironment !== undefined &&
     selectedSuite !== undefined &&
@@ -135,7 +144,12 @@ export function RunLaunchForm({
             ))}
           </select>
         </label>
-        <Button type="submit" variant="primary" disabled={!canSubmit}>
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={!canSubmit}
+          title={canManageRuns ? undefined : "Admin login required"}
+        >
           {launch.isPending
             ? "Starting…"
             : isCustom
@@ -160,6 +174,10 @@ function describeError(error: unknown): string {
 }
 
 function describeLaunchError(error: unknown): string {
+  const permissionMessage = describePermissionError(error);
+  if (permissionMessage !== undefined) {
+    return permissionMessage;
+  }
   if (!(error instanceof RunnerApiError)) {
     return "An unexpected error occurred while starting the run.";
   }

@@ -1,5 +1,7 @@
 export const queryKeys = {
   health: ["runner-health"] as const,
+  currentUser: ["current-user"] as const,
+  csrf: ["csrf-token"] as const,
   capabilities: ["runner-capabilities"] as const,
   publicTestCatalog: (environment: string) =>
     ["public-test-catalog", environment] as const,

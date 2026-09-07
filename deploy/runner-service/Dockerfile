@@ -48,6 +48,15 @@ RUN chmod +x gradlew \
     && rm -rf /root/.gradle/daemon /root/.gradle/caches/*/generated-gradle-jars
 
 ENV SERVER_ADDRESS=0.0.0.0
+# D3.2 - this service sits behind Caddy's TLS termination, so a request that reaches it has already
+# been decrypted and re-sent as plain HTTP; without this, Spring Security's OAuth2 {baseUrl}
+# resolution (used for the redirect_uri sent to GitHub) would see that internal http:// hop and
+# build the wrong scheme, never matching the https:// callback registered with the GitHub OAuth
+# App. FRAMEWORK makes Spring trust X-Forwarded-Proto/X-Forwarded-Host (which Caddy's reverse_proxy
+# sets by default) to recover the real public https://<domain> the request actually arrived on.
+# Safe only because runner-service is never reachable except through Caddy (no published port -
+# see docker-compose.yml) - Caddy is the sole edge that can ever set these headers here.
+ENV SERVER_FORWARD_HEADERS_STRATEGY=framework
 # JAVA_TOOL_OPTIONS, not JAVA_OPTS - the JVM itself reads this env var directly (prints "Picked up
 # JAVA_TOOL_OPTIONS" to stderr, harmless) with no shell expansion involved, which is what makes the
 # exec-form CMD below possible at all - a shell-form `CMD java $JAVA_OPTS ...` would need /bin/sh to
@@ -67,6 +76,12 @@ ENV RUNNER_ARTIFACTSDIR=/data/runner-artifacts
 # not redundant - it is the one place a human reads to see this deployment's actual profile without
 # having to already know this image's own fail-closed default.
 ENV RUNNER_DEPLOYMENTPROFILE=PORTFOLIO
+# D3.2 - the session cookie can only carry Secure over a real HTTPS origin (browsers refuse to send
+# a Secure cookie over plain HTTP), which is true here (Caddy terminates TLS in front of this
+# service) but not for a local `http://127.0.0.1` bootRun - so this default lives here, not in
+# application.yml, mirroring the SERVER_ADDRESS/RUNNER_DEPLOYMENTPROFILE deployment-only-override
+# pattern already used above.
+ENV SERVER_SERVLET_SESSION_COOKIE_SECURE=true
 
 EXPOSE 8080
 

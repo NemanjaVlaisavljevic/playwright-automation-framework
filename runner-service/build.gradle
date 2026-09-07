@@ -63,9 +63,17 @@ dependencies {
     // one needs adding explicitly since nothing else here pulls it in.
     implementation 'org.springframework.boot:spring-boot-flyway'
 
+    // D3.2 - admin authentication (GitHub OAuth2 Login). Adding spring-boot-starter-security alone
+    // changes default behavior for every request (an auto-generated password + HTTP Basic on
+    // everything) until an explicit SecurityFilterChain is supplied - see SecurityConfig, added in
+    // the same change as this dependency.
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // Spring Boot 4 moved @WebMvcTest out of spring-boot-test-autoconfigure into its own module.
     testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
+    testImplementation 'org.springframework.security:spring-security-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -201,5 +209,29 @@ tasks.register('localPostgresDown') {
     group = 'runner-service'
     doLast {
         localPostgresRun(['docker', 'rm', '-f', 'runner-local-postgres'], true)
+    }
+}
+
+// --- Local GitHub OAuth secrets for `bootRun` (D3.2) ---------------------------------------------
+// RUNNER_SECURITY_GITHUB_CLIENT_ID/_SECRET/_ADMIN_GITHUB_ID are never committed or typed into this
+// build file - a developer copies .env.local.example to .env.local (gitignored) and fills in real
+// values there; this block only loads that file into bootRun's own environment if it exists, so a
+// bootRun with no .env.local present behaves exactly as it does today (no GitHub credentials
+// configured, the permissive security chain stays active - see SecurityConfig).
+def envLocalFile = file('.env.local')
+if (envLocalFile.exists()) {
+    def envLocalVars = [:]
+    envLocalFile.eachLine { line ->
+        line = line.trim()
+        if (line && !line.startsWith('#')) {
+            def separatorIndex = line.indexOf('=')
+            if (separatorIndex > 0) {
+                envLocalVars[line.substring(0, separatorIndex).trim()] =
+                    line.substring(separatorIndex + 1).trim()
+            }
+        }
+    }
+    tasks.named('bootRun') {
+        environment(envLocalVars)
     }
 }

@@ -19,7 +19,15 @@ export default defineConfig({
     // (Spring Boot serving both the API and these static files) this app is ultimately built for.
     // `vite preview` reuses this same config by default when `preview.proxy` isn't set separately.
     proxy: {
-      "/api": { target: runnerApiTarget, changeOrigin: true },
+      // changeOrigin: false (D3.2) - Spring Security's OAuth2 login resolves its own
+      // `{baseUrl}` (used both for the `redirect_uri` sent to GitHub and for matching the
+      // callback it expects back) from the request's Host header as seen by the backend. With
+      // changeOrigin: true, the proxy rewrites that header to the backend's own host:port
+      // (127.0.0.1:8080), which would never match the GitHub OAuth App's registered callback
+      // (127.0.0.1:5173, this dev server's own origin) - breaking the login round trip. Nothing
+      // else in the backend depends on Host for routing/CORS (no CORS config exists; this app is
+      // same-origin-only by design), so this is safe for the existing REST calls too.
+      "/api": { target: runnerApiTarget, changeOrigin: false },
       "/actuator": { target: runnerApiTarget, changeOrigin: true },
     },
   },

@@ -3,12 +3,16 @@ import { useEffect, useMemo, useRef } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { cancelRun, getRun, listRunArtifacts } from "../../api/runner-api";
 import { queryKeys } from "../../api/query-keys";
-import { RunnerApiError } from "../../api/problem-detail";
+import {
+  RunnerApiError,
+  describePermissionError,
+} from "../../api/problem-detail";
 import { Alert } from "../../components/ui/Alert";
 import { Button } from "../../components/ui/Button";
 import { cx } from "../../components/ui/cx";
 import { LoadingSkeleton } from "../../components/ui/LoadingSkeleton";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { useCanManageRuns } from "../auth/useCanManageRuns";
 import { runDurationMs } from "../../domain/duration";
 import { isTerminalRunStatus } from "../../domain/run";
 import type { EventStreamClient } from "../event-stream/event-stream-client";
@@ -233,8 +237,10 @@ function RunDetails({
     }
   }, [connectionState, runIsTerminal, runId, queryClient]);
 
+  const canManageRuns = useCanManageRuns();
   const runDuration = run.isSuccess ? runDurationMs(run.data) : undefined;
-  const canCancel = run.isSuccess && !isTerminalRunStatus(run.data.status);
+  const canCancel =
+    run.isSuccess && !isTerminalRunStatus(run.data.status) && canManageRuns;
   // Scoped to each failing test's own failure panel (see `FailureDetail.tsx`), not just the generic
   // banner below - a broken artifacts fetch is otherwise easy to miss as belonging to any specific
   // test result.
@@ -415,6 +421,10 @@ function describeProtocolError(status: RunEventStreamStatus): string {
 }
 
 function describeApiError(error: unknown): string {
+  const permissionMessage = describePermissionError(error);
+  if (permissionMessage !== undefined) {
+    return permissionMessage;
+  }
   if (
     error instanceof RunnerApiError &&
     error.kind === "http" &&

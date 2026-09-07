@@ -4,6 +4,7 @@ import { queryKeys } from "../api/query-keys";
 import { RunnerApiError } from "../api/problem-detail";
 import { getHealth } from "../api/runner-api";
 import { cx } from "../components/ui/cx";
+import { AuthControls } from "../features/auth/AuthControls";
 import styles from "./AppShell.module.css";
 
 export interface AppShellProps {
@@ -51,6 +52,7 @@ export function AppShell({
             </span>
           )}
         </div>
+        <AuthControls />
       </header>
       <div className={styles.body}>
         <nav className={styles.sidebar} aria-label="Primary">

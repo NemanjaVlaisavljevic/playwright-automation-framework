@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunnerApiError } from "./problem-detail";
+import { RunnerApiError, describePermissionError } from "./problem-detail";
 
 describe("RunnerApiError", () => {
   it("uses the problem detail's own detail message when present", () => {
@@ -36,5 +36,35 @@ describe("RunnerApiError", () => {
 
     expect(error.message).toBe("Request failed with status 503");
     expect(error.problem).toBeUndefined();
+  });
+});
+
+describe("describePermissionError", () => {
+  it("returns a login message for a 401", () => {
+    expect(describePermissionError(new RunnerApiError("http", 401))).toBe(
+      "Please log in with GitHub to do this.",
+    );
+  });
+
+  it("returns a permission message for a 403", () => {
+    expect(describePermissionError(new RunnerApiError("http", 403))).toBe(
+      "You're logged in, but this account isn't allowed to do that.",
+    );
+  });
+
+  it("returns undefined for any other status", () => {
+    expect(
+      describePermissionError(new RunnerApiError("http", 503)),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for a non-http error kind", () => {
+    expect(
+      describePermissionError(new RunnerApiError("network", 0)),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for a non-RunnerApiError value", () => {
+    expect(describePermissionError(new Error("boom"))).toBeUndefined();
   });
 });

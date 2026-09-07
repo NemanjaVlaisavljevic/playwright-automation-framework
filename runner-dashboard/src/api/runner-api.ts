@@ -7,9 +7,11 @@ import {
   type ArtifactSummaryResponse,
   type CapabilitiesResponse,
   type CreateRunRequest,
+  type Fetcher,
   type RunResponse,
   type TestCatalogEntry,
 } from "./generated/runner-api";
+import { getCsrfTokenFromCookie } from "./csrf";
 import { RunnerApiError } from "./problem-detail";
 
 /**
@@ -29,13 +31,33 @@ export type {
   TestCatalogEntry,
 };
 
+/**
+ * Attaches `X-XSRF-TOKEN` (when the cookie exists) to every request the generated client makes -
+ * `createRun`/`cancelRun` already go through `client.post(...)` below, so both, and any future
+ * mutating endpoint, are covered automatically with no per-call-site changes. No `credentials:
+ * 'include'` is needed anywhere: this stays same-origin (Vite's dev proxy, Caddy in prod), so the
+ * browser's default `credentials: "same-origin"` already sends the session cookie.
+ */
+const csrfAwareFetcher: Fetcher["fetch"] = (input) => {
+  const token = getCsrfTokenFromCookie();
+  if (token === undefined) {
+    return defaultFetcher(input);
+  }
+  const headers = new Headers(input.overrides?.headers);
+  headers.set("X-XSRF-TOKEN", token);
+  return defaultFetcher({
+    ...input,
+    overrides: { ...input.overrides, headers },
+  });
+};
+
 // The generated client's own request() does `new URL(baseUrl + path)`, and the WHATWG URL
 // constructor rejects a relative string with no base ("" + "/api/v1/..." throws) - so this can't
 // be "" the way a hand-written fetch wrapper could get away with. window.location.origin keeps it
 // same-origin in effect (proxied to the backend by Vite in dev, see vite.config.ts; served
 // same-origin in production, see the roadmap's packaging phase) without ever hardcoding a host.
 const client = createApiClient(
-  { fetch: defaultFetcher },
+  { fetch: csrfAwareFetcher },
   window.location.origin,
 );
 client.setValidate("output");

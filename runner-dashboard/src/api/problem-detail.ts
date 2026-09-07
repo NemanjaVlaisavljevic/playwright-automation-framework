@@ -68,3 +68,22 @@ export class RunnerApiError extends Error {
     }
   }
 }
+
+/**
+ * Shared 401/403 message, composed in front of each admin-gated call site's own local
+ * `describeError`/`describeLaunchError`/`describeApiError` (e.g. `describePermissionError(error)
+ * ?? describeLaunchError(error)`) - no other error kind/status is handled here, since every other
+ * case already has its own feature-specific message.
+ */
+export function describePermissionError(error: unknown): string | undefined {
+  if (!(error instanceof RunnerApiError) || error.kind !== "http") {
+    return undefined;
+  }
+  if (error.status === 401) {
+    return "Please log in with GitHub to do this.";
+  }
+  if (error.status === 403) {
+    return "You're logged in, but this account isn't allowed to do that.";
+  }
+  return undefined;
+}

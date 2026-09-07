@@ -99,6 +99,23 @@ services:
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-runner}
       - SPRING_DATASOURCE_USERNAME=${POSTGRES_USER:-runner}
       - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - see deploy/.env.example}
+      # D3.2 - admin authentication (GitHub OAuth2 Login). RunnerSecurityEnvironmentValidator
+      # fails startup outright under PORTFOLIO if these are missing/malformed - see
+      # docs/DEPLOYMENT_ARCHITECTURE.md section 4 and deploy/.env.example for how to obtain them.
+      - RUNNER_SECURITY_GITHUB_CLIENT_ID=${RUNNER_SECURITY_GITHUB_CLIENT_ID:?set RUNNER_SECURITY_GITHUB_CLIENT_ID in .env - see deploy/.env.example}
+      - RUNNER_SECURITY_GITHUB_CLIENT_SECRET=${RUNNER_SECURITY_GITHUB_CLIENT_SECRET:?set RUNNER_SECURITY_GITHUB_CLIENT_SECRET in .env - see deploy/.env.example}
+      - RUNNER_SECURITY_ADMIN_GITHUB_ID=${RUNNER_SECURITY_ADMIN_GITHUB_ID:?set RUNNER_SECURITY_ADMIN_GITHUB_ID in .env - see deploy/.env.example}
+      # SESSION_COOKIE_SECURE (D3.2 review) - same escape-hatch shape as WEB_HTTP_BIND/
+      # WEB_HTTPS_BIND above: defaults to the real Secure cookie this image's own Dockerfile
+      # already sets, so a bare `docker compose up` stays fail-closed with no override present.
+      # Browsers refuse to send a Secure cookie to a non-HTTPS origin, so a login round-trip
+      # against this stack over plain HTTP (no SITE_ADDRESS/TLS configured yet) needs
+      # SESSION_COOKIE_SECURE=false in deploy/.env to even persist a session at all. This does not
+      # weaken PORTFOLIO's own fail-closed guarantee: RunnerSecurityEnvironmentPostProcessor still
+      # aborts startup outright if RUNNER_DEPLOYMENTPROFILE=PORTFOLIO (the default above) is ever
+      # combined with a non-Secure cookie - use this override only together with a non-PORTFOLIO
+      # RUNNER_DEPLOYMENTPROFILE for such a local, non-TLS acceptance run.
+      - SERVER_SERVLET_SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-true}
     volumes:
       - runner-data:/data
     restart: unless-stopped

@@ -28,6 +28,19 @@ spring:
 server:
   address: 127.0.0.1
   port: 8080
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        # Lax, not Strict: the OAuth callback returns via a top-level GET navigation from
+        # github.com, which Strict would block from carrying the session cookie, breaking the
+        # login round-trip. CSRF protection (see SecurityConfig) is the primary defense against
+        # cross-site state-changing requests regardless of SameSite. `secure` is deliberately not
+        # set here - local http://127.0.0.1 dev cannot use a Secure cookie at all; the real
+        # deployment sets it explicitly via SERVER_SERVLET_SESSION_COOKIE_SECURE=true (see
+        # deploy/runner-service/Dockerfile).
+        same-site: lax
+      timeout: 12h
 
 management:
   endpoints:

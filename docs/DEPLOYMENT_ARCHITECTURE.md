@@ -1072,12 +1072,87 @@ separate transcript file.
 
 ## 4. Security boundary
 
+D3.2 - admin authentication (GitHub OAuth2 Login), implemented and locally verified against a
+real running backend. Backend-driven: Spring Security's OAuth2 Login talks to GitHub server-side;
+the access token never reaches the React frontend, which only ever sees an `HttpOnly` session
+cookie and the `GET /api/v1/auth/me` JSON response. The admin is allowlisted by GitHub's immutable
+numeric account ID (`RUNNER_SECURITY_ADMIN_GITHUB_ID`), never by username - `GithubOAuth2UserService`
+throws for any non-matching, missing, or malformed id, so a non-allowlisted GitHub account never
+receives any session at all (there is no intermediate "authenticated but not admin" state).
+
+The `PORTFOLIO` deployment profile fails closed **before any listening socket is ever opened**:
+`RunnerSecurityEnvironmentPostProcessor` checks this during environment preparation (ordered right
+after `ConfigDataEnvironmentPostProcessor`), which runs before `SpringApplication` even creates the
+`ApplicationContext` - not an `ApplicationRunner` (a review finding: that only executes after the
+context has fully refreshed and the embedded Tomcat is already listening, briefly serving real
+anonymous traffic through the permissive chain on every restart of a misconfigured instance before
+getting a chance to throw). A malformed `RUNNER_SECURITY_ADMIN_GITHUB_ID` fails even earlier still,
+at `AdminGithubAllowlist`'s own `@Bean` construction. `RunnerSecurityFailFastTest` proves this by
+binding a plain `ServerSocket` to the exact port a misconfigured instance was told to use,
+immediately after the expected startup exception - the bind succeeds, confirming the port was
+never touched.
+
+This check binds `runner.deployment-profile` via Spring Boot's own `Binder` API (a review
+finding), not a raw string comparison - comparing the literal `"PORTFOLIO"` string could disagree
+with `RunAvailabilityConfig`'s own `@Value`-based enum conversion (case-insensitive: a lowercase
+`portfolio` would silently bypass this check while still resolving to `PORTFOLIO` later), so a
+security decision must never depend on whether an unrelated, later config binding happens to
+agree with it. The same pass additionally requires a `Secure` session cookie under `PORTFOLIO`
+(catching a local Compose acceptance override left in place by mistake - see the
+`SESSION_COOKIE_SECURE` escape hatch below), failing closed identically to missing OAuth2
+credentials.
+
+The frontend never gates its Run/Cancel controls on "is someone logged in" - `GET /api/v1/auth/me`
+reports a `canManageRuns` boolean instead, which is `true` in the permissive chain (no GitHub
+OAuth2 configured - default local `bootRun`, `dashboardE2eTest`) regardless of authentication,
+exactly like this project's whole pre-D3.2 history; only once OAuth2 is genuinely enabled does
+`canManageRuns` require being the allowlisted admin. A separate `authenticationRequired` boolean
+hides the login control entirely when there is no login concept to offer (a review finding: an
+earlier version conflated "authenticated" with "can manage runs", making a permissive-chain
+deployment silently read-only). `CurrentUserController` derives `canManageRuns` from the real
+`ROLE_ADMIN` authority Spring Security itself grants, never merely from the principal being an
+`OAuth2User` (a review finding: today `GithubOAuth2UserService` never produces a non-admin
+session, but the endpoint's own contract should describe the actual authorization rule rather than
+rely on that fact never drifting).
+
+The frontend also never enables a Run/Cancel control on `canManageRuns` alone: `useCanManageRuns()`
+additionally requires the CSRF token to be primed (`useCsrfReady`, an error-only-retry query
+mirroring the capabilities-retry idiom already used elsewhere) - an admin whose CSRF priming is
+still failing (backend briefly unreachable at bootstrap) would otherwise see an enabled control
+that only fails downstream with a 403 for a missing header. Logging out invalidates the shared
+CSRF query so every mounted consumer re-primes for the new anonymous session.
+
+Authentication endpoints live under `/api/v1/auth/**` (a URL namespace, never a single grouped
+`permitAll`/`denyAll` matcher - see `SecurityConfig`'s default-deny `authorizeHttpRequests` list,
+which enumerates every route explicitly). CSRF stays enabled for the whole authenticated chain
+(`GET /api/v1/auth/csrf` primes/refreshes the `XSRF-TOKEN` cookie, echoed back via
+`X-XSRF-TOKEN`); the session cookie is `HttpOnly`, `SameSite=Lax` (an OAuth callback is a
+top-level cross-site GET navigation that `Strict` would break), and `Secure` in the real deployment
+only (`SERVER_SERVLET_SESSION_COOKIE_SECURE=true` in `deploy/runner-service/Dockerfile` - local
+`http://127.0.0.1` dev cannot use a `Secure` cookie at all). `deploy/docker-compose.yml` exposes a
+`SESSION_COOKIE_SECURE` escape hatch (same shape as `WEB_HTTP_BIND`/`WEB_HTTPS_BIND`, defaults to
+`true`) for a Compose-based local acceptance run reached over plain HTTP with no domain/TLS
+configured yet - browsers refuse to send a `Secure` cookie to a non-HTTPS origin, so login could
+otherwise never persist a session there. This does not weaken `PORTFOLIO`'s own fail-closed
+guarantee: the environment post-processor above still refuses to start if `PORTFOLIO` is ever
+combined with a non-Secure cookie, so this override is only usable together with a non-`PORTFOLIO`
+`RUNNER_DEPLOYMENTPROFILE` for that same local run. The same Dockerfile also sets
+`SERVER_FORWARD_HEADERS_STRATEGY=framework` - without it, Spring Security's OAuth2 `{baseUrl}`
+resolution would see the internal plain-HTTP hop between Caddy's TLS termination and this service,
+producing a `redirect_uri` that never matches the `https://` one registered with the GitHub OAuth
+App; safe only because Caddy is the sole edge that can ever reach `runner-service` (no published
+port) and is therefore the only entity able to set `X-Forwarded-*` headers here. 401/403 responses
+from the security layer carry the same `ProblemDetail` shape (`title`/`status`/`detail`/`instance`)
+every other API error already uses, via the application's own managed `ObjectMapper`.
+
 | Surface | Access |
 |---|---|
 | Run history, results, artifacts (read) | Public, anonymous |
-| Launch a run, cancel a run | Requires authentication (D3 - not yet implemented) |
-| `/actuator/health` | Public (liveness only) |
-| `/actuator/info`, `/v3/api-docs`, any other actuator endpoint | Not proxied publicly at all |
+| Launch a run, cancel a run | Requires `ROLE_ADMIN` (GitHub OAuth2 Login, numeric-ID allowlist) and a valid CSRF token |
+| `/actuator/health` | Public at both the Spring Security layer and the production Caddy edge (liveness only) |
+| `/actuator/info` | Public at the Spring Security layer, but the production Caddy edge continues to expose only `/actuator/health` - `/actuator/info` remains unreachable publicly (a deliberate two-layer distinction: app-level permission vs. edge-level exposure, not an inconsistency) |
+| `/v3/api-docs` | Public at the Spring Security layer (so `npm run api:export`/`api:check:contract` keep working against a local `bootRun` once OAuth2 is enabled) - never proxied publicly by Caddy either way |
+| Any other actuator endpoint | Not proxied publicly at all |
 | PostgreSQL | No published port anywhere, on any network - reachable only from `runner-service`, the only service attached to both `edge` and `data`; `web` has no membership on `data` at all, so it cannot reach `postgres` regardless of `internal: true` (see §1's corrected explanation of what that flag does and does not do) |
 | `runner-service` itself | No published port in the base Compose file at all - only reachable through `web`. `docker-compose.debug.yml` publishes a loopback-only debug port for local measurement/troubleshooting; never applied in a real deployment |
 | Docker socket | Never mounted into any container - nothing here starts/stops/manages other containers or the host |

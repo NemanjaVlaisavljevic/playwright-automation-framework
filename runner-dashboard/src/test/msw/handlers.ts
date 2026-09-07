@@ -8,6 +8,20 @@ import { CURRENT_SCHEMA_VERSION } from "../../domain/runner-event";
  */
 export const handlers = [
   http.get("/actuator/health", () => HttpResponse.json({ status: "UP" })),
+  // Defaults to "can manage runs, logged in as the allowlisted admin" - most existing tests
+  // exercise launch/cancel and were written before D3.2's auth gating existed; overridden with
+  // `server.use(...)` for a specific permissive/anonymous/login-flow test instead of touching
+  // every one of those call sites.
+  http.get("/api/v1/auth/me", () =>
+    HttpResponse.json({
+      authenticationRequired: true,
+      canManageRuns: true,
+      authenticated: true,
+      login: "octocat",
+      avatarUrl: "https://example.invalid/avatar.png",
+    }),
+  ),
+  http.get("/api/v1/auth/csrf", () => new HttpResponse(null, { status: 204 })),
   http.get("/api/v1/capabilities", () =>
     HttpResponse.json({
       apiVersion: "v1",
