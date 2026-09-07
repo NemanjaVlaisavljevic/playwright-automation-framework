@@ -5,7 +5,7 @@ import type * as __TypedOpenapi from "./runner-api.types.js";
 
 // <Schemas>
 export type CreateRunRequest = __TypedOpenapi.Schemas.CreateRunRequest;
-export const CreateRunRequest = z.object({ environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE", "CUSTOM"]), testKeys: z.array(z.string()).optional() }).catchall(z.unknown());
+export const CreateRunRequest = z.object({ environment: z.enum(["PUBLIC", "LOCAL"]), suite: z.enum(["SMOKE", "API", "UI", "JOURNEY", "REGRESSION", "FIXTURE", "CUSTOM"]), testKeys: z.array(z.string().min(0).max(200)).min(0).max(25).optional() }).catchall(z.unknown());
 
 export type SelectedTestResponse = __TypedOpenapi.Schemas.SelectedTestResponse;
 export const SelectedTestResponse = z.object({ testKey: z.string(), displayName: z.string(), layer: z.enum(["API", "UI", "JOURNEY"]) }).catchall(z.unknown());

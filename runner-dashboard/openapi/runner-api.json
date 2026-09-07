@@ -518,8 +518,12 @@
           "testKeys": {
             "type": "array",
             "items": {
-              "type": "string"
-            }
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 0
+            },
+            "maxItems": 25,
+            "minItems": 0
           }
         },
         "required": [
