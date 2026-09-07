@@ -77,6 +77,11 @@ public class RunService {
 
   private static final Logger log = LoggerFactory.getLogger(RunService.class);
 
+  // Bounds cancel()'s wait for executeRun's process()-publish (see ActiveRun#awaitProcessPublished)
+  // - only ever needs to cover a single ingestor-thread startup, so this is a generous, fixed
+  // safety margin rather than an operational tuning knob.
+  private static final Duration PROCESS_PUBLISH_WAIT_TIMEOUT = Duration.ofSeconds(2);
+
   private enum Availability {
     AVAILABLE,
     DEGRADED
@@ -225,55 +230,70 @@ public class RunService {
     }
     activeRun.cancelRequested().set(true);
     Process process = activeRun.process().get();
-    if (process != null) {
-      try {
-        terminateWithinLifecycleGate(process);
-      } catch (ProcessTerminationException exception) {
-        log.error("Could not terminate the process tree for cancelled run {}", runId, exception);
-        // This run's own worker may be stuck arbitrarily long inside awaitCompletion() on the same
-        // (unkillable) process, so its ingestor (if one was ever started) may still be forwarding
-        // legitimately-occurred test events. Stopping and draining it here, from this thread,
-        // before closing the canonical journal below - rather than leaving that to the worker,
-        // which might not get there for a while - is what stops the emergency finalization from
-        // racing ahead of, and silently dropping, those events. Idempotent if the worker later
-        // drains the same ingestor itself.
-        ListenerEventIngestor runIngestor = activeRun.ingestor().get();
-        if (runIngestor != null) {
-          runIngestor.stopAndAwaitFinished(ingestionDrainTimeout);
+    if (process == null) {
+      Runnable queuedTask = activeRun.queuedTask().getAndSet(null);
+      if (queuedTask != null) {
+        // Still sitting in the queue - nothing to kill, just remove it. If executor.remove() loses
+        // this race (the worker just claimed the same task), executeRun()'s own cancelRequested
+        // check before launching (see its own comment) records CANCELLED momentarily on its own;
+        // nothing further for this call to do.
+        if (executor.remove(queuedTask)) {
+          try {
+            lifecycle.finishIfLive(
+                runId, RunStatus.CANCELLED, null, "Run was cancelled while queued", Instant.now());
+          } finally {
+            // The executor no longer owns this task, so active tracking must be released even when
+            // the terminal event cannot be persisted and finishIfLive propagates that failure.
+            activeRuns.remove(runId, activeRun);
+          }
         }
-        try {
-          lifecycle.finishIfLive(
-              runId,
-              RunStatus.ERROR,
-              null,
-              "Cancellation failed because the process tree survived termination; PIDs: "
-                  + exception.survivingPids(),
-              Instant.now());
-        } finally {
-          // This run's own worker is likely still blocked inside awaitCompletion() on this same
-          // (unkillable) process and would otherwise not notice for up to the full configured
-          // timeout. Cleanup is unconditional even if recording ERROR fails: the journal failure
-          // is propagated, but must not strand the only worker. interruptWorkerIfAttached() is
-          // synchronized against that worker's own detach, so this can never land on a different
-          // run's worker after this one finishes and the pool thread gets reused (see ActiveRun).
-          activeRun.interruptWorkerIfAttached();
-        }
+        return find(runId);
       }
+      // queuedTask was already null: the worker had already cleared it at executeRun's own start
+      // and is actively launching this run - process() publish is only instants away (see
+      // executeRun's own publish-ordering comment). Wait briefly so this call can still terminate
+      // the process synchronously, rather than silently no-op'ing and leaving termination to the
+      // worker's own best-effort post-publish check, which cannot report a result back to this
+      // caller - this is exactly the window a real crash-recovery review round found could let a
+      // concurrent cancel() lose the race and return a stale RUNNING/STARTING status.
+      process = activeRun.awaitProcessPublished(PROCESS_PUBLISH_WAIT_TIMEOUT);
+    }
+    if (process == null) {
+      // Genuinely never launched (e.g. cancelled/errored while waiting on availability, or
+      // start() itself failed) - the worker already recorded its own terminal status.
       return find(runId);
     }
-    // Still sitting in the queue (or the worker hasn't assigned a process yet) - nothing to kill.
-    // executeRun() checks cancelRequested before/around launching, so this may lose a race to it;
-    // if so the run is already terminal and this becomes a harmless no-op.
-    Runnable queuedTask = activeRun.queuedTask().getAndSet(null);
-    boolean removedFromQueue = queuedTask != null && executor.remove(queuedTask);
-    if (removedFromQueue) {
+    try {
+      terminateWithinLifecycleGate(process);
+    } catch (ProcessTerminationException exception) {
+      log.error("Could not terminate the process tree for cancelled run {}", runId, exception);
+      // This run's own worker may be stuck arbitrarily long inside awaitCompletion() on the same
+      // (unkillable) process, so its ingestor (if one was ever started) may still be forwarding
+      // legitimately-occurred test events. Stopping and draining it here, from this thread,
+      // before closing the canonical journal below - rather than leaving that to the worker,
+      // which might not get there for a while - is what stops the emergency finalization from
+      // racing ahead of, and silently dropping, those events. Idempotent if the worker later
+      // drains the same ingestor itself.
+      ListenerEventIngestor runIngestor = activeRun.ingestor().get();
+      if (runIngestor != null) {
+        runIngestor.stopAndAwaitFinished(ingestionDrainTimeout);
+      }
       try {
         lifecycle.finishIfLive(
-            runId, RunStatus.CANCELLED, null, "Run was cancelled while queued", Instant.now());
+            runId,
+            RunStatus.ERROR,
+            null,
+            "Cancellation failed because the process tree survived termination; PIDs: "
+                + exception.survivingPids(),
+            Instant.now());
       } finally {
-        // The executor no longer owns this task, so active tracking must be released even when the
-        // terminal event cannot be persisted and finishIfLive propagates that failure.
-        activeRuns.remove(runId, activeRun);
+        // This run's own worker is likely still blocked inside awaitCompletion() on this same
+        // (unkillable) process and would otherwise not notice for up to the full configured
+        // timeout. Cleanup is unconditional even if recording ERROR fails: the journal failure
+        // is propagated, but must not strand the only worker. interruptWorkerIfAttached() is
+        // synchronized against that worker's own detach, so this can never land on a different
+        // run's worker after this one finishes and the pool thread gets reused (see ActiveRun).
+        activeRun.interruptWorkerIfAttached();
       }
     }
     return find(runId);
@@ -331,7 +351,7 @@ public class RunService {
         // is still forwarding legitimately-occurred test events into it.
         activeRun.ingestor().set(ingestor);
       }
-      activeRun.process().set(process);
+      activeRun.publishProcess(process);
       // Checked immediately after publish - not before it, and only once, not twice. From the
       // instant activeRun.process() becomes visible, cancel() on a different thread can act on it
       // directly; this check is what covers every cancellation that arrived any time earlier

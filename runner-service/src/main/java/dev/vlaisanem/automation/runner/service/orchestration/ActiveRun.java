@@ -1,6 +1,9 @@
 package dev.vlaisanem.automation.runner.service.orchestration;
 
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestor;
+import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -13,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 final class ActiveRun {
 
   private final AtomicReference<Process> process = new AtomicReference<>();
+  private final CountDownLatch processPublished = new CountDownLatch(1);
   private final AtomicReference<Runnable> queuedTask = new AtomicReference<>();
   private final AtomicReference<ListenerEventIngestor> ingestor = new AtomicReference<>();
   private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
@@ -21,6 +25,36 @@ final class ActiveRun {
 
   AtomicReference<Process> process() {
     return process;
+  }
+
+  /**
+   * Publishes the launched process - must be called exactly once per run, after its ingestor is
+   * already attached (see {@code RunService.executeRun}'s own publish-ordering comment).
+   */
+  void publishProcess(Process launched) {
+    process.set(launched);
+    processPublished.countDown();
+  }
+
+  /**
+   * Blocks up to {@code timeout} for {@link #publishProcess} to run, then returns whatever is
+   * present (possibly still {@code null}, if the worker never reaches it - e.g. it recorded a
+   * terminal status of its own first). Closes the narrow window where {@code find()} already
+   * reports the run as {@code RUNNING} (its status transition committed durably) but this run's own
+   * worker thread has not yet finished attaching the process a concurrent {@code cancel()} needs to
+   * terminate - see {@code RunService.cancel()}'s own comment on this.
+   */
+  Process awaitProcessPublished(Duration timeout) {
+    Process current = process.get();
+    if (current != null) {
+      return current;
+    }
+    try {
+      processPublished.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+    }
+    return process.get();
   }
 
   /**
