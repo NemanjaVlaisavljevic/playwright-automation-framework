@@ -52,11 +52,24 @@ ENV SERVER_ADDRESS=0.0.0.0
 # been decrypted and re-sent as plain HTTP; without this, Spring Security's OAuth2 {baseUrl}
 # resolution (used for the redirect_uri sent to GitHub) would see that internal http:// hop and
 # build the wrong scheme, never matching the https:// callback registered with the GitHub OAuth
-# App. FRAMEWORK makes Spring trust X-Forwarded-Proto/X-Forwarded-Host (which Caddy's reverse_proxy
-# sets by default) to recover the real public https://<domain> the request actually arrived on.
-# Safe only because runner-service is never reachable except through Caddy (no published port -
-# see docker-compose.yml) - Caddy is the sole edge that can ever set these headers here.
-ENV SERVER_FORWARD_HEADERS_STRATEGY=framework
+# App. NATIVE (changed from D3.2's original FRAMEWORK during D3.3's abuse-protection review)
+# activates Tomcat's own RemoteIpValve instead of a plain ForwardedHeaderFilter - the valve only
+# honors X-Forwarded-Proto/-Host/-For when the *direct* TCP peer matches
+# server.tomcat.remoteip.internal-proxies (its own default already covers every private/Docker-
+# internal range), whereas FRAMEWORK's ForwardedHeaderFilter has no such trust boundary at all and
+# would parse those headers unconditionally regardless of who sent them. AbuseRateLimitFilter's
+# client-IP-keyed rate limits (D3.3) depend on this real trust boundary, not just on {baseUrl}
+# resolution continuing to work. RemoteIpValve is a Tomcat connector-level Valve, so no MockMvc-
+# based test can exercise it (MockMvc dispatches straight to DispatcherServlet, never booting a
+# real embedded Tomcat) - this was verified instead against a real docker compose stack
+# (deploy/docker-compose.yml): spoofed, per-request-distinct X-Forwarded-For values were
+# confirmed to never create independent rate-limit keys (Caddy's own default X-Forwarded-For
+# handling overrides a client-supplied value), and the same real client still hit the configured
+# 429 at exactly the expected request count regardless of what it spoofed - see
+# docs/RELEASE_EVIDENCE.md's D3.3 section for the transcript. Safe only because runner-service is
+# never reachable except through Caddy (no published port - see docker-compose.yml), and Caddy's
+# own container IP is always within the trusted range this default already covers.
+ENV SERVER_FORWARD_HEADERS_STRATEGY=native
 # JAVA_TOOL_OPTIONS, not JAVA_OPTS - the JVM itself reads this env var directly (prints "Picked up
 # JAVA_TOOL_OPTIONS" to stderr, harmless) with no shell expansion involved, which is what makes the
 # exec-form CMD below possible at all - a shell-form `CMD java $JAVA_OPTS ...` would need /bin/sh to

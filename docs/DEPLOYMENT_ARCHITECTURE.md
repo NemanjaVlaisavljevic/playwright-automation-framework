@@ -1137,18 +1137,115 @@ otherwise never persist a session there. This does not weaken `PORTFOLIO`'s own 
 guarantee: the environment post-processor above still refuses to start if `PORTFOLIO` is ever
 combined with a non-Secure cookie, so this override is only usable together with a non-`PORTFOLIO`
 `RUNNER_DEPLOYMENTPROFILE` for that same local run. The same Dockerfile also sets
-`SERVER_FORWARD_HEADERS_STRATEGY=framework` - without it, Spring Security's OAuth2 `{baseUrl}`
-resolution would see the internal plain-HTTP hop between Caddy's TLS termination and this service,
-producing a `redirect_uri` that never matches the `https://` one registered with the GitHub OAuth
-App; safe only because Caddy is the sole edge that can ever reach `runner-service` (no published
-port) and is therefore the only entity able to set `X-Forwarded-*` headers here. 401/403 responses
-from the security layer carry the same `ProblemDetail` shape (`title`/`status`/`detail`/`instance`)
-every other API error already uses, via the application's own managed `ObjectMapper`.
+`SERVER_FORWARD_HEADERS_STRATEGY=native` (D3.2 originally set `framework`; changed during D3.3's
+abuse-protection work - see below for why) - without trusting forwarded headers at all, Spring
+Security's OAuth2 `{baseUrl}` resolution would see the internal plain-HTTP hop between Caddy's TLS
+termination and this service, producing a `redirect_uri` that never matches the `https://` one
+registered with the GitHub OAuth App; safe only because Caddy is the sole edge that can ever reach
+`runner-service` (no published port) and is therefore the only entity able to set `X-Forwarded-*`
+headers here. 401/403 responses from the security layer carry the same `ProblemDetail` shape
+(`title`/`status`/`detail`/`instance`) every other API error already uses, via the application's
+own managed `ObjectMapper`.
+
+### D3.3 - abuse protection
+
+A per-resource-surface rate-limit matrix, not one global limit (`AbuseRateLimitFilter` +
+`InMemoryRateLimiter`, a small dependency-free fixed-window limiter matching this project's
+existing capacity-ceiling style): OAuth authorization 5/min and OAuth callback 10/min (both keyed
+by client IP - the callback specifically is the one login-flow request that spends a real GitHub
+API call), create-run 3/min **and** 10/hour and cancel-run 10/min (both keyed by the caller's
+GitHub numeric id), public REST GET 120/min and log/artifact download 30/min (both keyed by
+client IP). A violation returns `429` with the same `ProblemDetail` contract as every other
+security response, plus a real `Retry-After` header. `runner.queue-capacity` (existing) is
+explicitly not a rate limit - it bounds queued runs, never call frequency.
+
+Anonymous, unauthenticated surfaces are the largest attack surface and were the easiest to
+under-cover initially (a review finding) - SSE connections specifically get their own per-client-IP
+concurrent-connection cap (`SseConnectionsPerIpTracker`, 3 by default), enforced *alongside* the
+existing global `sseMaxSubscribers` ceiling: without it, one client alone could occupy every global
+slot.
+
+**Client-IP keys are only trustworthy because of a verified reverse-proxy trust boundary** (a
+review finding: don't trust `X-Forwarded-For` blindly, even behind a reverse proxy this project
+controls). Read directly from Spring Boot 4's own source
+(`TomcatWebServerFactoryCustomizer.customizeRemoteIpValve`): `SERVER_FORWARD_HEADERS_STRATEGY=native`
+activates Tomcat's own `RemoteIpValve` (`server.tomcat.remoteip.internal-proxies`, whose default
+already covers every private/Docker-internal range), which only honors `X-Forwarded-For` when the
+*direct* TCP peer matches that trusted range - `runner-service` has no published port and shares
+its `edge` network with exactly one other container (Caddy), so in this topology only Caddy can
+ever be that peer. The prior `framework` strategy's plain `ForwardedHeaderFilter` has no such
+concept at all and would parse the header unconditionally regardless of who sent it. `RemoteIpValve`
+is a Tomcat connector-level `Valve`, so `MockMvc` cannot exercise it directly (it dispatches
+straight to `DispatcherServlet`, never booting a real embedded Tomcat) - real verification of this
+mechanism happens only against a genuine Compose stack with a real Caddy in front, not simulated
+locally; see `docs/RELEASE_EVIDENCE.md`'s D3.3 section for what was and wasn't verified this way.
+
+**A real bug, found only by live verification**: `AbuseRateLimitFilter` was first registered after
+`AuthorizationFilter` (reasoning that 401/403 should always win over rate-limiting), which silently
+never rate-limited the OAuth-authorization/callback routes at all - both are actually handled, and
+their response fully committed, by Spring Security's own `OAuth2AuthorizationRequestRedirectFilter`/
+`OAuth2LoginAuthenticationFilter`, well before `AuthorizationFilter` ever runs. Fixed by registering
+after `SecurityContextHolderFilter` instead - still early enough to catch the OAuth routes, still
+late enough that an already-authenticated admin's session `Authentication` is available for the
+numeric-id key extraction on the create/cancel-run surfaces. Re-verified live against a real
+`bootRun`, including that the fixed-window counter actually resets once its window elapses (not a
+permanent latch) - see `docs/RELEASE_EVIDENCE.md`'s D3.3 section for the transcript.
+
+The request body itself is capped before any JSON deserialization is even attempted
+(`RequestBodySizeLimitFilter`, registered in both chains - a resource-protection concern, not
+auth-adjacent, unlike the rate limiter above): a `Content-Length` over `runner.max-request-body-bytes`
+(16 KiB default) is rejected immediately with `413`, and the request `InputStream` is additionally
+wrapped in a byte-counting stream that aborts even against a lying or chunked request. `CreateRunRequest`
+also carries `@Size(max = 25)` on `testKeys` and `@Size(max = 200)` per key - Bean Validation as an
+independent second layer, not a replacement for `CustomTestSelectionValidator`'s own identical
+25-key cap against the live test catalog. Two things confirmed empirically rather than assumed: a
+`@Valid` failure already produces a compliant `400` with zero extra code, and Spring Boot's Jackson
+autoconfiguration defaults to *lenient* deserialization (an unrecognized JSON field is silently
+ignored) - the opposite of what was first assumed, so `spring.jackson.deserialization.fail-on-unknown-properties: true`
+was added explicitly to make the request schema strict.
+
+`Content-Security-Policy` and `Permissions-Policy` were added to `deploy/web/Caddyfile`'s existing
+header block, not to Spring Security - Caddy is the only thing that ever serves the SPA's own
+`index.html`/JS/CSS responses directly (`file_server`; `runner-service` is only ever proxied for
+`/api/*`/`/actuator/health`), so a Spring-Security-only CSP would never reach the page that needs
+it most; Spring Security also deliberately never sets one of its own. The directive set was
+verified against the real production dashboard bundle (`npm run build` + reading the built
+`index.html`/CSS: no inline scripts/styles, no `data:` URIs anywhere), so neither `'unsafe-inline'`
+nor `data:` was added preemptively - the one legitimate cross-origin resource is the logged-in
+admin's own GitHub avatar image. Both headers, and the config as a whole, were confirmed against a
+real running `caddy:2-alpine` container (the stock image this project already uses, no custom
+`xcaddy` build needed), not just syntax-validated.
+
+CORS stays fully unsupported: no `CorsConfigurationSource` bean anywhere, `.cors(CorsConfigurer::disable)`
+explicit on both `SecurityFilterChain` beans - turning what was already the correct behavior
+(Spring Security never adds `Access-Control-Allow-Origin` without an explicit CORS configuration)
+into a stated, tested decision rather than one that was merely never wrong by omission.
+
+**Review round 2 findings, all fixed** (full transcripts in `docs/RELEASE_EVIDENCE.md`'s D3.3
+section): a plain `Filter` bean is auto-registered by Spring Boot as a generic servlet-container
+filter *in addition to* any explicit `SecurityFilterChain` wiring for that same bean - left
+unaddressed, `AbuseRateLimitFilter` could also have run under the permissive/local chain at an
+ordering Spring Boot's own defaults controlled, not this project's. Fixed with a disabled
+`FilterRegistrationBean` per filter in `SecurityConfig`, so the explicit chain wiring is now the
+only place either filter runs - proven by two real-embedded-Tomcat tests
+(`PermissiveChainHasNoAbuseRateLimitTest`/`OAuth2ChainAppliesAbuseRateLimitTest`) rather than
+`MockMvc`, since this auto-registration only exists in a real servlet container.
+`InMemoryRateLimiter`'s per-key map had no upper bound - a real flood of genuinely distinct client
+IPs (not just spoofed headers) could grow it forever; it now sweeps expired windows periodically
+and enforces a hard maximum tracked-key count with oldest-entry eviction as a fallback. Multi-rule
+checks (create-run's per-minute *and* per-hour limits) are now one atomic check-then-commit
+operation instead of two independent ones, so a request rejected by one rule never silently
+consumes another rule's budget, and `Retry-After` now rounds up rather than truncating. The
+body-size filter was redesigned to buffer and validate the entire request before ever invoking the
+rest of the filter chain, guaranteeing a real `413` even against a chunked or falsified
+`Content-Length`, where the original stream-based check could not.
 
 | Surface | Access |
 |---|---|
-| Run history, results, artifacts (read) | Public, anonymous |
-| Launch a run, cancel a run | Requires `ROLE_ADMIN` (GitHub OAuth2 Login, numeric-ID allowlist) and a valid CSRF token |
+| Run history, results, artifacts (read) | Public, anonymous - rate-limited 120/min (reads) or 30/min (log/artifact downloads) per client IP |
+| Live SSE event stream | Public, anonymous - capped at 3 concurrent connections per client IP, on top of the existing global `sseMaxSubscribers` |
+| GitHub OAuth login (authorization/callback) | Public - rate-limited 5/min (authorization) and 10/min (callback) per client IP |
+| Launch a run, cancel a run | Requires `ROLE_ADMIN` (GitHub OAuth2 Login, numeric-ID allowlist) and a valid CSRF token - additionally rate-limited (3/min and 10/hour for create, 10/min for cancel) per admin GitHub numeric ID |
 | `/actuator/health` | Public at both the Spring Security layer and the production Caddy edge (liveness only) |
 | `/actuator/info` | Public at the Spring Security layer, but the production Caddy edge continues to expose only `/actuator/health` - `/actuator/info` remains unreachable publicly (a deliberate two-layer distinction: app-level permission vs. edge-level exposure, not an inconsistency) |
 | `/v3/api-docs` | Public at the Spring Security layer (so `npm run api:export`/`api:check:contract` keep working against a local `bootRun` once OAuth2 is enabled) - never proxied publicly by Caddy either way |
@@ -1156,6 +1253,36 @@ every other API error already uses, via the application's own managed `ObjectMap
 | PostgreSQL | No published port anywhere, on any network - reachable only from `runner-service`, the only service attached to both `edge` and `data`; `web` has no membership on `data` at all, so it cannot reach `postgres` regardless of `internal: true` (see §1's corrected explanation of what that flag does and does not do) |
 | `runner-service` itself | No published port in the base Compose file at all - only reachable through `web`. `docker-compose.debug.yml` publishes a loopback-only debug port for local measurement/troubleshooting; never applied in a real deployment |
 | Docker socket | Never mounted into any container - nothing here starts/stops/manages other containers or the host |
+
+### D3.4 - security test coverage
+
+An audit of what D3.1-D3.3 already covered incidentally, closing the real gaps rather than
+re-testing what already had coverage. Session cookie **idle** timeout shortened from `12h` to `4h`
+(`server.servlet.session.timeout`) - a rarely-used single-admin session doesn't need a long idle
+window. Precisely scoped, per a review finding: this is an *idle* timeout under the Servlet
+`HttpSession` contract (the clock resets on every access), not an absolute session lifetime - an
+actively-used session is never force-expired at the 4h mark regardless of how long it has existed.
+Judged a reasonable "forgot to log out" bound for this single-admin, `HttpOnly`+`Secure`-cookie
+deployment, not a defense against an already-stolen active session (a deliberate scope decision,
+not an oversight - see `docs/RELEASE_EVIDENCE.md`'s D3.4 review-round section). New tests close
+five concrete gaps: a mismatched (not merely missing) CSRF token still gets `403`; an invalidated
+session is provably treated as fully anonymous on its very next use (never a lingering admin
+session, never a `500`) - proving only the post-invalidation state, not the idle-timeout clock
+itself, which `MockMvc` cannot simulate elapsing; `MUTATION` is structurally unreachable (not even a
+`Suite` enum value) and `FIXTURE` gets exactly the same admin-only authorization treatment as any
+other mutating suite, both proven rather than assumed from reading the enum.
+
+The real browser E2E login->launch->cancel->logout, deliberately left manual-only at D3.2 to avoid
+a real-GitHub-account dependency in CI, is now automated without reintroducing that risk: a new,
+fully isolated `OAuthFlowE2eTest` runs the real `runner-service` with its normal Spring Boot OAuth2
+client binding, redirecting only the three GitHub endpoint URIs
+(`spring.security.oauth2.client.provider.github.*`) at a local WireMock stub - never a fake
+in-test `ClientRegistrationRepository` - so the real environment-postprocessor credential bridging,
+the real `ClientRegistrationRepository`, and the real `GithubOAuth2UserService` are all genuinely
+exercised. Two scenarios: the full happy path (login through a stubbed GitHub round trip, launch
+and cancel a run, logout, confirm the session and its controls both revert to anonymous), and a
+non-allowlisted GitHub identity being rejected outright with no admin session at all. See
+`docs/RELEASE_EVIDENCE.md`'s D3.4 section for the full test list and verification transcript.
 
 ## 5. Resource measurement and VPS sizing
 

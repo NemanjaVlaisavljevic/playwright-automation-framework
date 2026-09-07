@@ -11,6 +11,7 @@ import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionOutcome;
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactIngestionService;
 import dev.vlaisanem.automation.runner.service.artifacts.FakeArtifactRepository;
+import dev.vlaisanem.automation.runner.service.config.RateLimitRule;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
@@ -428,7 +429,16 @@ class RunEventBrokerTest {
         Duration.ofSeconds(5),
         10_000,
         Duration.ofSeconds(15),
-        Duration.ofMinutes(10));
+        Duration.ofMinutes(10),
+        new RateLimitRule(5, Duration.ofMinutes(1)),
+        new RateLimitRule(10, Duration.ofMinutes(1)),
+        new RateLimitRule(3, Duration.ofMinutes(1)),
+        new RateLimitRule(10, Duration.ofHours(1)),
+        new RateLimitRule(10, Duration.ofMinutes(1)),
+        new RateLimitRule(120, Duration.ofMinutes(1)),
+        new RateLimitRule(30, Duration.ofMinutes(1)),
+        3,
+        16384);
   }
 
   /**

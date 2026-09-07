@@ -12,12 +12,15 @@ import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
+import dev.vlaisanem.automation.runner.service.exception.SseConnectionLimitExceededException;
 import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
 import dev.vlaisanem.automation.runner.service.orchestration.InvalidTestSelectionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -78,6 +81,22 @@ public class RunExceptionHandler {
   @ExceptionHandler(RunEventSubscriptionRejectedException.class)
   public ProblemDetail handleSubscriptionRejected(RunEventSubscriptionRejectedException exception) {
     return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
+  }
+
+  /**
+   * {@code 429}, not {@code 503} - see {@link SseConnectionLimitExceededException}'s own Javadoc
+   * for why this is a distinct case from {@link #handleSubscriptionRejected}. A concurrent-
+   * connection cap has no fixed reopening time (unlike a time-windowed rate limit), so {@code
+   * Retry-After} here is a suggested backoff, not a guaranteed one.
+   */
+  @ExceptionHandler(SseConnectionLimitExceededException.class)
+  public ResponseEntity<ProblemDetail> handleSseConnectionLimitExceeded(
+      SseConnectionLimitExceededException exception) {
+    ProblemDetail problem =
+        ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, exception.getMessage());
+    return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+        .header(HttpHeaders.RETRY_AFTER, "5")
+        .body(problem);
   }
 
   @ExceptionHandler(InvalidEventResumeSequenceException.class)

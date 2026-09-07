@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.vlaisanem.automation.runner.service.config.RateLimitRule;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -223,6 +224,15 @@ class TestCatalogServiceTest {
         Duration.ofSeconds(5),
         10_000,
         Duration.ofSeconds(15),
-        Duration.ofMinutes(10));
+        Duration.ofMinutes(10),
+        new RateLimitRule(5, Duration.ofMinutes(1)),
+        new RateLimitRule(10, Duration.ofMinutes(1)),
+        new RateLimitRule(3, Duration.ofMinutes(1)),
+        new RateLimitRule(10, Duration.ofHours(1)),
+        new RateLimitRule(10, Duration.ofMinutes(1)),
+        new RateLimitRule(120, Duration.ofMinutes(1)),
+        new RateLimitRule(30, Duration.ofMinutes(1)),
+        3,
+        16384);
   }
 }

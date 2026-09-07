@@ -694,6 +694,12 @@ configurations {
 dependencies {
     dashboardE2eTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+    // D3.4 - OAuthFlowE2eTest stubs GitHub's own authorize/token/user-info endpoints so the real
+    // login->launch->cancel->logout flow can be proven through a real browser + a real Spring
+    // Security OAuth2 Login round trip, without ever depending on a real GitHub account, network
+    // access, or secrets in CI (the same reasoning that kept the real-GitHub click-through manual
+    // rather than automated - see RELEASE_EVIDENCE.md's D3.2 section).
+    dashboardE2eTestImplementation 'org.wiremock:wiremock:3.10.0'
     // D2.3 - the real backend this suite launches (a real `java -jar`, via bootJar) needs a real,
     // reachable Postgres now that DataSourceAutoConfiguration/FlywayAutoConfiguration are no longer
     // excluded on RunnerServiceApplication - see DashboardE2eDatabase, which owns one Testcontainers

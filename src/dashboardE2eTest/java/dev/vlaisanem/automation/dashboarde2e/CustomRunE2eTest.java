@@ -34,11 +34,18 @@ import org.junit.jupiter.api.extension.ExtendWith;
 @ExtendWith(DashboardE2eEnvironment.class)
 class CustomRunE2eTest {
 
+  // Deliberately not RoomApiContractTest/HomePageTest (both legitimately, and correctly, fail
+  // whenever the shared public demo site's own room inventory drifts - see RoomApiContractTest's
+  // own D3.3/D3.4 history in docs/RELEASE_EVIDENCE.md) - this test exercises the dashboard/
+  // orchestrator's CUSTOM-selection wiring, not the target site's data, so its own result must not
+  // depend on that site staying clean. Both selected tests are read-only auth checks against
+  // fixed, deterministic credentials (never against the site's own mutable room data).
   private static final String FIRST_TEST_DISPLAY_NAME =
-      "GET /api/room returns a usable room inventory";
-  private static final String SECOND_TEST_DISPLAY_NAME = "Guest can see at least one bookable room";
-  private static final String NOT_SELECTED_TEST_DISPLAY_NAME =
       "Admin can obtain a non-empty session token";
+  private static final String SECOND_TEST_DISPLAY_NAME =
+      "Admin with an invalid password stays on the login screen";
+  private static final String NOT_SELECTED_TEST_DISPLAY_NAME =
+      "Guest can see at least one bookable room";
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 

@@ -146,6 +146,69 @@ class RunControllerTest {
         "Bad Request");
   }
 
+  /**
+   * Regression test for D3.3: {@code @Size(max = 25)} on {@code testKeys} is a defense-in-depth
+   * layer independent of {@code CustomTestSelectionValidator}'s own identical 25-key cap - this
+   * proves Bean Validation itself rejects an oversized list with a plain {@code 400}, before the
+   * service layer (and its live-catalog lookup) is ever reached at all.
+   */
+  @Test
+  void createReturns400ForMoreThan25TestKeys() throws Exception {
+    String oversizedTestKeys =
+        java.util.stream.IntStream.range(0, 26)
+            .mapToObj(i -> "\"key-" + i + "\"")
+            .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+
+    assertProblemDetailShape(
+        mockMvc.perform(
+            post("/api/v1/runs")
+                .contentType("application/json")
+                .content(
+                    "{\"environment\":\"PUBLIC\",\"suite\":\"CUSTOM\",\"testKeys\":"
+                        + oversizedTestKeys
+                        + "}")),
+        400,
+        "Bad Request");
+  }
+
+  /**
+   * Regression test for D3.3: the per-key length cap guards against a single absurdly long string
+   * inflating the request body without tripping the list-size check above.
+   */
+  @Test
+  void createReturns400ForATestKeyLongerThan200Characters() throws Exception {
+    String tooLongKey = "k".repeat(201);
+
+    assertProblemDetailShape(
+        mockMvc.perform(
+            post("/api/v1/runs")
+                .contentType("application/json")
+                .content(
+                    "{\"environment\":\"PUBLIC\",\"suite\":\"CUSTOM\",\"testKeys\":[\""
+                        + tooLongKey
+                        + "\"]}")),
+        400,
+        "Bad Request");
+  }
+
+  /**
+   * Regression test for D3.3: confirms Jackson's own default behavior (not a code change made here)
+   * already rejects an unknown/extra JSON field with a plain {@code 400} rather than silently
+   * ignoring it - verified directly rather than assumed, per this project's own discipline of
+   * checking a default before adding redundant handling for it.
+   */
+  @Test
+  void createReturns400ForAnUnknownJsonField() throws Exception {
+    assertProblemDetailShape(
+        mockMvc.perform(
+            post("/api/v1/runs")
+                .contentType("application/json")
+                .content(
+                    "{\"environment\":\"PUBLIC\",\"suite\":\"SMOKE\",\"notARealField\":true}")),
+        400,
+        "Bad Request");
+  }
+
   @Test
   void deleteOnTheRunsCollectionReturns405() throws Exception {
     assertProblemDetailShape(mockMvc.perform(delete("/api/v1/runs")), 405, "Method Not Allowed");

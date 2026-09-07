@@ -5,10 +5,13 @@ import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscriber;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscription;
+import dev.vlaisanem.automation.runner.service.events.SseConnectionsPerIpTracker;
+import dev.vlaisanem.automation.runner.service.exception.SseConnectionLimitExceededException;
 import dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.PreDestroy;
+import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -44,6 +47,8 @@ public class RunEventStreamController {
   private final RunService runService;
   private final RunEventBroker broker;
   private final RunRecoveryService recoveryService;
+  private final SseConnectionsPerIpTracker connectionsPerIpTracker;
+  private final int maxConnectionsPerIp;
   private final long heartbeatIntervalMillis;
   private final long emitterTimeoutMillis;
   private final ScheduledExecutorService heartbeatScheduler =
@@ -59,10 +64,13 @@ public class RunEventStreamController {
       RunService runService,
       RunEventBroker broker,
       RunRecoveryService recoveryService,
+      SseConnectionsPerIpTracker connectionsPerIpTracker,
       RunnerProperties properties) {
     this.runService = runService;
     this.broker = broker;
     this.recoveryService = recoveryService;
+    this.connectionsPerIpTracker = connectionsPerIpTracker;
+    this.maxConnectionsPerIp = properties.sseMaxConnectionsPerIp();
     this.heartbeatIntervalMillis = properties.sseHeartbeatInterval().toMillis();
     this.emitterTimeoutMillis = properties.sseEmitterTimeout().toMillis();
   }
@@ -81,12 +89,22 @@ public class RunEventStreamController {
   @GetMapping(value = "/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public SseEmitter stream(
       @PathVariable String runId,
-      @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId) {
+      @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
+      HttpServletRequest request) {
     // D2.5 - must never let a client subscribe to (and so possibly observe, mid-rewrite) a stale
     // non-terminal run RunRecoveryService's own startup pass hasn't finished reconciling yet.
     recoveryService.requireRecoveryComplete();
     runService.find(runId); // 404s via RunNotFoundException for an unknown runId
     long afterSequence = parseLastEventId(lastEventId);
+
+    // D3.3 - enforced alongside, not instead of, RunEventHub's own global sseMaxSubscribers cap;
+    // see SseConnectionsPerIpTracker's own Javadoc for why one client alone must not be able to
+    // occupy every global slot. Checked before the emitter/heartbeat are even created, so a
+    // rejected caller never pays for either.
+    String clientIp = request.getRemoteAddr();
+    if (!connectionsPerIpTracker.tryAcquire(clientIp)) {
+      throw new SseConnectionLimitExceededException(maxConnectionsPerIp);
+    }
 
     SseEmitter emitter = new SseEmitter(emitterTimeoutMillis);
     EmitterGuard guard = new EmitterGuard(emitter);
@@ -106,7 +124,11 @@ public class RunEventStreamController {
             heartbeatIntervalMillis,
             heartbeatIntervalMillis,
             TimeUnit.MILLISECONDS);
-    handle.onClose(() -> heartbeat.cancel(false));
+    handle.onClose(
+        () -> {
+          heartbeat.cancel(false);
+          connectionsPerIpTracker.release(clientIp);
+        });
 
     try {
       RunEventSubscription subscription =
@@ -114,6 +136,7 @@ public class RunEventStreamController {
       handle.set(subscription);
     } catch (RuntimeException subscribeFailure) {
       heartbeat.cancel(false);
+      connectionsPerIpTracker.release(clientIp);
       throw subscribeFailure;
     }
 

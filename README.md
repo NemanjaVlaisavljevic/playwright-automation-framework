@@ -20,10 +20,18 @@ real time, with failures, screenshots, and traces surfacing the moment they happ
 - **REST-triggered runs** - pick an environment and suite from an allowlist, launch a real Gradle
   test process through a small Spring Boot service, no SSH/CI-console round trip required.
 - **Live progress over Server-Sent Events** - every `RUN_*`/`TEST_*`/`STEP_*` event streams to the
-  browser as it happens. Events are synchronously persisted to disk, while reconnect replay uses
-  the canonical in-memory history for the lifetime of the current service instance, so a dropped
-  connection never loses history mid-run. Restart recovery and journal re-indexing are planned for
-  Phase D (see [Current limitations](#current-limitations)).
+  browser as it happens, synchronously persisted to PostgreSQL as it's emitted (Faza D2) - a
+  dropped connection reconnects and replays cleanly from that same durable history, and a run still
+  `QUEUED`/`STARTING`/`RUNNING` when the service itself restarts is reconciled to a terminal status
+  on the next startup, never left silently stuck (Faza D2.5).
+- **GitHub OAuth2 admin login and abuse protection (Faza D3)** - reading run history, results, live
+  progress, and artifacts stays public and anonymous by design, but launching or cancelling a run
+  requires signing in with one specific, allowlisted GitHub account (numeric account ID, never a
+  username) via a real server-side OAuth2 Login flow - the access token never reaches the browser.
+  Every surface, authenticated or anonymous, is additionally rate-limited (per client IP or per
+  admin account, depending on the surface), with a verified reverse-proxy IP-trust boundary, a
+  pre-deserialization request-size cap, and CSP/Permissions-Policy headers with no cross-origin API
+  access. See `docs/DEPLOYMENT_ARCHITECTURE.md` §4 for the full access matrix.
 - **Step-level reporting** - a `Steps` API instrumented directly in the test code reports
   step-by-step progress inside each test, not just a pass/fail at the end - see it live in the
   dashboard's "Live Focus" panel and, after the fact, as a per-test drill-down.
@@ -136,10 +144,10 @@ security, deployment) is where each of them gets addressed:
   by design; only the artifact list is served from Postgres now.
 - **Single-instance only** - one `runner-service` process, one in-process run queue. There is no
   clustering, leader election, or horizontal scaling.
-- **No authentication or authorization** - anyone who can reach the dashboard/API can launch,
-  cancel, and read every run. Fine for a local/demo deployment; not fine exposed on the open
-  internet as-is.
-- **No artifact retention policy** - screenshots, traces, and logs accumulate under
+- **Authentication, authorization, and abuse protection are done (Faza D3)** - see "What it does"
+  above and `docs/DEPLOYMENT_ARCHITECTURE.md` §4 for the full access matrix; not re-described here
+  since it is no longer an open gap.
+- **No artifact retention policy yet (Faza D4)** - screenshots, traces, and logs accumulate under
   `build/runner-artifacts/<runId>/` indefinitely; nothing currently prunes old runs.
 
 ## Automation suite

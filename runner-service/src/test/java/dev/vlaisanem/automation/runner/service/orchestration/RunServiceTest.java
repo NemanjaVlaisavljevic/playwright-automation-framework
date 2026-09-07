@@ -15,6 +15,7 @@ import dev.vlaisanem.automation.runner.service.artifacts.FakeArtifactRepository;
 import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
 import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy.DeploymentProfile;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
+import dev.vlaisanem.automation.runner.service.config.RateLimitRule;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
@@ -694,7 +695,16 @@ class RunServiceTest {
             Duration.ofSeconds(2),
             10_000,
             Duration.ofSeconds(15),
-            Duration.ofMinutes(10));
+            Duration.ofMinutes(10),
+            new RateLimitRule(5, Duration.ofMinutes(1)),
+            new RateLimitRule(10, Duration.ofMinutes(1)),
+            new RateLimitRule(3, Duration.ofMinutes(1)),
+            new RateLimitRule(10, Duration.ofHours(1)),
+            new RateLimitRule(10, Duration.ofMinutes(1)),
+            new RateLimitRule(120, Duration.ofMinutes(1)),
+            new RateLimitRule(30, Duration.ofMinutes(1)),
+            3,
+            16384);
     store = new FakeRunLifecycleStore();
     RunEventBroker broker =
         new RunEventBroker(store, properties, noopArtifactIngestionService(properties));
@@ -1051,7 +1061,16 @@ class RunServiceTest {
             Duration.ofSeconds(2),
             10_000,
             Duration.ofSeconds(15),
-            Duration.ofMinutes(10));
+            Duration.ofMinutes(10),
+            new RateLimitRule(5, Duration.ofMinutes(1)),
+            new RateLimitRule(10, Duration.ofMinutes(1)),
+            new RateLimitRule(3, Duration.ofMinutes(1)),
+            new RateLimitRule(10, Duration.ofHours(1)),
+            new RateLimitRule(10, Duration.ofMinutes(1)),
+            new RateLimitRule(120, Duration.ofMinutes(1)),
+            new RateLimitRule(30, Duration.ofMinutes(1)),
+            3,
+            16384);
     RunEventBroker broker =
         new RunEventBroker(lifecycleStore, properties, noopArtifactIngestionService(properties));
     RunLifecycleCoordinator lifecycle =
@@ -1101,7 +1120,16 @@ class RunServiceTest {
             Duration.ofSeconds(2),
             10_000,
             Duration.ofSeconds(15),
-            Duration.ofMinutes(10));
+            Duration.ofMinutes(10),
+            new RateLimitRule(5, Duration.ofMinutes(1)),
+            new RateLimitRule(10, Duration.ofMinutes(1)),
+            new RateLimitRule(3, Duration.ofMinutes(1)),
+            new RateLimitRule(10, Duration.ofHours(1)),
+            new RateLimitRule(10, Duration.ofMinutes(1)),
+            new RateLimitRule(120, Duration.ofMinutes(1)),
+            new RateLimitRule(30, Duration.ofMinutes(1)),
+            3,
+            16384);
     RunEventBroker broker =
         new RunEventBroker(fakeStore, properties, noopArtifactIngestionService(properties));
     RunLifecycleCoordinator lifecycle =

@@ -3,6 +3,12 @@ spring:
     name: runner-service
   jackson:
     default-property-inclusion: non_null
+    # D3.3 - Spring Boot's own Jackson autoconfiguration defaults to lenient deserialization
+    # (unknown JSON fields silently ignored) - confirmed empirically, not assumed, by a request
+    # carrying an extra field that Bean Validation alone would never catch (@Valid only sees the
+    # fields the object actually has). Explicit here to make the request schema strict.
+    deserialization:
+      fail-on-unknown-properties: true
   mvc:
     problemdetails:
       enabled: true
@@ -40,7 +46,16 @@ server:
         # deployment sets it explicitly via SERVER_SERVLET_SESSION_COOKIE_SECURE=true (see
         # deploy/runner-service/Dockerfile).
         same-site: lax
-      timeout: 12h
+      # D3.4 - a single, rarely-used admin session doesn't need a long-lived idle window. This is
+      # an IDLE timeout, not an absolute session lifetime (the Servlet HttpSession contract: the
+      # clock resets on every access, Spring Boot passes this value straight through) - an
+      # actively-used session (stolen or not) is not force-expired at the 4h mark. Chosen as a
+      # reasonable "forgot to log out" bound for one admin working session
+      # (launch/monitor/cancel a run), not as a hard cap on a compromised session's lifetime; see
+      # SecurityAccessMatrixTest#anInvalidatedSessionIsTreatedAsAnonymousNeverAsLingeringAdminOrAServerError
+      # for what this project actually tests here (post-invalidation behavior, not the idle-timeout
+      # clock itself - MockMvc has no way to simulate real wall-clock idle time elapsing).
+      timeout: 4h
 
 management:
   endpoints:
@@ -72,3 +87,29 @@ runner:
   sse-max-subscribers: 100
   sse-heartbeat-interval: PT15S
   sse-emitter-timeout: PT10M
+  # D3.3 - abuse protection. Every threshold below is a *rate* (or concurrent-connection) limit,
+  # distinct from queue-capacity above (which bounds how many runs may wait behind the one
+  # executing, never how often a client may call an endpoint at all).
+  oauth-authorization-rate-limit:
+    max-attempts: 5
+    window: PT1M
+  oauth-callback-rate-limit:
+    max-attempts: 10
+    window: PT1M
+  create-run-rate-limit-per-minute:
+    max-attempts: 3
+    window: PT1M
+  create-run-rate-limit-per-hour:
+    max-attempts: 10
+    window: PT1H
+  cancel-run-rate-limit:
+    max-attempts: 10
+    window: PT1M
+  public-read-rate-limit:
+    max-attempts: 120
+    window: PT1M
+  download-rate-limit:
+    max-attempts: 30
+    window: PT1M
+  sse-max-connections-per-ip: 3
+  max-request-body-bytes: 16384

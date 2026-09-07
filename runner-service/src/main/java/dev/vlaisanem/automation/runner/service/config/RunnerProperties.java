@@ -44,6 +44,31 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param sseEmitterTimeout hard upper bound on how long one SSE connection is kept open before the
  *     server itself completes it, independent of client behavior - the expected recovery is a
  *     client reconnect with {@code Last-Event-ID}.
+ * @param oauthAuthorizationRateLimit (D3.3) per-client-IP limit on {@code GET
+ *     /api/v1/auth/oauth2/authorization/github} - the redirect-starter, nearly free to call, so a
+ *     looser limit than the callback below.
+ * @param oauthCallbackRateLimit (D3.3) per-client-IP limit on {@code GET
+ *     /api/v1/auth/oauth2/callback/github} - the one login-flow request that actually spends a real
+ *     GitHub API call (the authorization-code exchange), so this is the login surface that matters
+ *     most to protect.
+ * @param createRunRateLimitPerMinute (D3.3) per-admin (GitHub numeric id) short-window limit on
+ *     {@code POST /api/v1/runs}.
+ * @param createRunRateLimitPerHour (D3.3) per-admin longer-window limit on the same endpoint,
+ *     enforced independently of and in addition to {@link #createRunRateLimitPerMinute} - both must
+ *     pass.
+ * @param cancelRunRateLimit (D3.3) per-admin limit on {@code POST /api/v1/runs/*&#47;cancel} -
+ *     tracked separately from run creation, never assumed to be equally expensive.
+ * @param publicReadRateLimit (D3.3) per-client-IP limit on the anonymous, unauthenticated read-only
+ *     GET routes (run list/detail, capabilities, test catalog) - the largest anonymous surface,
+ *     needing no login at all.
+ * @param downloadRateLimit (D3.3) per-client-IP limit on process-log/artifact download routes,
+ *     tracked separately from the cheaper plain-JSON reads above.
+ * @param sseMaxConnectionsPerIp (D3.3) maximum number of concurrent SSE subscriptions one client IP
+ *     may hold at once - enforced in addition to, never instead of, {@link #sseMaxSubscribers}'s
+ *     existing global ceiling; without this, one client alone could occupy every global slot.
+ * @param maxRequestBodyBytes (D3.3) hard cap on request body size, enforced before any JSON
+ *     deserialization is attempted - a real {@code CreateRunRequest} payload (environment/suite
+ *     plus up to 25 short test keys) is well under this.
  */
 @ConfigurationProperties(prefix = "runner")
 public record RunnerProperties(
@@ -61,7 +86,16 @@ public record RunnerProperties(
     Duration ingestionDrainTimeout,
     int sseMaxSubscribers,
     Duration sseHeartbeatInterval,
-    Duration sseEmitterTimeout) {
+    Duration sseEmitterTimeout,
+    RateLimitRule oauthAuthorizationRateLimit,
+    RateLimitRule oauthCallbackRateLimit,
+    RateLimitRule createRunRateLimitPerMinute,
+    RateLimitRule createRunRateLimitPerHour,
+    RateLimitRule cancelRunRateLimit,
+    RateLimitRule publicReadRateLimit,
+    RateLimitRule downloadRateLimit,
+    int sseMaxConnectionsPerIp,
+    long maxRequestBodyBytes) {
 
   public RunnerProperties {
     if (repoRoot == null || repoRoot.isBlank()) {
@@ -118,6 +152,33 @@ public record RunnerProperties(
     }
     if (sseEmitterTimeout == null || sseEmitterTimeout.isZero() || sseEmitterTimeout.isNegative()) {
       throw new IllegalArgumentException("runner.sse-emitter-timeout must be positive");
+    }
+    if (oauthAuthorizationRateLimit == null) {
+      throw new IllegalArgumentException("runner.oauth-authorization-rate-limit must be set");
+    }
+    if (oauthCallbackRateLimit == null) {
+      throw new IllegalArgumentException("runner.oauth-callback-rate-limit must be set");
+    }
+    if (createRunRateLimitPerMinute == null) {
+      throw new IllegalArgumentException("runner.create-run-rate-limit-per-minute must be set");
+    }
+    if (createRunRateLimitPerHour == null) {
+      throw new IllegalArgumentException("runner.create-run-rate-limit-per-hour must be set");
+    }
+    if (cancelRunRateLimit == null) {
+      throw new IllegalArgumentException("runner.cancel-run-rate-limit must be set");
+    }
+    if (publicReadRateLimit == null) {
+      throw new IllegalArgumentException("runner.public-read-rate-limit must be set");
+    }
+    if (downloadRateLimit == null) {
+      throw new IllegalArgumentException("runner.download-rate-limit must be set");
+    }
+    if (sseMaxConnectionsPerIp < 1) {
+      throw new IllegalArgumentException("runner.sse-max-connections-per-ip must be at least 1");
+    }
+    if (maxRequestBodyBytes < 1024) {
+      throw new IllegalArgumentException("runner.max-request-body-bytes must be at least 1024");
     }
   }
 }

@@ -17,6 +17,7 @@ import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscriber;
+import dev.vlaisanem.automation.runner.service.events.SseConnectionsPerIpTracker;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
@@ -28,6 +29,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -40,6 +42,11 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 @WebMvcTest(controllers = {RunEventStreamController.class, RunExceptionHandler.class})
 @EnableConfigurationProperties(RunnerProperties.class)
+// D3.3 - a real instance, not a MockitoBean: SseConnectionsPerIpTracker#tryAcquire is boolean, and
+// a Mockito mock would default it to false, silently rejecting every existing test here unless
+// explicitly stubbed true everywhere. The real component (only depends on the already-real
+// RunnerProperties bean above) behaves exactly as production does, with no such pitfall.
+@Import(SseConnectionsPerIpTracker.class)
 class RunEventStreamControllerTest {
 
   @Autowired private MockMvc mockMvc;
@@ -57,6 +64,42 @@ class RunEventStreamControllerTest {
     when(runService.find("missing")).thenThrow(new RunNotFoundException("missing"));
 
     mockMvc.perform(get("/api/v1/runs/missing/events")).andExpect(status().isNotFound());
+  }
+
+  /**
+   * Regression test for the D3.3 review finding: one client IP must not be able to occupy every
+   * global SSE slot - real {@code application.yml} default is 3 concurrent connections per IP. Uses
+   * a distinct, reserved-range test IP (not the shared {@code 127.0.0.1} MockMvc default every
+   * other test in this class uses, some of which never close their own connection and would
+   * otherwise leak a permanently-held slot into this test's own budget) so this test's limit state
+   * can never collide with theirs regardless of execution order.
+   */
+  @Test
+  void theFourthConcurrentSseConnectionFromTheSameIpIsRejected() throws Exception {
+    Run run =
+        Run.queued("run-1", Environment.PUBLIC, Suite.API, Instant.parse("2026-08-31T00:00:00Z"));
+    when(runService.find("run-1")).thenReturn(run);
+
+    for (int i = 0; i < 3; i++) {
+      mockMvc
+          .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("198.51.100.7")))
+          .andExpect(request().asyncStarted());
+    }
+
+    mockMvc
+        .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("198.51.100.7")))
+        .andExpect(status().isTooManyRequests())
+        .andExpect(
+            org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                .exists("Retry-After"));
+  }
+
+  private static org.springframework.test.web.servlet.request.RequestPostProcessor remoteAddr(
+      String address) {
+    return request -> {
+      request.setRemoteAddr(address);
+      return request;
+    };
   }
 
   @Test

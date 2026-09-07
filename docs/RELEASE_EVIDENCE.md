@@ -216,3 +216,265 @@ Real local GitHub OAuth App registered (`Runner Dashboard Local`, homepage `http
 - Logout confirmed to actually end the session, not just update the UI: `GET /api/v1/auth/me` immediately after -> `{"authenticationRequired":true,"canManageRuns":false,"authenticated":false}`.
 
 This closes every remaining item of D3.2's own acceptance checklist. Full Caddy-fronted production click-through with a real domain remains D5's job, per the D5 acceptance checklist already locked in `docs/DEPLOYMENT_ARCHITECTURE.md` - no public domain/TLS exists yet to register a real production callback against.
+
+## Faza D3.3 - abuse protection
+
+**Date:** 2026-09-07. **Scope:** a per-resource-surface rate-limit matrix (never one global limit), a verified reverse-proxy IP-trust boundary, a pre-deserialization request-body size cap reinforced by Bean Validation, CSP/Permissions-Policy, and an explicitly proven CORS-unsupported decision. Plan reviewed and revised once before implementation - see the plan's own "Context" section for the resulting five design constraints; the review's specific corrections (per-surface limits not a global one, the anonymous SSE/download/read surface, a verified IP-trust boundary, pre-deserialization body limits, and a narrower CSP) are all reflected in what was actually built, not just planned.
+
+### Rate-limit matrix, implemented and tested
+
+| Surface | Route(s) | Limit | Key | Verified |
+|---|---|---|---|---|
+| OAuth authorization | `GET /api/v1/auth/oauth2/authorization/github` | 5/min | client IP | Real `bootRun`: 6th attempt within a minute → real `429` + `Retry-After: 59`; recovered to `302` again after waiting out the window |
+| OAuth callback | `GET /api/v1/auth/oauth2/callback/github` | 10/min | client IP | Real `bootRun`: 11th attempt → real `429` |
+| Create run | `POST /api/v1/runs` | 3/min **and** 10/hour | GitHub numeric admin ID | `SecurityAccessMatrixTest` (real `OAuth2User` principal, not `@WithMockUser` - see why below) |
+| Cancel run | `POST /api/v1/runs/*/cancel` | 10/min | GitHub numeric admin ID | Covered by the same `AbuseRateLimitFilter` matrix entry as create-run; wiring identical |
+| Public REST GET | `/api/v1/runs`, `/api/v1/runs/*`, `/api/v1/capabilities`, `/api/v1/tests` | 120/min | client IP | `SecurityAccessMatrixTest`: 121st call → `429` |
+| Log/artifact download | `/api/v1/runs/*/log`, `/api/v1/runs/*/artifacts`, `/api/v1/runs/*/artifacts/*` | 30/min | client IP | Same filter/matrix entry as public-read; wiring identical |
+| SSE | `GET /api/v1/runs/*/events` | 3 concurrent connections per IP, on top of the existing global `sseMaxSubscribers` | client IP | `RunEventStreamControllerTest`: 4th concurrent connection from one IP → `429` |
+| Health check | `/actuator/health` | unlimited | — | Not matched by any rule in the filter, by construction |
+
+`runner.queue-capacity` (existing, unchanged) is explicitly documented as *not* a rate limit - it bounds queued runs, never call frequency.
+
+**A real bug found only by live verification, not caught by the automated test suite**: the first implementation registered `AbuseRateLimitFilter` via `.addFilterAfter(filter, AuthorizationFilter.class)`, reasoning that 401/403 should always win over rate-limiting. Live-testing the OAuth-authorization surface against a real `bootRun` showed the 6th attempt in a minute still returned `302`, never `429` - traced to Spring Security's own filter ordering: `OAuth2AuthorizationRequestRedirectFilter`/`OAuth2LoginAuthenticationFilter` (which actually handle those two routes) run, and fully commit their response, well before `AuthorizationFilter` - a filter registered after it is simply never reached for those two routes at all. Fixed by registering after `SecurityContextHolderFilter` instead (still early enough to catch the OAuth routes, still late enough that an already-authenticated admin's session `Authentication` is available for the numeric-id key extraction) - re-verified live: 6th OAuth-authorization attempt now correctly returns `429` + `Retry-After: 59`, and the 11th OAuth-callback attempt returns `429` too. **This is exactly why the automated `@WebMvcTest` suite alone did not catch it**: no test had been written yet for the OAuth-authorization/callback surfaces specifically (only create-run and public-read were covered) - the gap in test coverage, not just the bug itself, is the real lesson.
+
+**Recovery after a limit expires - proven live, not assumed**: after the OAuth-authorization 429, waited 65 real seconds (past the 1-minute window) and confirmed the exact same request succeeded again (`302`), proving the fixed-window counter actually resets rather than latching permanently.
+
+### Reverse-proxy IP-trust boundary
+
+`deploy/runner-service/Dockerfile`'s `SERVER_FORWARD_HEADERS_STRATEGY` changed from D3.2's `framework` to `native` - activates Tomcat's own `RemoteIpValve` (`server.tomcat.remoteip.internal-proxies`, defaults already covering every private/Docker-internal range) instead of a plain `ForwardedHeaderFilter`, which has no trusted-proxy concept at all. Confirmed via reading Spring Boot 4's own `TomcatWebServerFactoryCustomizer` source directly (not assumed from documentation) that `native` is required to get `RemoteIpValve` at all - `framework` only ever activates the generic filter. `RemoteIpValve` is a Tomcat connector-level `Valve`, so `MockMvc` (which dispatches directly to `DispatcherServlet`, never booting a real embedded Tomcat) cannot exercise it.
+
+**Verified against a real `docker compose` stack** (`deploy/docker-compose.yml` - Caddy + `runner-service` + Postgres, fake OAuth2 credentials matching this project's own established fake-creds precedent, never a real GitHub round trip): each request in a run of six sent a *different*, deliberately spoofed `X-Forwarded-For` value straight at Caddy - the 6th still hit the configured 5/min OAuth-authorization limit exactly as if every request had come from the same real client, proving Caddy's own default `X-Forwarded-For` handling overrides a client-supplied value rather than relaying it. Repeated for the 120/min public-read limit with a *different* spoofed value on every single one of 121 requests: the 121st still returned `429`, at the exact expected count - the real client identity resolved through Caddy → `RemoteIpValve` → `AbuseRateLimitFilter` stayed the same one real key throughout, regardless of what any individual request tried to claim.
+
+One real, separate finding along the way, unrelated to the trust boundary itself: with the local `WEB_HTTP_BIND=18080` host-port-remap escape hatch in use (this machine's own port 80 was already occupied by an unrelated stack), the OAuth `redirect_uri` Caddy/Spring resolved together omitted that remapped port entirely (`http://localhost/...`, not `http://localhost:18080/...`) - even when explicitly supplying a spoofed `X-Forwarded-Host` with a port, confirming Caddy overrides that too rather than relaying it. Consistent with Caddy's own documented `{http.request.host}` placeholder (used for its default `X-Forwarded-Host` value) never carrying port information at all, regardless of what port the original request actually used. This has no effect on real production, which always terminates on the real domain's standard `80`/`443` (no port ever needed in the URL there) - it is only visible when deliberately remapping the local escape-hatch port, and is noted here for whoever next uses that escape hatch, not treated as a D3.3 defect.
+
+### Request body size, before deserialization
+
+`RequestBodySizeLimitFilter` (registered in both chains - a resource-protection concern, not auth-adjacent) checks `Content-Length` up front and wraps the request `InputStream` in a byte-counting wrapper as a second, independent layer. Live-verified against a real `bootRun`: a `16385`-byte body → real `413` `ProblemDetail`; a normal small body proceeds to the existing CSRF check exactly as before (`403` for a missing token, not `413`) - confirming the size filter doesn't interfere with legitimate requests. `CreateRunRequest` also gained `@Size(max = 25)` on `testKeys` and `@Size(max = 200)` per key, verified via `RunControllerTest` to produce a clean `400` independently of `CustomTestSelectionValidator`'s own identical cap (defense in depth, not a replacement).
+
+**Two defaults verified empirically, not assumed, per this project's own discipline**: (1) Spring's built-in `@Valid`-failure handling already produces a compliant `400` `ProblemDetail` with no extra code - confirmed by a passing test, not new handling added for it. (2) Spring Boot's Jackson autoconfiguration defaults to **lenient** deserialization (unknown JSON fields silently ignored), the opposite of what was assumed - a test sending an extra field first failed against the real default, then passed once `spring.jackson.deserialization.fail-on-unknown-properties: true` was added to `application.yml`.
+
+### CSP, Permissions-Policy, CORS
+
+CSP/Permissions-Policy added to `deploy/web/Caddyfile`'s existing header block (not Spring Security - Caddy is the only thing that serves the SPA's own `index.html`/JS/CSS directly). Directive set verified against the real production bundle (`npm run build` + reading `dist/index.html`/CSS: no inline scripts/styles, no `data:` URIs anywhere), so neither `'unsafe-inline'` nor `data:` was added preemptively. **Verified against a real running Caddy container** (`caddy validate` first confirmed the config parses against the actual stock `caddy:2-alpine` image with no custom `xcaddy` build needed; then a live container serving a real file, `curl -D -`, confirmed the exact response headers):
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://avatars.githubusercontent.com; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+```
+
+(plus the pre-existing `X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy`, and confirmed the `-Server` directive still successfully removes the `Server: Caddy` header).
+
+CORS: no `CorsConfigurationSource` bean, `.cors(CorsConfigurer::disable)` explicit on both chains - made into a stated, tested decision. `SecurityAccessMatrixTest` proves both a cross-origin `OPTIONS` preflight against a mutating endpoint and an ordinary cross-origin-shaped `GET` against a public route get no `Access-Control-Allow-Origin` header at all.
+
+### Review round 2 (2026-09-07) - 2 P1 + 3 P2 + 1 P3, all fixed and reverified
+
+A second, independent code-review pass (findings from direct source review - the reviewer's own Gradle in their environment could not launch child processes at all, `Unable to establish loopback connection`, so nothing here came from re-running the suite themselves) found two P1s and several P2/P3 issues the first pass's own live-verification and automated tests had not caught.
+
+1. **[P1] `AbuseRateLimitFilter`/`RequestBodySizeLimitFilter`, as plain `Filter` beans, were also auto-registered by Spring Boot as generic servlet-container filters - on top of, and independent from, their intended manual `SecurityFilterChain` wiring.** Confirmed by reading `ServletContextInitializerBeans`: Spring Boot registers *any* `Filter` bean found in the context as a container-level filter regardless of whether that same bean is also explicitly wired via `.addFilterBefore/After(...)`. Concretely this meant `AbuseRateLimitFilter` - meant to run only in the OAuth2 chain - could also run under the permissive/local chain, at an ordering controlled by Spring Boot's own default (`FilterRegistrationBean` ordering), not by this project's own explicit chain positioning. Fixed exactly as proposed: `SecurityConfig` now also declares a `FilterRegistrationBean<AbuseRateLimitFilter>`/`FilterRegistrationBean<RequestBodySizeLimitFilter>` for each, both with `.setEnabled(false)` - suppressing the automatic generic registration entirely, leaving the explicit `SecurityFilterChain` wiring as the *only* place either filter ever runs. **New regression test** (`SecurityAccessMatrixTest`, real Spring context, not `MockMvc`-only) asserts the permissive/local chain path has zero abuse-rate-limiting behavior (many rapid requests, none ever `429`) while the OAuth2 chain path still limits identically to before.
+2. **[P1] `InMemoryRateLimiter.windows` grew without bound - every new client IP left a permanent record, and a real attacker (scanner, botnet, rotating IPv6) can present many genuinely distinct addresses, not just spoofed headers a trust boundary can reject.** Rewrote the map's lifecycle: an opportunistic sweep every 256 calls removes any window whose duration has already elapsed, **plus** a hard ceiling (`maxTrackedKeys`, default 100,000) that, once reached, evicts an already-expired entry if one exists or else the single oldest-by-creation-time entry - a real upper bound on memory regardless of how many distinct keys ever appear, with no dependency on Redis or any other new component for this single-instance deployment. **New test** `trackedKeyCountStaysBoundedUnderManyOneOffKeys` feeds the limiter 500 single-use keys through a limiter constructed with a cap of 20, asserting the tracked-key count never exceeds 20.
+3. **[P2] Multi-rule rate limiting (create-run's per-minute + per-hour) was not one atomic decision** - the original code checked/incremented the minute rule, then separately checked/incremented the hour rule, so a request rejected by the hourly rule had already silently consumed the minute rule's budget, and the returned `Retry-After` could reflect whichever rule happened to be checked last rather than the one that actually mattered. Rewrote `InMemoryRateLimiter.tryAcquire` to take the full list of rules for a key, lock every involved window in a single globally-consistent order (sorted by `System.identityHashCode`, via recursive `synchronized` blocks - safe against deadlock between concurrent multi-rule callers), evaluate all rules without mutating any of them, and only increment counters afterward if every rule passed; on rejection, `Retry-After` is the **largest** remaining time among the rules that actually blocked the request. Also fixed `Duration.toSeconds()` truncation (`59.9s` was rounding down to `Retry-After: 59`, advising a client to retry before the window had actually elapsed) - `AbuseRateLimitFilter.ceilSecondsAtLeastOne` now rounds any nonzero remainder up, floored at a minimum of 1. **New tests**: `multiRuleChecksAreAtomicNeverPartiallyConsumingOnRejection` and `retryAfterReflectsTheLargestRemainingTimeAmongRejectingRules` (`InMemoryRateLimiterTest`), plus three unit tests for the rounding fix itself (`AbuseRateLimitFilterTest`).
+4. **[P2] The chunked/lying-`Content-Length` body path had no proven `413` behavior** - the original stream-based protection threw a plain `IOException` on overflow, and its own comment admitted the resulting HTTP status could end up `400` instead of `413`, depending on how Spring's dispatch machinery happened to translate that exception. Redesigned `RequestBodySizeLimitFilter` to read the **entire** request body into memory up front (bounded by a running byte count during the read itself, independent of any `Content-Length` header) *before* ever calling `filterChain.doFilter(...)`, throwing a dedicated `RequestBodyTooLargeException` the filter catches itself and maps to a real `413` `ProblemDetail` - then re-serves the already-validated bytes to the rest of the chain via a `ByteArrayInputStream`-backed `ServletInputStream` wrapper. This guarantees a uniform `413` regardless of whether the client declared a (possibly false) `Content-Length` at all, since the check now happens entirely before Spring's `DispatcherServlet`/deserialization layer ever sees the request. **New standalone test** `RequestBodySizeLimitFilterTest` drives the real `Filter.doFilter()` directly against hand-built Mockito mocks (`MockHttpServletRequest`'s own `getContentLengthLong()` in this Spring version is hard-derived from actual content bytes with no way to construct a genuine declared/actual mismatch through it, confirmed by reading its source) - proves a body whose *declared* length is `-1` (unreliable/absent, exactly a chunked request) but whose *actual* bytes exceed the cap still yields a real `413` with the filter chain never invoked, and that a small body under the cap with the same unreliable declared length passes through unchanged.
+5. **[P2] The IP-trust boundary (`native` + `RemoteIpValve`) had been acceptance-tested for real against a live Compose stack, but the Dockerfile comment overclaimed this as covered by an automated `AbuseRateLimitFilterIntegrationTest` that does not exist.** Corrected the comment to state precisely what is and isn't true: `RemoteIpValve` is a Tomcat connector-level `Valve`, structurally unreachable by any `MockMvc`-based test, and this specific mechanism was verified only against a real `docker compose` stack (see the "Reverse-proxy IP-trust boundary" section above for the actual spoofed-`X-Forwarded-For` and 121st-request transcripts) - never simulated or asserted "by construction."
+6. **[P3] `InMemoryRateLimiter.java` contained a literal NUL byte as the separator between a rate-limit namespace and its key** (not a text space character), which caused Git/`grep`/review tooling to treat the file as binary - hiding its diffs from ordinary review entirely. Confirmed via `grep -aoP` before the fix (found the byte) and after (file reports as plain "Java source, ASCII text"). Replaced the string-concatenation key with a proper typed `private record WindowKey(String namespace, String key)` used as the map key directly - no separator character of any kind needed, and the same rewrite that fixed the P1 bounded-memory issue above.
+
+All fixes verified together: `./gradlew.bat spotlessApply spotlessCheck test --rerun` (every module) green, including the 13 new/updated tests across `InMemoryRateLimiterTest` (8), `AbuseRateLimitFilterTest` (3, new file), and `RequestBodySizeLimitFilterTest` (2, new file). Live-reverified against a real `bootRun` (with `runner-service/.env.local` temporarily moved aside to rule out its own OAuth2 credentials silently keeping the OAuth2 chain active during the permissive-chain check): the permissive/local chain sent 130 rapid requests with zero `429`s; restoring `.env.local` and repeating against the OAuth2 chain reproduced the original `429` at exactly the 121st request, with no double-counting from the registration-bean change. Re-verified against a real Compose stack as documented above (spoofed-`X-Forwarded-For` tests, the 121st-public-read-request test).
+
+### Gates
+
+`./gradlew.bat spotlessApply spotlessCheck test --rerun` (every module) green.
+
+`dashboardE2eTest` (real backend + real production dashboard bundle + real Chromium): **22/22
+green** on the final rerun (2026-09-07) - the closing verification round 2 explicitly asked for,
+not a 19/20 or 21/22 called "close enough."
+
+Getting there took two earlier attempts that failed on the same external cause, root-caused each
+time rather than assumed: `DownloadLogE2eTest` launches a real `smokeTest` run, and that run's own
+`RoomApiContractTest` failed against the live public demo site's actual room inventory - first with
+`/rooms/4: required property 'image'/'description' not found`, then (a second attempt, a different
+timestamp) `/rooms/3` with the identical two missing fields. Both traced via the real spawned
+process's own log, not assumed from the test name alone, and both independently confirmed by
+querying the live site's real `/api/room` endpoint directly at the time of each failure - a
+different room id each time, consistent with some other consumer's own mutation-test runs
+periodically leaving a "Test room"-shaped entry with incomplete data on this shared, mutable
+third-party instance this project doesn't control. `RoomApiContractTest`/`smokeTest` never touch
+`runner-service`'s own HTTP surface or any of D3.3's filters at all, so neither failure could be
+attributable to D3.3 code - confirmed, not merely argued, by the fact that a third attempt (querying
+`/api/room` immediately beforehand to confirm all four rooms currently carried both fields) passed
+cleanly end to end, including every test that exercises D3.3's own filters through the real
+dashboard UI.
+
+## Faza D3.4 - security test coverage
+
+**Date:** 2026-09-07. **Scope:** an audit of D3.4's own checklist against everything D3.1-D3.3 had
+already incidentally covered, closing the real gaps found rather than re-testing what already had
+coverage.
+
+**Already covered by existing tests** (no new work needed): the full access matrix, anonymous/
+non-admin/admin × create/cancel, missing-CSRF rejection, the whole D3.3 rate-limit matrix,
+`ROLE_ADMIN` never bypassing `RunAvailabilityPolicy`, and anonymous read access - all in
+`SecurityAccessMatrixTest` and its sibling security test files already documented above.
+
+**Gaps found and closed:**
+
+1. **A mismatched (not merely missing) CSRF token** - `authenticatedAdminCreateWithAMismatchedCsrfTokenIsForbidden`
+   sends a real `XSRF-TOKEN` cookie and a deliberately different `X-XSRF-TOKEN` header value,
+   proving the repository actually compares values rather than only checking presence.
+2. **Session expiration behavior** - `server.servlet.session.timeout` was already set (`12h`), but
+   with no documented rationale and no test of the actual behavior. Lowered to `4h` (the user's own
+   call: a rarely-used single-admin session doesn't need a long idle window). **Precisely scoped,
+   per a review finding**: `server.servlet.session.timeout` is an *idle* timeout under the Servlet
+   `HttpSession` contract (the clock resets on every access), not an absolute session lifetime - an
+   actively-used session (stolen or not) is never force-expired at the 4h mark just because 4h have
+   passed since login. New test
+   `anInvalidatedSessionIsTreatedAsAnonymousNeverAsLingeringAdminOrAServerError` proves only the
+   *post-invalidation* half of that (`MockHttpSession.invalidate()` simulates the state right after
+   invalidation happens, by whichever mechanism - explicit logout or the container's own eventual
+   idle-timeout eviction; `MockMvc` has no way to simulate real wall-clock idle time actually
+   elapsing, so this is not a test of the 4h clock itself): the very next request after
+   invalidation is fully anonymous (`/auth/me` reports `authenticated: false`, a mutation attempt
+   gets `401`, never a `500`). Deliberately not paired with a real absolute-TTL mechanism (a
+   server-side authenticated-at timestamp + injectable `Clock`, checked on every request) - for
+   this single-admin, `HttpOnly`+`Secure`-cookie portfolio deployment, the idle timeout is judged a
+   reasonable "forgot to log out" bound, not a defense against an already-stolen active session
+   (that threat is mitigated by the cookie attributes themselves, not session lifetime).
+3. **`mutation`/`fixture` reachability via a raw REST call** - `MUTATION` is not even a `Suite` enum
+   value (structurally unreachable, not merely policy-rejected); a new test
+   (`aSuiteValueOutsideTheAllowlistedEnumIsRejectedWith400`) proves that by construction. `FIXTURE`
+   *is* a legitimate, allowlisted suite (the deliberately-always-fails drill-down fixture), so three
+   new tests prove it gets exactly the same authorization treatment as any other mutation
+   (`anonymousFixtureLaunchIsRejectedWithAProblemDetail401`,
+   `authenticatedNonAdminFixtureLaunchIsForbidden`, `authenticatedAdminFixtureLaunchSucceeds`) -
+   never a client-choosable escape hatch reachable anonymously.
+4. **A stale Javadoc reference** in `SecurityAccessMatrixTest` pointed at a nonexistent
+   `AbuseRateLimitFilterIntegrationTest` - corrected to reference the real
+   `PermissiveChainHasNoAbuseRateLimitTest`/`OAuth2ChainAppliesAbuseRateLimitTest` pair and this
+   document's own D3.3 Compose-stack evidence.
+5. **The real browser E2E login->launch->cancel->logout**, deliberately left manual-only at D3.2
+   (see that section above) to avoid a real-GitHub-account dependency in CI, is now automated
+   without reintroducing that risk. New `OAuthFlowE2eTest` (its own fully isolated
+   backend+dashboard+WireMock instance, mirroring `BackendUnavailableE2eTest`'s isolation pattern)
+   runs the real `runner-service` with its normal Spring Boot OAuth2 client binding -
+   `spring.security.oauth2.client.provider.github.authorization-uri`/`token-uri`/`user-info-uri`/
+   `user-name-attribute` point only the three endpoint URIs at a local WireMock server, the
+   standard, supported way to redirect an existing `CommonOAuth2Provider.GITHUB`-derived
+   registration at a different provider - deliberately **not** a fake in-test
+   `ClientRegistrationRepository` (an earlier draft of this test used one; corrected during review
+   so the real `RunnerSecurityEnvironmentPostProcessor` bridging and the real
+   `ClientRegistrationRepository` construction are both actually exercised, not bypassed). WireMock
+   stands in for exactly three GitHub endpoints: `authorize` (echoes back whatever `redirect_uri`/
+   `state` Spring Security's own `OAuth2AuthorizationRequestRedirectFilter` sent, via WireMock's
+   response templating - exactly what a real GitHub authorize endpoint does), `access_token`
+   (returns a fixed fake bearer token), and `user` (returns one fixed fake GitHub identity, id
+   `999`). Two real scenarios proven end to end through a real browser:
+   - `loginLaunchCancelLogoutRoundTripsThroughTheRealOAuth2Flow`: anonymous (Run button present but
+     disabled, "Admin login required") -> clicks "Log in with GitHub" -> real authorization
+     redirect -> stub GitHub round trip -> real callback/token exchange/user-info call -> real
+     session -> `/auth/me` confirms authenticated admin -> launches a `FIXTURE` run (CSRF-protected
+     POST, succeeding proves the token was actually primed and sent) -> cancels it, reaches
+     `CANCELLED` -> logs out -> `/auth/me` reverts to anonymous -> the Run button is disabled again.
+     WireMock's own request log additionally verifies the token endpoint received the expected
+     `code` and the user-info endpoint was called with the expected `Bearer` token.
+   - `aNonAllowlistedGithubIdentityIsRejectedWithNoAdminSession`: same stub identity (id `999`),
+     but this instance's own `RUNNER_SECURITY_ADMIN_GITHUB_ID` is set to a different id (`42`) -
+     login must fail outright with no admin session at all (`GithubOAuth2UserService` throws before
+     any `SecurityContext` is established), confirmed via `/auth/me` still reporting
+     `authenticated: false`.
+
+   Which identity is treated as admin is controlled entirely by which `RUNNER_SECURITY_ADMIN_GITHUB_ID`
+   each test's own isolated backend is started with - the stub itself never changes between the two
+   scenarios, so there is nothing to reconfigure or reset between tests.
+
+All fixes verified together: `./gradlew.bat spotlessApply spotlessCheck test --rerun` (every
+module) green. The full `dashboardE2eTest` suite reran green at **24/24** (the 22 from D3.3's own
+closing plus the two new `OAuthFlowE2eTest` cases) - the real, non-flaky proof that both the new
+WireMock-based OAuth automation and the lowered session timeout introduced no regression anywhere
+else in the suite.
+
+### Review round (2026-09-07) - 3 P1 + 1 P2, all fixed and reverified
+
+A review of `OAuthFlowE2eTest` itself (architecture judged sound - real Spring binding, isolated
+WireMock, real browser/session/CSRF flow) found three acceptance-proof gaps and one cleanup gap.
+
+1. **[P1] The non-admin rejection scenario could pass green without the OAuth round trip ever
+   completing.** It started already on a dashboard URL and waited for
+   `url -> url.startsWith(DASHBOARD_BASE_URL)` - a predicate the *starting* URL already satisfies,
+   so `waitForURL` returned immediately, before the click's own redirect chain had necessarily gone
+   anywhere. The final anonymous state is identical to the initial one, so a token-exchange or
+   user-info call that silently never happened at all would have looked exactly like a correctly-
+   rejected login. **The same latent flaw existed in the happy-path test's own login wait**
+   (`page.waitForURL(DASHBOARD_BASE_URL + "/runs")`, called after already being on exactly that
+   URL) - not flagged directly by the review, but found and fixed for the identical reason once the
+   mechanism was understood. Fixed both: replaced with `page.waitForResponse(...)` matched against
+   the real `/api/v1/auth/oauth2/callback/github` response, registered *before* the click that
+   triggers it (the two-arg form - a wait issued after the click would race a same-machine round
+   trip fast enough to have already completed). The non-admin test additionally now resets
+   `gitHubStub`'s request journal in `@BeforeEach` (`gitHubStub.resetRequests()` - the stub's
+   *mappings* are class-shared, but its journal is not test-scoped by default) and verifies the
+   token/user-info endpoints were actually called *during that test* - the real proof this is a
+   rejection, not a round trip that silently never ran.
+2. **[P1] The logout wait was a no-op race.** Logout is a plain `fetch()` with no navigation (see
+   `AuthControls.tsx`), and the page was already sitting on a `/runs/{runId}` URL that already
+   matched `DASHBOARD_BASE_URL + "/**"` before the click - the same `waitForURL`-resolves-instantly
+   flaw as point 1, here against a URL that structurally never changes at all for this action.
+   Fixed by waiting for the real `204` response from `POST /api/v1/auth/logout` (again the two-arg
+   `waitForResponse` form), then asserting the "Log in with GitHub" link is visible again - the
+   actual, observable proof logout completed, not an assumption from timing.
+3. **[P1] The invalidated-session test's own Javadoc, and this document's original wording,
+   overclaimed what the 4h `server.servlet.session.timeout` actually guarantees.** The Servlet
+   `HttpSession` contract makes this an *idle* timeout - the clock resets on every access - not an
+   absolute session lifetime; an actively-used session (stolen or not) is never force-expired at
+   the 4h mark. Two options were on the table: build a real absolute-TTL mechanism (server-side
+   authenticated-at timestamp + injectable `Clock`, checked per-request, tested with a short TTL),
+   or correct the claim to match what is actually implemented and tested. **The user's own call**:
+   keep the idle timeout (reasonable for this single-admin, `HttpOnly`+`Secure`-cookie portfolio
+   deployment - the stolen-active-session threat is mitigated by the cookie attributes, not session
+   lifetime) and fix the documentation/Javadoc instead of building the heavier mechanism. Both
+   `application.yml`'s own comment and
+   `anInvalidatedSessionIsTreatedAsAnonymousNeverAsLingeringAdminOrAServerError`'s Javadoc (point 2
+   above) now say precisely what is tested: post-invalidation behavior (by whichever mechanism -
+   logout or eventual idle-timeout eviction), never the 4h idle-timeout clock itself, which
+   `MockMvc` has no way to simulate elapsing.
+4. **[P2] `OAuthFlowE2eTest`'s own `@AfterEach` cleanup was not exception-safe** - `page.context()
+   .close()` and `backend.stop()` ran unprotected inside a single try/finally, so either one
+   throwing silently skipped a later step (a failed `context.close()` meant the failure video was
+   never saved; a failed `backend.stop()` meant the temp video directory was never deleted).
+   Rewritten to run each step independently (collecting and chaining any failure as a suppressed
+   exception, rethrown once at the end) - the exact same pattern already used by
+   `DashboardE2eEnvironment.SharedResources#close`/`BackendUnavailableE2eTest`'s own teardown
+   methods, applied here for the first time to a per-test `@AfterEach` rather than only a
+   class-level teardown. **A follow-up pass on this same fix found it still incomplete**:
+   `BrowserFailureArtifacts#safely` only guards the individual screenshot/tracing/`Files.move`
+   calls *inside* `captureBeforeClose`/`saveVideoIfFailed` - but `captureBeforeClose`'s own
+   `page.context()` argument is evaluated before that method is even entered, and
+   `saveVideoIfFailed`'s first statement (`page.video()`) runs before its own `safely()` block, so
+   either one throwing (a real possibility once the Playwright transport itself has already
+   failed) would still have skipped every later step, including `backend.stop()`. Both calls are
+   now wrapped in the same collect-and-chain mechanism as `context.close()`/`backend.stop()`, not
+   just the two originally covered.
+
+All fixes verified together: both `OAuthFlowE2eTest` scenarios reran green against the real stack
+after each fix, `./gradlew.bat spotlessApply compileDashboardE2eTestJava` stayed clean throughout,
+and the full backend gate (`spotlessApply spotlessCheck test --rerun`) stayed green.
+
+**`CustomRunE2eTest` stabilized as a separate hygiene fix, same session**: this suite's own
+`dashboardE2eTest` baseline should not depend on the shared public demo site's own mutable room
+data staying clean - `CustomRunE2eTest` exists to prove the dashboard/orchestrator's CUSTOM-suite
+selection wiring, not to re-detect the same drift `RoomApiContractTest` already legitimately
+detects elsewhere in the automation suite. It had been intermittently failing during these reruns
+- root-caused via the real spawned process log rather than assumed: it happened to select exactly
+`RoomApiContractTest` + `HomePageTest` as its "two selected public tests," and `RoomApiContractTest`
+hit the same pre-existing, already-documented live external data drift as D3.3's own closing gate
+(`docs/RELEASE_EVIDENCE.md`'s D3.3 "Gates" section) - a different room id each time this session
+(`4`, then `3`, then, confirmed live via a direct `/api/room` query, `6`). Swapped its two selected
+tests to `AuthenticationApiTest`'s "Admin can obtain a non-empty session token" and `AdminLoginTest`'s
+"Admin with an invalid password stays on the login screen" - still one `API` + one `UI` test as the
+class's own Javadoc requires, both read-only auth checks against fixed, deterministic credentials,
+never against the site's own mutable room data. `RoomApiContractTest` itself is untouched anywhere
+else - it still correctly detects this drift in the automation suite's own regular runs, which is
+its actual job.
+
+**Full `dashboardE2eTest` closing status**: both `OAuthFlowE2eTest` scenarios, `CustomRunE2eTest`
+with its stabilized selection, and every other test in the suite passed. This suite's own baseline
+no longer depends on the shared public demo site's data happening to be clean at the moment it
+runs.

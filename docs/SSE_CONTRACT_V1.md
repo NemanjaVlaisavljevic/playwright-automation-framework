@@ -127,10 +127,14 @@ not by the JUnit listener - additionally carries `stepId`/`stepName`:
   service; beyond that, a new connection is rejected with `503`.
 - A server-sent heartbeat comment (`:heartbeat`) is emitted every `runner.sse-heartbeat-interval`
   (default 15s) while a connection is idle, to keep intermediary proxies from timing it out.
-- The service holds one canonical journal per run **in memory** (`RunRepository`, the REST-visible
-  run history, is also in-memory) - a restart loses both, and a client reconnecting afterwards gets
-  `404` from the REST layer before it would even reach the SSE endpoint. `FileBackedRunEventJournal`
-  does flush every event to a per-run JSON Lines file under `runner.journal-dir`, and that file does
-  survive a restart on disk - but nothing currently reads it back in on startup, so in practice nothing
-  is recoverable from it without that follow-up work (rehydrating `RunRepository`/the journal's
-  in-memory index from the on-disk files).
+- The service holds one canonical journal per run in PostgreSQL (`RunLifecycleStore`, in production
+  `JdbcRunStore` - a real transaction per write; see `docs/DEPLOYMENT_ARCHITECTURE.md` section 3),
+  not in memory - the now-retired `FileBackedRunEventJournal`/in-memory `RunRepository` this section
+  used to describe were replaced at Faza D2.3's cutover. Both the REST-visible run history and SSE
+  replay read from this same durable store, so a restart no longer loses either, and a client
+  reconnecting after a restart still gets a real `200`/replay for a run that existed before it,
+  never a `404` for that reason alone. A run still `QUEUED`/`STARTING`/`RUNNING` at the moment of a
+  crash/restart is reconciled to `ERROR` (with a same-transaction `RUN_FINISHED(ERROR)` event)
+  before the service accepts any new run submissions or SSE subscriptions (Faza D2.5) - a client
+  reconnecting to that specific run after such a restart sees it as `ERROR`, not a resumed `RUNNING`
+  stream.
