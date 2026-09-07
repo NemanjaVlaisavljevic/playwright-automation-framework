@@ -85,6 +85,24 @@ jobs:
   openapi-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # D2.3 made a reachable Postgres mandatory for runner-service to even start (see
+    # application.yml's own datasource comment) - this mirrors ./gradlew.bat localPostgresUp's
+    # exact db/user/password and the 5433 host port application.yml's defaults already expect, so
+    # the "Start runner-service" step below needs no extra SPRING_DATASOURCE_* env vars.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: runner
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U runner"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout
