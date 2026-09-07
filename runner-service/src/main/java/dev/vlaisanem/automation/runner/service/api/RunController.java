@@ -1,5 +1,6 @@
 package dev.vlaisanem.automation.runner.service.api;
 
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -34,9 +35,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class RunController {
 
   private final RunService runService;
+  private final ArtifactRepository artifactRepository;
 
-  public RunController(RunService runService) {
+  public RunController(RunService runService, ArtifactRepository artifactRepository) {
     this.runService = runService;
+    this.artifactRepository = artifactRepository;
   }
 
   @Operation(operationId = "createRun")
@@ -104,7 +107,8 @@ public class RunController {
   })
   @GetMapping("/{runId}")
   public RunResponse get(@PathVariable String runId) {
-    return RunResponse.from(runService.find(runId));
+    Run run = runService.find(runId);
+    return RunResponse.from(run, artifactRepository.isArtifactsPurged(runId));
   }
 
   @Operation(operationId = "listRuns")

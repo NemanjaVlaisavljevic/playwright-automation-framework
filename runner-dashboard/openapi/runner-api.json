@@ -596,9 +596,13 @@
             "items": {
               "$ref": "#/components/schemas/SelectedTestResponse"
             }
+          },
+          "artifactsPurged": {
+            "type": "boolean"
           }
         },
         "required": [
+          "artifactsPurged",
           "environment",
           "processLogUrl",
           "requestedAt",

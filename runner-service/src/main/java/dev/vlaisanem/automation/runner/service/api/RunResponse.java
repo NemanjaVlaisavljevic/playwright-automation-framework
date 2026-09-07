@@ -35,9 +35,20 @@ public record RunResponse(
     @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED) Integer exitCode,
     @Schema(requiredMode = Schema.RequiredMode.NOT_REQUIRED) String detail,
     @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String processLogUrl,
-    @Schema(requiredMode = Schema.RequiredMode.REQUIRED) List<SelectedTestResponse> selectedTests) {
+    @Schema(requiredMode = Schema.RequiredMode.REQUIRED) List<SelectedTestResponse> selectedTests,
+    @Schema(requiredMode = Schema.RequiredMode.REQUIRED) boolean artifactsPurged) {
 
+  /**
+   * {@code artifactsPurged} defaults to {@code false} - correct for every caller except {@code
+   * RunController#get}, which separately queries the real value: a run this record is built for
+   * immediately after create/cancel cannot possibly have already had its artifacts purged (D4.1's
+   * retention window can only ever elapse well after this exact moment).
+   */
   public static RunResponse from(Run run) {
+    return from(run, false);
+  }
+
+  public static RunResponse from(Run run, boolean artifactsPurged) {
     return new RunResponse(
         run.runId(),
         run.environment(),
@@ -49,6 +60,7 @@ public record RunResponse(
         run.exitCode(),
         run.detail(),
         "/api/v1/runs/" + run.runId() + "/log",
-        run.selectedTests().stream().map(SelectedTestResponse::from).toList());
+        run.selectedTests().stream().map(SelectedTestResponse::from).toList(),
+        artifactsPurged);
   }
 }

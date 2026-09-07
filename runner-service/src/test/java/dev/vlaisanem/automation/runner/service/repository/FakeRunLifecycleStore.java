@@ -5,6 +5,7 @@ import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -42,6 +43,10 @@ public final class FakeRunLifecycleStore implements RunLifecycleStore {
     private volatile Run run;
     private long nextEventSequence = 1;
     private final List<RunnerEvent> events = new ArrayList<>();
+    // D4.1 - mirrors runs.cleanup_started_at/artifacts_purge_started_at/artifacts_purged_at.
+    private volatile Instant cleanupStartedAt;
+    private volatile Instant artifactsPurgeStartedAt;
+    private volatile Instant artifactsPurgedAt;
   }
 
   private Object lockFor(String runId) {
@@ -127,12 +132,16 @@ public final class FakeRunLifecycleStore implements RunLifecycleStore {
   @Override
   public Optional<Run> findById(String runId) {
     RunRecord record = runs.get(runId);
-    return record == null ? Optional.empty() : Optional.of(record.run);
+    if (record == null || record.cleanupStartedAt != null) {
+      return Optional.empty();
+    }
+    return Optional.of(record.run);
   }
 
   @Override
   public List<Run> findAll() {
     return runs.values().stream()
+        .filter(record -> record.cleanupStartedAt == null)
         .map(record -> record.run)
         .sorted(Comparator.comparing(Run::requestedAt).reversed())
         .toList();
@@ -168,6 +177,107 @@ public final class FakeRunLifecycleStore implements RunLifecycleStore {
       return record.events.isEmpty()
           ? Optional.empty()
           : Optional.of(record.events.get(record.events.size() - 1));
+    }
+  }
+
+  @Override
+  public List<String> findEligibleForCleanup(Instant now, Duration maxAge, int maxCount) {
+    Instant cutoff = now.minus(maxAge);
+    List<Map.Entry<String, RunRecord>> ranked =
+        runs.entrySet().stream()
+            .filter(
+                e ->
+                    e.getValue().cleanupStartedAt == null && e.getValue().run.status().isTerminal())
+            .sorted(
+                Comparator.<Map.Entry<String, RunRecord>, Instant>comparing(
+                        e -> e.getValue().run.finishedAt(),
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                    .reversed()
+                    .thenComparing(
+                        (Map.Entry<String, RunRecord> e) -> e.getValue().run.requestedAt(),
+                        Comparator.reverseOrder())
+                    .thenComparing(
+                        (Map.Entry<String, RunRecord> e) -> e.getKey(), Comparator.reverseOrder()))
+            .toList();
+    List<String> eligible = new ArrayList<>();
+    for (int i = 0; i < ranked.size(); i++) {
+      Map.Entry<String, RunRecord> entry = ranked.get(i);
+      int rank = i + 1;
+      Instant finishedAt = entry.getValue().run.finishedAt();
+      boolean tooOld = finishedAt != null && finishedAt.isBefore(cutoff);
+      if (rank > maxCount || tooOld) {
+        eligible.add(entry.getKey());
+      }
+    }
+    return eligible;
+  }
+
+  @Override
+  public List<String> findPendingCleanup() {
+    return runs.entrySet().stream()
+        .filter(e -> e.getValue().cleanupStartedAt != null)
+        .map(Map.Entry::getKey)
+        .toList();
+  }
+
+  @Override
+  public boolean claimForCleanup(String runId) {
+    RunRecord record = runs.get(runId);
+    if (record == null || !record.run.status().isTerminal()) {
+      return false;
+    }
+    synchronized (lockFor(runId)) {
+      if (record.cleanupStartedAt != null) {
+        return false;
+      }
+      record.cleanupStartedAt = Instant.now();
+      return true;
+    }
+  }
+
+  @Override
+  public void deleteRun(String runId) {
+    runs.remove(runId);
+  }
+
+  @Override
+  public List<String> findEligibleForArtifactPurge(Instant now, Duration maxAge) {
+    Instant cutoff = now.minus(maxAge);
+    return runs.entrySet().stream()
+        .filter(e -> e.getValue().artifactsPurgeStartedAt == null)
+        .filter(e -> e.getValue().run.status().isTerminal())
+        .filter(
+            e -> {
+              Instant finishedAt = e.getValue().run.finishedAt();
+              return finishedAt != null && finishedAt.isBefore(cutoff);
+            })
+        .map(Map.Entry::getKey)
+        .toList();
+  }
+
+  @Override
+  public List<String> findPendingArtifactPurge() {
+    return runs.entrySet().stream()
+        .filter(
+            e ->
+                e.getValue().artifactsPurgeStartedAt != null
+                    && e.getValue().artifactsPurgedAt == null)
+        .map(Map.Entry::getKey)
+        .toList();
+  }
+
+  @Override
+  public boolean claimForArtifactPurge(String runId) {
+    RunRecord record = runs.get(runId);
+    if (record == null || !record.run.status().isTerminal()) {
+      return false;
+    }
+    synchronized (lockFor(runId)) {
+      if (record.artifactsPurgeStartedAt != null) {
+        return false;
+      }
+      record.artifactsPurgeStartedAt = Instant.now();
+      return true;
     }
   }
 }

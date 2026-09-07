@@ -69,6 +69,28 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param maxRequestBodyBytes (D3.3) hard cap on request body size, enforced before any JSON
  *     deserialization is attempted - a real {@code CreateRunRequest} payload (environment/suite
  *     plus up to 25 short test keys) is well under this.
+ * @param retentionRunHistoryMaxAge (D4.1) a terminal run is eligible for full cleanup once its
+ *     {@code finished_at} is older than this - enforced together with {@link
+ *     #retentionRunHistoryMaxCount} as an either-bound trigger (see {@code RetentionService}),
+ *     never both required at once.
+ * @param retentionRunHistoryMaxCount (D4.1) a terminal run is eligible for full cleanup once its
+ *     rank (newest-first, ties broken by {@code requested_at} then {@code run_id}) among terminal,
+ *     not-yet-cleaned-up runs exceeds this count.
+ * @param retentionArtifactMaxAge (D4.1) a terminal run's own artifact files (screenshots/traces/
+ *     videos) are purged once its {@code finished_at} is older than this - measured from the run's
+ *     own completion time, never from individual artifact ingestion timestamps, and always no
+ *     larger than {@link #retentionRunHistoryMaxAge} (validated below) - otherwise the purge branch
+ *     could never fire before full-run cleanup already deleted the run outright.
+ * @param retentionCleanupInterval (D4.1) how often the background retention sweep ({@code
+ *     RetentionService}) runs.
+ * @param retentionRateLimit (D4.1 review round) per-admin (GitHub numeric id) limit on both {@code
+ *     GET /api/v1/retention/preview} and {@code POST /api/v1/retention/run} - deliberately
+ *     conservative, since a real sweep does real DB/filesystem work; without this, a valid or
+ *     stolen admin session could trigger it as often as it likes. Each of the two routes is tracked
+ *     as its own independent counter against this same threshold (see {@code
+ *     AbuseRateLimitFilter}'s two separate {@code retention-preview}/{@code retention-run}
+ *     surfaces), the same way {@code oauthAuthorizationRateLimit}/{@code oauthCallbackRateLimit}
+ *     are two related but separately-tracked surfaces.
  */
 @ConfigurationProperties(prefix = "runner")
 public record RunnerProperties(
@@ -95,7 +117,12 @@ public record RunnerProperties(
     RateLimitRule publicReadRateLimit,
     RateLimitRule downloadRateLimit,
     int sseMaxConnectionsPerIp,
-    long maxRequestBodyBytes) {
+    long maxRequestBodyBytes,
+    Duration retentionRunHistoryMaxAge,
+    int retentionRunHistoryMaxCount,
+    Duration retentionArtifactMaxAge,
+    Duration retentionCleanupInterval,
+    RateLimitRule retentionRateLimit) {
 
   public RunnerProperties {
     if (repoRoot == null || repoRoot.isBlank()) {
@@ -179,6 +206,34 @@ public record RunnerProperties(
     }
     if (maxRequestBodyBytes < 1024) {
       throw new IllegalArgumentException("runner.max-request-body-bytes must be at least 1024");
+    }
+    if (retentionRunHistoryMaxAge == null
+        || retentionRunHistoryMaxAge.isZero()
+        || retentionRunHistoryMaxAge.isNegative()) {
+      throw new IllegalArgumentException("runner.retention-run-history-max-age must be positive");
+    }
+    if (retentionRunHistoryMaxCount < 1) {
+      throw new IllegalArgumentException(
+          "runner.retention-run-history-max-count must be at least 1");
+    }
+    if (retentionArtifactMaxAge == null
+        || retentionArtifactMaxAge.isZero()
+        || retentionArtifactMaxAge.isNegative()) {
+      throw new IllegalArgumentException("runner.retention-artifact-max-age must be positive");
+    }
+    if (retentionCleanupInterval == null
+        || retentionCleanupInterval.isZero()
+        || retentionCleanupInterval.isNegative()) {
+      throw new IllegalArgumentException("runner.retention-cleanup-interval must be positive");
+    }
+    if (retentionArtifactMaxAge.compareTo(retentionRunHistoryMaxAge) > 0) {
+      throw new IllegalArgumentException(
+          "runner.retention-artifact-max-age must not exceed runner.retention-run-history-max-age"
+              + " - a longer artifact window could never fire before full-run cleanup already"
+              + " deleted the run");
+    }
+    if (retentionRateLimit == null) {
+      throw new IllegalArgumentException("runner.retention-rate-limit must be set");
     }
   }
 }

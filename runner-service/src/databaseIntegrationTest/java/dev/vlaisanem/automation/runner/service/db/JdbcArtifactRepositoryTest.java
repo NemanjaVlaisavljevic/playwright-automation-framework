@@ -16,6 +16,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -52,7 +54,9 @@ class JdbcArtifactRepositoryTest {
     dataSource.setPassword(POSTGRES.getPassword());
 
     jdbcTemplate = new JdbcTemplate(dataSource);
-    repository = new JdbcArtifactRepository(jdbcTemplate);
+    TransactionTemplate transactionTemplate =
+        new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+    repository = new JdbcArtifactRepository(jdbcTemplate, transactionTemplate);
   }
 
   @Test

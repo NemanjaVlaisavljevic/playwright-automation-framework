@@ -113,3 +113,17 @@ runner:
     window: PT1M
   sse-max-connections-per-ip: 3
   max-request-body-bytes: 16384
+  # D4.1 - retention. A terminal run is fully cleaned up once EITHER bound below is exceeded (age
+  # or count, whichever first) - see RetentionService's own Javadoc for the exact kept-set
+  # definition. Artifact files get their own, shorter, independent window, measured from the
+  # owning run's own finished_at (never individual artifact ingestion timestamps).
+  retention-run-history-max-age: P30D
+  retention-run-history-max-count: 500
+  retention-artifact-max-age: P14D
+  retention-cleanup-interval: PT1H
+  # D4.1 review round - retention/preview/run are real DB+filesystem work, so they get their own
+  # conservative admin-keyed rate limit like every other AbuseRateLimitFilter surface, not left
+  # uncapped just because the caller is already an authorized admin.
+  retention-rate-limit:
+    max-attempts: 10
+    window: PT1H

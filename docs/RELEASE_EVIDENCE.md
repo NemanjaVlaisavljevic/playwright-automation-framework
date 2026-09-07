@@ -478,3 +478,182 @@ its actual job.
 with its stabilized selection, and every other test in the suite passed. This suite's own baseline
 no longer depends on the shared public demo site's data happening to be clean at the moment it
 runs.
+
+## Faza D4.1 - retention policy
+
+**Date:** 2026-09-07. **Scope:** a bounded run-history window (age or count, whichever is hit
+first), a shorter independent per-run artifact-purge protocol, and a crash-safe, idempotent,
+on-demand cleanup mechanism - never touching a non-terminal run, never leaving a tombstoned run
+visible through any public read path while its files are still being removed. Plan reviewed and
+revised twice before implementation (see the plan's own locked-decisions list); every one of the
+reviewer's corrections - `finished_at` not `requested_at` as the age basis, the deterministic
+`finished_at DESC, requested_at DESC, run_id DESC` tie-break, per-run (never per-artifact) purge
+windows, tombstoning as plain nullable columns rather than a new `RunStatus`, the exact
+immediate-tombstone visibility contract, and the atomic-claim-before-any-irreversible-action
+concurrency guard - is reflected in what was actually built, not just planned.
+
+### Schema and configuration
+
+New migration `V4__add_runs_retention_columns.sql` adds three nullable `TIMESTAMPTZ` columns to
+`runs` (`cleanup_started_at`, `artifacts_purge_started_at`, `artifacts_purged_at`), each guarded by
+a DB `CHECK` constraint that neither cleanup nor purge can ever be marked for a non-terminal run -
+a real database invariant, not just application trust. Proven directly: a raw-SQL test
+(`retentionColumnsCanOnlyEverBeSetForATerminalRunAtTheDatabaseLevel`) attempts to set each column
+against a `RUNNING` row and confirms Postgres itself rejects it.
+
+`runner.retention-*` config (`RunnerProperties`): `runHistoryMaxAge` (`P30D`), `runHistoryMaxCount`
+(`500`), `artifactMaxAge` (`P14D`), `cleanupInterval` (`PT1H`) - every `Duration` validated positive,
+count `>= 1`, and a cross-field check that `artifactMaxAge` never exceeds `runHistoryMaxAge` (a
+larger artifact window would mean the purge branch could never fire before full-run cleanup already
+deleted the run) - rejected as a startup configuration error, same as every other `RunnerProperties`
+invariant.
+
+### Tombstone visibility and orchestration
+
+`RunLifecycleStore.findById`/`findAll` filter out any run with `cleanup_started_at IS NOT NULL` -
+every existing caller (`RunController`, SSE replay via the same `findById`-backed lookup) then
+treats a tombstoned run exactly like one that never existed, with no new code at those call sites.
+Only the retention-internal `findPendingCleanup`/`findPendingArtifactPurge` queries still see these
+runs, to resume a crash-interrupted pass.
+
+**A real orchestration bug, found only by running the crash-resume tests, not assumed**: the first
+`RetentionService.sweep()` unconditionally called `claimForCleanup`/`claimForArtifactPurge` for
+every candidate, including ones already tombstoned by a prior (possibly crashed) attempt. Since the
+claim's own contract is "did *this* call just win the race" (`UPDATE ... WHERE ... IS NULL`),
+re-claiming an already-claimed run always returned `false` - silently skipping every crash-resume
+candidate forever, never actually finishing its deletion.
+`crashAfterTombstoneIsResumedByTheNextSweep`/`crashAfterFileDeletionBeforeDbDeleteIsResumedByTheNextSweep`
+both failed (`runDeletedCount: 0`) against this implementation. Fixed by tracking
+`findPendingCleanup`/`findPendingArtifactPurge` results as a separate `alreadyClaimed` set and
+skipping the claim call entirely for them, going straight to idempotent file/row deletion - both
+tests pass after the fix.
+
+A second, self-caught ordering issue: `runId` path validation (exact UUID shape, matching what
+`RunService.submit` generates) originally ran *after* claiming. Reordered so validation always runs
+first - a malformed runId is now never tombstoned at all, so it stays visible and simply fails every
+sweep attempt (logged, isolated, retried) instead of being hidden behind a permanently-unfinishable
+tombstone. Verified by `refusesToBuildAPathFromARunIdThatIsNotTheExactUuidShape`.
+
+Every delete path is built only from the configured root directory plus a re-validated `runId` -
+never from any `relative_path` value read out of the `artifacts` table - and recursive deletion
+never follows symlinks (`Files.walkFileTree`'s default, `FOLLOW_LINKS` never requested).
+
+### Tests
+
+`RetentionServiceTest` (Testcontainers Postgres, instance-level `@Container` for a fresh database
+per test method, plus real `@TempDir` filesystem dirs) covers every scenario the plan required:
+exact age/count boundary, deterministic tie-break, no non-terminal run ever marked, crash-after-
+tombstone and crash-after-file-deletion resumption, two concurrent sweeps never double-processing
+the same run, the artifact-ingestion-vs-purge race, idempotent repeated sweep, and the
+malformed-runId path-safety guard - 10/11 passed; the symlink-traversal test gracefully self-skips
+(`Assumptions.abort`) on this Windows dev machine, which lacks unprivileged symlink creation - a
+genuine environment limitation, not a code gap. **See this section's own "Review round" below for
+how the ingest-vs-purge race is actually enforced** - the original `INSERT ... WHERE EXISTS (...)`
+guard alone turned out not to be sufficient under real concurrent transactions.
+
+### Live verification against a real running system
+
+Seeded a real 40-day-old terminal run directly via `psql` plus matching real artifact/log/raw-event
+files under the real configured directories, against a real `bootRun` (permissive security chain,
+`.env.local` moved aside) with real local Postgres. The run and its files were gone before a manual
+`preview` call could even observe them as a candidate - traced via the bootRun log to
+`RetentionScheduler`'s own `initialDelay=0` startup tick, which fired immediately at boot and
+correctly found and deleted exactly the one seeded run:
+`RetentionReport[dryRun=false, runCandidateCount=1, runDeletedCount=1, ..., bytesFreed=22]`.
+Confirmed via `psql` (0 rows for that `run_id`) and the filesystem (no artifact directory for it
+remains among every other test-generated run directory) that both the DB row and its files are
+genuinely gone - an even stronger proof than a manual click-through, since it demonstrates the real
+scheduled sweep working end to end against a real system with no manual trigger involved.
+
+### Frontend
+
+`RunResponse` gained `artifactsPurged: boolean` (`artifacts_purge_started_at IS NOT NULL` - see this
+section's own "Review round" for why this reflects the moment purge *starts*, not only once it
+finishes); OpenAPI schema and the generated TS client regenerated against a real running backend
+(`npm run api:check:contract`) - diff confirmed to be exactly that one field addition,
+`RetentionController` correctly excluded from the public API doc (`@Hidden`, internal ops surface
+only). `RunDetailsPage` shows "Artifacts expired due to retention and are no longer available for
+download." when the artifact list is empty and `artifactsPurged` is `true`, instead of the section
+silently vanishing (unchanged for the never-ingested case).
+
+### Gates
+
+Backend: `spotlessApply spotlessCheck test` and `:runner-service:databaseIntegrationTest`, both
+green (the latter 10/11 pass + 1 environment-limited skip, as above). Frontend: `npm run check`
+(format, lint, boundaries, typecheck, Vitest + coverage, build) green at 290/290 after updating
+three test files' local `RunResponse` fixture builders (`RunsTable.test.tsx`,
+`runner-api.test.ts`, `RunLaunchForm.test.tsx`, `RunDetailsPage.test.tsx`) to include the new
+required `artifactsPurged` field - a real, if minor, regression the coverage gate itself caught,
+not one assumed away.
+
+### Review round (2026-09-07) - 2 P1 + 2 P2, all fixed and reverified, closed the same session
+
+A second, independent review pass, this time explicitly probing concurrency and rate-limiting
+rather than the design's own stated decisions - found real gaps the original test suite's own
+interleaving (sequential claim-then-act, never genuinely concurrent transactions) could not have
+caught.
+
+1. **[P1] A pending tombstone does not mean the run's earlier claimant is still alive or working
+   on it** - a second sweep starting while a first is mid-cleanup (already tombstoned the run, not
+   yet deleted its files) sees exactly the same `findPendingCleanup()` result a genuine
+   crash-recovery resume would produce, cannot tell the two apart, and would process the run
+   concurrently with the first sweep's own in-flight deletion. The existing
+   `twoConcurrentSweepsNeverDoubleProcessTheSameRun` test raced two real sweeps but never forced
+   this exact interleaving, so it could pass by luck rather than by guarantee. Fixed with a plain
+   in-process `ReentrantLock` (non-blocking `tryLock`) around the whole real-sweep body in
+   `RetentionService#sweep` - correct and sufficient for this project's own documented
+   single-instance architecture (`README.md`'s "Known limitations": one `runner-service` process,
+   no clustering); a genuinely multi-instance deployment would need a real DB-level owner/lease
+   protocol instead. `RetentionReport` gained a `skipped` field so a caller (the scheduler, or the
+   admin-triggered REST endpoint) can tell "nothing was eligible" apart from "another sweep was
+   already running." New deterministic test
+   `aConcurrentSweepWhileAnotherIsMidCleanupIsSkippedNotDoubleProcessed`: a `RunLifecycleStore`
+   decorator pauses the first sweep immediately after its claim succeeds (mirroring this codebase's
+   existing `BlockingReplayStore` pattern), and the test proves a second concurrent call is skipped
+   entirely - never even reaching `findPendingCleanup` - rather than racing the first.
+2. **[P1] `INSERT ... WHERE EXISTS (...)` removes the check-then-insert window within one
+   statement, but does not serialize against a concurrent purge transaction** - an ingest
+   transaction's own snapshot can be taken before a concurrent `claimForArtifactPurge` commits, yet
+   its insert can still commit *after* that same run's purge has already deleted its files and
+   `artifacts` rows, resurrecting metadata behind files that no longer exist. Fixed by having both
+   `JdbcArtifactRepository#ingest` and `#completePurge` take a real per-run row lock (`SELECT ...
+   FOR UPDATE` on `runs`) at the very start of their own transaction, before checking the purge flag
+   or touching any row - `claimForArtifactPurge`'s own `UPDATE` already takes the same row lock as
+   an intrinsic part of executing, so no change was needed there for it to participate correctly.
+   Under Postgres's ordinary row-lock semantics this makes the two protocols mutually exclusive per
+   run regardless of which reaches the row first. **Proven with genuine forced concurrency, not
+   sequential calls**: two new tests each open a second raw JDBC connection, manually hold an
+   uncommitted transaction on the contested row (simulating "purge already claimed, not yet
+   committed" and "ingest already inserted, not yet committed" respectively), and assert - via a
+   `Future.get(300ms)` timing out - that the other side's real call (`ingest`/
+   `claimForArtifactPurge`) genuinely blocks until the lock-holding connection commits, then
+   completes correctly immediately after
+   (`concurrentIngestIsBlockedThenSkippedWhenPurgeAlreadyHoldsThePerRunLock`/
+   `concurrentArtifactPurgeClaimIsBlockedThenSucceedsWhenIngestAlreadyHoldsThePerRunLock`).
+3. **[P2] A client could be handed a download link for a file already deleted, or about to be** -
+   `findForRun`/`isArtifactsPurged` only reflected `artifacts_purged_at` (set by `completePurge`,
+   *after* the on-disk directory is already gone), leaving the entire window between
+   `claimForArtifactPurge` and `completePurge` showing stale metadata for files that might already
+   not exist. Fixed: both now key off `artifacts_purge_started_at IS NOT NULL` instead - "no longer
+   available" the instant purge is claimed, matching when the dashboard's "artifacts expired due to
+   retention" message should actually appear. The existing race test was updated (it previously
+   asserted the pre-existing artifact stayed listed through this window, which was precisely the
+   bug) and a raw-row-count helper was added alongside it, since `findForRun` can no longer be used
+   to check "does the row still physically exist" once purge is claimed.
+4. **[P2] `GET /api/v1/retention/preview`/`POST /api/v1/retention/run` were `ROLE_ADMIN`+CSRF
+   protected but entirely outside the D3.3 `AbuseRateLimitFilter` matrix** - a valid or stolen admin
+   session could trigger real DB/filesystem sweeps as often as it liked. Fixed: new
+   `runner.retention-rate-limit` (default 10/hour), applied as two independent `AbuseRateLimitFilter`
+   surfaces (`retention-preview`/`retention-run`, admin-keyed) so the cheap read-only preview and the
+   expensive real sweep never share or starve each other's budget. `SecurityAccessMatrixTest` now
+   includes `RetentionController` in its full matrix for the first time: anonymous 401, non-admin
+   403, admin 200, missing-CSRF-on-POST 403, and both surfaces' own 429 after the 11th call in the
+   window.
+
+All fixes reverified together: full backend `spotlessApply spotlessCheck test` and
+`:runner-service:databaseIntegrationTest` green (`RetentionServiceTest` now 10/11 + 1
+environment-limited skip, up from 7/8 - three new tests, one existing test corrected), full
+frontend `npm run check` unaffected (no frontend code changed this round). No live `bootRun`
+re-verification was needed this round - every finding here is proven by a real Postgres/real
+concurrent-transaction test, which is the more precise tool for exactly these races than a manual
+click-through would be.

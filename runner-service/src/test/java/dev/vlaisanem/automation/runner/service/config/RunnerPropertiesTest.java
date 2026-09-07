@@ -12,10 +12,10 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 /**
  * Real {@code @ConfigurationProperties} binding against the actual {@code application.yml} on the
  * classpath - not merely constructing the record directly - proves the D3.3 rate-limit keys
- * (including the nested {@link RateLimitRule} values) bind the way the rest of this codebase
- * assumes, the same "verify the binding actually works" discipline {@code
+ * (including the nested {@link RateLimitRule} values) and the D4.1 retention keys bind the way the
+ * rest of this codebase assumes, the same "verify the binding actually works" discipline {@code
  * RunnerSecurityEnvironmentPostProcessor}'s {@code Binder}-based fix already established. Also
- * covers the compact constructor's own validation boundaries for the newly-added D3.3 fields
+ * covers the compact constructor's own validation boundaries for the newly-added D3.3/D4.1 fields
  * specifically - every pre-existing field's validation is already exercised indirectly by every
  * other test in this module constructing a valid {@link RunnerProperties}.
  */
@@ -53,6 +53,20 @@ class RunnerPropertiesTest {
         });
   }
 
+  @Test
+  void bindsTheRealApplicationYmlRetentionKeysCorrectly() {
+    contextRunner.run(
+        (context) -> {
+          RunnerProperties properties = context.getBean(RunnerProperties.class);
+          assertThat(properties.retentionRunHistoryMaxAge()).isEqualTo(Duration.ofDays(30));
+          assertThat(properties.retentionRunHistoryMaxCount()).isEqualTo(500);
+          assertThat(properties.retentionArtifactMaxAge()).isEqualTo(Duration.ofDays(14));
+          assertThat(properties.retentionCleanupInterval()).isEqualTo(Duration.ofHours(1));
+          assertThat(properties.retentionRateLimit())
+              .isEqualTo(new RateLimitRule(10, Duration.ofHours(1)));
+        });
+  }
+
   private RunnerProperties valid(
       RateLimitRule oauthAuthorizationRateLimit,
       RateLimitRule oauthCallbackRateLimit,
@@ -63,6 +77,68 @@ class RunnerPropertiesTest {
       RateLimitRule downloadRateLimit,
       int sseMaxConnectionsPerIp,
       long maxRequestBodyBytes) {
+    return validWithRetention(
+        oauthAuthorizationRateLimit,
+        oauthCallbackRateLimit,
+        createRunRateLimitPerMinute,
+        createRunRateLimitPerHour,
+        cancelRunRateLimit,
+        publicReadRateLimit,
+        downloadRateLimit,
+        sseMaxConnectionsPerIp,
+        maxRequestBodyBytes,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1));
+  }
+
+  private RunnerProperties validWithRetention(
+      RateLimitRule oauthAuthorizationRateLimit,
+      RateLimitRule oauthCallbackRateLimit,
+      RateLimitRule createRunRateLimitPerMinute,
+      RateLimitRule createRunRateLimitPerHour,
+      RateLimitRule cancelRunRateLimit,
+      RateLimitRule publicReadRateLimit,
+      RateLimitRule downloadRateLimit,
+      int sseMaxConnectionsPerIp,
+      long maxRequestBodyBytes,
+      Duration retentionRunHistoryMaxAge,
+      int retentionRunHistoryMaxCount,
+      Duration retentionArtifactMaxAge,
+      Duration retentionCleanupInterval) {
+    return validWithRetentionRateLimit(
+        oauthAuthorizationRateLimit,
+        oauthCallbackRateLimit,
+        createRunRateLimitPerMinute,
+        createRunRateLimitPerHour,
+        cancelRunRateLimit,
+        publicReadRateLimit,
+        downloadRateLimit,
+        sseMaxConnectionsPerIp,
+        maxRequestBodyBytes,
+        retentionRunHistoryMaxAge,
+        retentionRunHistoryMaxCount,
+        retentionArtifactMaxAge,
+        retentionCleanupInterval,
+        A_RULE);
+  }
+
+  private RunnerProperties validWithRetentionRateLimit(
+      RateLimitRule oauthAuthorizationRateLimit,
+      RateLimitRule oauthCallbackRateLimit,
+      RateLimitRule createRunRateLimitPerMinute,
+      RateLimitRule createRunRateLimitPerHour,
+      RateLimitRule cancelRunRateLimit,
+      RateLimitRule publicReadRateLimit,
+      RateLimitRule downloadRateLimit,
+      int sseMaxConnectionsPerIp,
+      long maxRequestBodyBytes,
+      Duration retentionRunHistoryMaxAge,
+      int retentionRunHistoryMaxCount,
+      Duration retentionArtifactMaxAge,
+      Duration retentionCleanupInterval,
+      RateLimitRule retentionRateLimit) {
     return new RunnerProperties(
         ".",
         Duration.ofMinutes(10),
@@ -87,7 +163,12 @@ class RunnerPropertiesTest {
         publicReadRateLimit,
         downloadRateLimit,
         sseMaxConnectionsPerIp,
-        maxRequestBodyBytes);
+        maxRequestBodyBytes,
+        retentionRunHistoryMaxAge,
+        retentionRunHistoryMaxCount,
+        retentionArtifactMaxAge,
+        retentionCleanupInterval,
+        retentionRateLimit);
   }
 
   private static final RateLimitRule A_RULE = new RateLimitRule(5, Duration.ofMinutes(1));
@@ -168,5 +249,139 @@ class RunnerPropertiesTest {
     assertThatThrownBy(() -> new RateLimitRule(5, Duration.ZERO))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("window");
+  }
+
+  @Test
+  void rejectsANonPositiveRetentionRunHistoryMaxAge() {
+    assertThatThrownBy(
+            () ->
+                validWithRetention(
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    3,
+                    16384,
+                    Duration.ZERO,
+                    500,
+                    Duration.ofDays(14),
+                    Duration.ofHours(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("retention-run-history-max-age");
+  }
+
+  @Test
+  void rejectsAZeroRetentionRunHistoryMaxCount() {
+    assertThatThrownBy(
+            () ->
+                validWithRetention(
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    3,
+                    16384,
+                    Duration.ofDays(30),
+                    0,
+                    Duration.ofDays(14),
+                    Duration.ofHours(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("retention-run-history-max-count");
+  }
+
+  @Test
+  void rejectsANonPositiveRetentionArtifactMaxAge() {
+    assertThatThrownBy(
+            () ->
+                validWithRetention(
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    3,
+                    16384,
+                    Duration.ofDays(30),
+                    500,
+                    Duration.ZERO,
+                    Duration.ofHours(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("retention-artifact-max-age");
+  }
+
+  @Test
+  void rejectsANonPositiveRetentionCleanupInterval() {
+    assertThatThrownBy(
+            () ->
+                validWithRetention(
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    3,
+                    16384,
+                    Duration.ofDays(30),
+                    500,
+                    Duration.ofDays(14),
+                    Duration.ZERO))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("retention-cleanup-interval");
+  }
+
+  @Test
+  void rejectsARetentionArtifactMaxAgeLongerThanRunHistoryMaxAge() {
+    assertThatThrownBy(
+            () ->
+                validWithRetention(
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    3,
+                    16384,
+                    Duration.ofDays(30),
+                    500,
+                    Duration.ofDays(31),
+                    Duration.ofHours(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("retention-artifact-max-age")
+        .hasMessageContaining("retention-run-history-max-age");
+  }
+
+  @Test
+  void rejectsANullRetentionRateLimit() {
+    assertThatThrownBy(
+            () ->
+                validWithRetentionRateLimit(
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    A_RULE,
+                    3,
+                    16384,
+                    Duration.ofDays(30),
+                    500,
+                    Duration.ofDays(14),
+                    Duration.ofHours(1),
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("retention-rate-limit");
   }
 }

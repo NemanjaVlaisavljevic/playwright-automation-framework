@@ -35,7 +35,12 @@ class SseConnectionsPerIpTrackerTest {
         aRule,
         aRule,
         sseMaxConnectionsPerIp,
-        16384);
+        16384,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        aRule);
   }
 
   @Test

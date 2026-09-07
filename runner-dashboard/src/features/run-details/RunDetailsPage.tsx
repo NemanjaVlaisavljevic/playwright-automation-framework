@@ -361,6 +361,20 @@ function RunDetails({
           <ArtifactsSection runId={runId} artifacts={artifacts.data} />
         </div>
       )}
+      {/* D4.1 - distinguishes "no artifacts were ever ingested" (both `artifacts.data` empty and
+          `artifactsPurged` false - the section simply stays absent, unchanged from before) from
+          "artifacts existed and were purged by retention" - an explicit message instead of the
+          section silently vanishing with no explanation. */}
+      {artifacts.isSuccess &&
+        artifacts.data.length === 0 &&
+        run.data?.artifactsPurged === true && (
+          <div className={styles.section}>
+            <Alert tone="info">
+              Artifacts expired due to retention and are no longer available for
+              download.
+            </Alert>
+          </div>
+        )}
     </>
   );
 }

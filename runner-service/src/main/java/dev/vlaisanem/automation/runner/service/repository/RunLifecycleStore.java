@@ -5,6 +5,7 @@ import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -57,8 +58,15 @@ public interface RunLifecycleStore {
   Optional<RunnerEvent> appendEventIfNonTerminal(
       String runId, LongFunction<RunnerEvent> eventFactory);
 
+  /**
+   * Empty for a runId that never existed, and equally empty for one that exists but has {@code
+   * cleanup_started_at} set (D4.1) - a tombstoned run is logically gone from every public read path
+   * immediately, well before its files/row are actually removed. See {@code RetentionService} for
+   * the only code path that can still see such a run ({@link #findPendingCleanup}).
+   */
   Optional<Run> findById(String runId);
 
+  /** Never includes a tombstoned run - see {@link #findById}'s own Javadoc for why. */
   List<Run> findAll();
 
   /**
@@ -80,4 +88,62 @@ public interface RunLifecycleStore {
    * The most recently recorded event for {@code runId}, or empty if none has been recorded at all.
    */
   Optional<RunnerEvent> latestEvent(String runId);
+
+  // --- D4.1 retention - internal-only, never called outside RetentionService. Every method below
+  // deliberately still sees a tombstoned/pending-purge run - {@link #findById}/{@link #findAll}
+  // never do (see their own Javadoc). ---
+
+  /**
+   * Terminal runs, {@code cleanup_started_at IS NULL}, ranked newest-first ({@code finished_at
+   * DESC, requested_at DESC, run_id DESC} - the last two only ever break a tie on identical {@code
+   * finished_at}). A run qualifies once its 1-indexed rank exceeds {@code maxCount}
+   * <strong>or</strong> its {@code finished_at} is older than {@code now.minus(maxAge)} - the
+   * confirmed either-bound ("aggressive") retention rule. An already-tombstoned run is excluded
+   * from this ranking entirely, never occupying a rank slot - see {@link #findPendingCleanup} for
+   * those.
+   */
+  List<String> findEligibleForCleanup(Instant now, Duration maxAge, int maxCount);
+
+  /**
+   * Every run with {@code cleanup_started_at IS NOT NULL} - resume candidates for a cleanup
+   * interrupted by a crash. Disjoint from {@link #findEligibleForCleanup} by construction.
+   */
+  List<String> findPendingCleanup();
+
+  /**
+   * Atomically claims {@code runId} for full cleanup - {@code UPDATE ... WHERE cleanup_started_at
+   * IS NULL AND status IN (terminal)}. Returns whether this call actually set it; {@code false}
+   * means another concurrent sweep already claimed it (or it is no longer eligible at all) - the
+   * caller must not touch that run's files in that case. This is the sole concurrency guard against
+   * two overlapping sweeps (a scheduled tick racing a manual on-demand trigger).
+   */
+  boolean claimForCleanup(String runId);
+
+  /**
+   * Deletes the {@code runs} row for {@code runId} - cascades to {@code run_selected_tests}/{@code
+   * run_events}/{@code artifacts}. Must only ever be called after every on-disk file for that run
+   * is confirmed gone; calling it before that would leave a dangling on-disk file with no DB record
+   * of it ever existing.
+   */
+  void deleteRun(String runId);
+
+  /**
+   * Terminal runs, {@code artifacts_purge_started_at IS NULL}, whose own {@code finished_at} is
+   * older than {@code now.minus(maxAge)} - measured from the run's own completion time, never from
+   * individual {@code artifacts.created_at} rows, so every artifact belonging to a run ages out
+   * together.
+   */
+  List<String> findEligibleForArtifactPurge(Instant now, Duration maxAge);
+
+  /**
+   * Every run with {@code artifacts_purge_started_at IS NOT NULL AND artifacts_purged_at IS NULL} -
+   * resume candidates for a purge interrupted by a crash.
+   */
+  List<String> findPendingArtifactPurge();
+
+  /**
+   * Atomically claims {@code runId} for artifact purge - same shape and same concurrency guarantee
+   * as {@link #claimForCleanup}, scoped to {@code artifacts_purge_started_at}.
+   */
+  boolean claimForArtifactPurge(String runId);
 }

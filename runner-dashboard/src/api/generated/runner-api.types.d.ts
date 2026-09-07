@@ -3,7 +3,7 @@
     // <Schemas>
   export type CreateRunRequest = ({ environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE" | "CUSTOM"), testKeys?: Array<string> } & Record<string, unknown>)
 export type SelectedTestResponse = ({ testKey: string, displayName: string, layer: ("API" | "UI" | "JOURNEY") } & Record<string, unknown>)
-export type RunResponse = ({ runId: string, environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE" | "CUSTOM"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string, selectedTests: Array<SelectedTestResponse> } & Record<string, unknown>)
+export type RunResponse = ({ runId: string, environment: ("PUBLIC" | "LOCAL"), suite: ("SMOKE" | "API" | "UI" | "JOURNEY" | "REGRESSION" | "FIXTURE" | "CUSTOM"), status: ("QUEUED" | "STARTING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT" | "ERROR"), requestedAt: string, startedAt?: string, finishedAt?: string, exitCode?: number, detail?: string, processLogUrl: string, selectedTests: Array<SelectedTestResponse>, artifactsPurged: boolean } & Record<string, unknown>)
 export type ProblemDetail = ({ type?: string, title: string, status: number, detail: string, instance: string, properties?: Record<string, unknown> } & Record<string, unknown>)
 export type TestCatalogEntry = ({ testKey: string, displayName: string, category: ("API" | "UI" | "JOURNEY"), tags: Array<string> } & Record<string, unknown>)
 export type TestCatalogResponse = ({ tests: Array<TestCatalogEntry> } & Record<string, unknown>)

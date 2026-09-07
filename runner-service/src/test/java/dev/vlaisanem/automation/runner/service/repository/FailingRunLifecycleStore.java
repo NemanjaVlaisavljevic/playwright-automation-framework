@@ -84,6 +84,41 @@ public final class FailingRunLifecycleStore implements RunLifecycleStore {
     return delegate.latestEvent(runId);
   }
 
+  @Override
+  public List<String> findEligibleForCleanup(Instant now, java.time.Duration maxAge, int maxCount) {
+    return delegate.findEligibleForCleanup(now, maxAge, maxCount);
+  }
+
+  @Override
+  public List<String> findPendingCleanup() {
+    return delegate.findPendingCleanup();
+  }
+
+  @Override
+  public boolean claimForCleanup(String runId) {
+    return delegate.claimForCleanup(runId);
+  }
+
+  @Override
+  public void deleteRun(String runId) {
+    delegate.deleteRun(runId);
+  }
+
+  @Override
+  public List<String> findEligibleForArtifactPurge(Instant now, java.time.Duration maxAge) {
+    return delegate.findEligibleForArtifactPurge(now, maxAge);
+  }
+
+  @Override
+  public List<String> findPendingArtifactPurge() {
+    return delegate.findPendingArtifactPurge();
+  }
+
+  @Override
+  public boolean claimForArtifactPurge(String runId) {
+    return delegate.claimForArtifactPurge(runId);
+  }
+
   private LongFunction<RunnerEvent> wrap(LongFunction<RunnerEvent> factory) {
     return sequence -> {
       RunnerEvent event = factory.apply(sequence);

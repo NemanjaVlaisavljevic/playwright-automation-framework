@@ -5,6 +5,7 @@ import dev.vlaisanem.automation.runner.service.config.RunnerSecurityProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * D2.3 - {@code DataSourceAutoConfiguration}/{@code FlywayAutoConfiguration} are no longer
@@ -21,6 +22,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
  */
 @SpringBootApplication
 @EnableConfigurationProperties({RunnerProperties.class, RunnerSecurityProperties.class})
+// D4.1 - RetentionScheduler's periodic sweep is the first use of @Scheduled in this codebase.
+@EnableScheduling
 public class RunnerServiceApplication {
 
   public static void main(String[] args) {

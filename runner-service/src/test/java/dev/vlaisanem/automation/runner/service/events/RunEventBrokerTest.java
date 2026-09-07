@@ -438,7 +438,12 @@ class RunEventBrokerTest {
         new RateLimitRule(120, Duration.ofMinutes(1)),
         new RateLimitRule(30, Duration.ofMinutes(1)),
         3,
-        16384);
+        16384,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        new RateLimitRule(10, Duration.ofHours(1)));
   }
 
   /**
@@ -537,6 +542,41 @@ class RunEventBrokerTest {
         Thread.currentThread().interrupt();
       }
       return delegate.latestEvent(runId);
+    }
+
+    @Override
+    public List<String> findEligibleForCleanup(Instant now, Duration maxAge, int maxCount) {
+      return delegate.findEligibleForCleanup(now, maxAge, maxCount);
+    }
+
+    @Override
+    public List<String> findPendingCleanup() {
+      return delegate.findPendingCleanup();
+    }
+
+    @Override
+    public boolean claimForCleanup(String runId) {
+      return delegate.claimForCleanup(runId);
+    }
+
+    @Override
+    public void deleteRun(String runId) {
+      delegate.deleteRun(runId);
+    }
+
+    @Override
+    public List<String> findEligibleForArtifactPurge(Instant now, Duration maxAge) {
+      return delegate.findEligibleForArtifactPurge(now, maxAge);
+    }
+
+    @Override
+    public List<String> findPendingArtifactPurge() {
+      return delegate.findPendingArtifactPurge();
+    }
+
+    @Override
+    public boolean claimForArtifactPurge(String runId) {
+      return delegate.claimForArtifactPurge(runId);
     }
   }
 

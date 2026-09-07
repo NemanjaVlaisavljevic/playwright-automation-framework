@@ -110,7 +110,22 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
                 HttpMethod.GET,
                 List.of("/api/v1/runs", "/api/v1/runs/*", "/api/v1/capabilities", "/api/v1/tests"),
                 KeyStrategy.CLIENT_IP,
-                List.of(new NamedRule("public-read", properties.publicReadRateLimit()))));
+                List.of(new NamedRule("public-read", properties.publicReadRateLimit()))),
+            // D4.1 review round: a real sweep does real DB/filesystem work, so both retention
+            // routes get their own conservative admin-keyed limit like every other admin-only
+            // mutation surface above - each tracked as its own independent counter (a valid or
+            // stolen admin session could otherwise trigger dry-run previews and real sweeps as
+            // often as it likes).
+            new Surface(
+                HttpMethod.GET,
+                List.of("/api/v1/retention/preview"),
+                KeyStrategy.ADMIN_GITHUB_ID,
+                List.of(new NamedRule("retention-preview", properties.retentionRateLimit()))),
+            new Surface(
+                HttpMethod.POST,
+                List.of("/api/v1/retention/run"),
+                KeyStrategy.ADMIN_GITHUB_ID,
+                List.of(new NamedRule("retention-run", properties.retentionRateLimit()))));
   }
 
   @Override

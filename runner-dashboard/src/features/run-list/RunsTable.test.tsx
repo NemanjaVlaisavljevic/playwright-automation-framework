@@ -29,6 +29,7 @@ const run = (overrides: Partial<Record<string, unknown>> = {}) => {
     requestedAt: "2026-09-01T10:00:00Z",
     processLogUrl: `/api/v1/runs/${runId}/log`,
     selectedTests: [],
+    artifactsPurged: false,
     ...overrides,
   };
 };

@@ -12,6 +12,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
@@ -44,6 +45,7 @@ class RunControllerTest {
   @Autowired private MockMvc mockMvc;
 
   @MockitoBean private RunService runService;
+  @MockitoBean private ArtifactRepository artifactRepository;
 
   @Test
   void createReturns202WithTheQueuedRun() throws Exception {

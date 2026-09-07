@@ -15,12 +15,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import dev.vlaisanem.automation.runner.service.api.CurrentUserController;
 import dev.vlaisanem.automation.runner.service.api.RunController;
 import dev.vlaisanem.automation.runner.service.api.RunExceptionHandler;
+import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.config.JacksonConfig;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
+import dev.vlaisanem.automation.runner.service.retention.RetentionController;
+import dev.vlaisanem.automation.runner.service.retention.RetentionReport;
+import dev.vlaisanem.automation.runner.service.retention.RetentionService;
 import jakarta.servlet.http.Cookie;
 import java.time.Instant;
 import java.util.Map;
@@ -66,7 +70,12 @@ import org.springframework.web.filter.ForwardedHeaderFilter;
  * GithubOAuth2UserServiceTest} for how a real GitHub response maps to that role.
  */
 @WebMvcTest(
-    controllers = {RunController.class, RunExceptionHandler.class, CurrentUserController.class})
+    controllers = {
+      RunController.class,
+      RunExceptionHandler.class,
+      CurrentUserController.class,
+      RetentionController.class
+    })
 @Import({
   // D3.3 - SecurityConfig itself now provides InMemoryRateLimiter/AbuseRateLimitFilter as
   // explicit @Bean methods (deliberately not bare @Component classes - see
@@ -91,6 +100,8 @@ class SecurityAccessMatrixTest {
   @Autowired private MockMvc mockMvc;
 
   @MockitoBean private RunService runService;
+  @MockitoBean private ArtifactRepository artifactRepository;
+  @MockitoBean private RetentionService retentionService;
 
   /**
    * A {@code @WebMvcTest} slice does not retain {@code OAuth2ClientAutoConfiguration} (unlike a
@@ -561,5 +572,116 @@ class SecurityAccessMatrixTest {
                 .content(FIXTURE_CREATE_BODY))
         .andExpect(status().isAccepted())
         .andExpect(jsonPath("$.runId").value("run-1"));
+  }
+
+  // --- D4.1 review round: RetentionController was not previously covered by this matrix at all -
+  // same full access-matrix treatment (401/403/200/CSRF/429) as every other admin-only mutation
+  // surface above. ---
+
+  private static final RetentionReport A_REPORT =
+      new RetentionReport(false, 0, 0, 0, 0, 0, 0, 0, false);
+
+  @Test
+  void anonymousRetentionPreviewIsRejectedWithAProblemDetail401() throws Exception {
+    mockMvc
+        .perform(get("/api/v1/retention/preview"))
+        .andExpect(status().isUnauthorized())
+        .andExpect(jsonPath("$.status").value(401));
+  }
+
+  @Test
+  void anonymousRetentionRunIsRejectedWithAProblemDetail401() throws Exception {
+    mockMvc
+        .perform(post("/api/v1/retention/run").with(csrf()))
+        .andExpect(status().isUnauthorized())
+        .andExpect(jsonPath("$.status").value(401));
+  }
+
+  @Test
+  @WithMockUser
+  void authenticatedNonAdminRetentionPreviewIsForbidden() throws Exception {
+    mockMvc
+        .perform(get("/api/v1/retention/preview"))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.status").value(403));
+  }
+
+  @Test
+  @WithMockUser
+  void authenticatedNonAdminRetentionRunIsForbidden() throws Exception {
+    mockMvc
+        .perform(post("/api/v1/retention/run").with(csrf()))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.status").value(403));
+  }
+
+  @Test
+  @WithMockUser(roles = "ADMIN")
+  void authenticatedAdminRetentionPreviewSucceeds() throws Exception {
+    when(retentionService.sweep(true)).thenReturn(A_REPORT);
+
+    mockMvc.perform(get("/api/v1/retention/preview")).andExpect(status().isOk());
+  }
+
+  @Test
+  @WithMockUser(roles = "ADMIN")
+  void authenticatedAdminRetentionRunWithoutCsrfIsForbidden() throws Exception {
+    mockMvc.perform(post("/api/v1/retention/run")).andExpect(status().isForbidden());
+  }
+
+  @Test
+  @WithMockUser(roles = "ADMIN")
+  void authenticatedAdminRetentionRunWithCsrfSucceeds() throws Exception {
+    when(retentionService.sweep(false)).thenReturn(A_REPORT);
+
+    mockMvc.perform(post("/api/v1/retention/run").with(csrf())).andExpect(status().isOk());
+  }
+
+  /**
+   * Regression test for the D4.1 review round: a real sweep does real DB/filesystem work, so this
+   * admin-only route must be rate-limited per admin just like create-run/cancel-run above - not
+   * left uncapped just because the caller is already an authorized admin. Real {@code
+   * application.yml} default is 10/hour - the 11th call in the same window is rejected.
+   */
+  @Test
+  void retentionRunIsRateLimitedPerAdminAfterTheConfiguredThreshold() throws Exception {
+    when(retentionService.sweep(false)).thenReturn(A_REPORT);
+    Authentication admin = realAdminAuthentication();
+
+    for (int i = 0; i < 10; i++) {
+      mockMvc
+          .perform(post("/api/v1/retention/run").with(csrf()).with(authentication(admin)))
+          .andExpect(status().isOk());
+    }
+
+    mockMvc
+        .perform(post("/api/v1/retention/run").with(csrf()).with(authentication(admin)))
+        .andExpect(status().isTooManyRequests())
+        .andExpect(header().exists("Retry-After"))
+        .andExpect(jsonPath("$.status").value(429));
+  }
+
+  /**
+   * Same threshold, tracked as its own independent counter from {@code POST .../run} above - the
+   * cheap, read-only dry-run preview must not share (or be starved by) the expensive real sweep's
+   * budget, and vice versa.
+   */
+  @Test
+  void retentionPreviewIsRateLimitedPerAdminAfterTheConfiguredThresholdIndependentlyOfRun()
+      throws Exception {
+    when(retentionService.sweep(true)).thenReturn(A_REPORT);
+    Authentication admin = realAdminAuthentication();
+
+    for (int i = 0; i < 10; i++) {
+      mockMvc
+          .perform(get("/api/v1/retention/preview").with(authentication(admin)))
+          .andExpect(status().isOk());
+    }
+
+    mockMvc
+        .perform(get("/api/v1/retention/preview").with(authentication(admin)))
+        .andExpect(status().isTooManyRequests())
+        .andExpect(header().exists("Retry-After"))
+        .andExpect(jsonPath("$.status").value(429));
   }
 }

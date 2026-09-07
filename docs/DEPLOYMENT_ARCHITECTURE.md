@@ -1412,6 +1412,56 @@ MB is negligible next to the image sizes and the already-budgeted rebuild-and-re
 the **20 GB floor stated below still holds** regardless of which interpretation of this number turns
 out to be closer to true per-run growth once D4 actually measures it.
 
+## 6. Data retention (D4.1)
+
+The unbounded-growth concern §5 flagged is now closed. `runs`/`run_events`/`run_selected_tests`/
+`artifacts` rows and their on-disk artifact/log/raw-event files are pruned by a background
+`RetentionScheduler` (`@Scheduled(fixedDelayString = "${runner.retention-cleanup-interval}",
+initialDelay = 0)`, default hourly), with two independent, precedence-ordered protocols:
+
+- **Full-run cleanup** - a terminal run is deleted once either bound fails first: `finished_at`
+  older than `runHistoryMaxAge` (default 30 days), or it falls outside the newest
+  `runHistoryMaxCount` (default 500) visible terminal runs, ranked `finished_at DESC,
+  requested_at DESC, run_id DESC` for a deterministic tie-break. Takes precedence over artifact
+  purge - the two protocols never claim the same run in one sweep.
+- **Artifact-only purge** - a shorter, independent window (`artifactMaxAge`, default 14 days,
+  validated to never exceed `runHistoryMaxAge`), removing just a run's artifact files/metadata
+  while its row and event history live on.
+
+Both are crash-safe: an atomic conditional `UPDATE ... WHERE <tombstone column> IS NULL` is what
+lets a single sweep safely resume a run left tombstoned by an earlier, crashed process, and a
+tombstoned run is excluded from every public read path (`findById`/`findAll`, and SSE replay
+through the same lookup) the instant the tombstone commits - not only once its files finish
+deleting. A second, in-process `ReentrantLock` (non-blocking `tryLock`) additionally guards a
+whole real sweep's own duration - a review-round finding: the tombstone `UPDATE` alone cannot tell
+"resuming a crashed sweep" apart from "racing a sweep that is genuinely still running right now,"
+so a second, truly concurrent sweep needs its own separate guard (see "Review round" below).
+Manual dry-run preview and on-demand trigger are exposed as admin-only, `@Hidden` (kept out of the
+public OpenAPI doc), rate-limited (`runner.retention-rate-limit`, 10/hour by default) endpoints:
+`GET`/`POST /api/v1/retention/{preview,run}`.
+
+**Live-verified against a real running stack, not assumed**: a real 40-day-old terminal run seeded
+directly via `psql`, with matching real artifact/log/raw-event files, was found and deleted by the
+scheduler's own startup tick (`initialDelay = 0`) before a manual `preview` call could even observe
+it as a candidate - confirmed via both `psql` (0 rows) and the filesystem (no artifact directory
+remains for that run id). Full detail, including a real orchestration bug found and fixed during
+implementation (a claim-vs-resume conflation that silently dropped every crash-resume candidate),
+is in `docs/RELEASE_EVIDENCE.md`'s "Faza D4.1" section.
+
+This directly addresses §5's "no margin for D4's retention job running alongside a live suite run"
+caveat and the `runner-data`/`pgdata` unbounded-growth concern - both now have a real, tested upper
+bound rather than growing forever.
+
+**Review round (2026-09-07)** found two further concurrency gaps a purely sequential test suite
+could not have caught - a second sweep genuinely running at the same time as a first (not merely
+resuming a crashed one), and an artifact-ingestion retry racing a concurrent purge under real
+overlapping transactions, not just a same-statement check - both closed with, respectively, the
+in-process sweep lock mentioned above and a real per-run `SELECT ... FOR UPDATE` row lock shared
+by ingest and purge; plus a client-visible window where a purge-claimed run's artifacts still
+looked available, and the retention endpoints' own missing rate limit. Full detail, including the
+two tests that force genuine concurrent-transaction interleaving via a second raw JDBC connection,
+is in `docs/RELEASE_EVIDENCE.md`'s D4.1 "Review round" section.
+
 ## Verified
 
 Every claim above was checked against a real, running Docker Compose stack on this machine, across

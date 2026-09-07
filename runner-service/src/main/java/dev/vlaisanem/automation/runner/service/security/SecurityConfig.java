@@ -204,6 +204,12 @@ public class SecurityConfig {
                     .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/v1/runs", "/api/v1/runs/*/cancel")
                     .hasRole("ADMIN")
+                    // D4.1 - admin-only operational tooling (RetentionController), same role
+                    // requirement as every other admin mutation on this chain.
+                    .requestMatchers(HttpMethod.GET, "/api/v1/retention/preview")
+                    .hasRole("ADMIN")
+                    .requestMatchers(HttpMethod.POST, "/api/v1/retention/run")
+                    .hasRole("ADMIN")
                     .anyRequest()
                     .denyAll())
         .oauth2Login(

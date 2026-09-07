@@ -32,6 +32,12 @@ real time, with failures, screenshots, and traces surfacing the moment they happ
   admin account, depending on the surface), with a verified reverse-proxy IP-trust boundary, a
   pre-deserialization request-size cap, and CSP/Permissions-Policy headers with no cross-origin API
   access. See `docs/DEPLOYMENT_ARCHITECTURE.md` §4 for the full access matrix.
+- **Automatic retention (Faza D4.1)** - a terminal run is fully cleaned up (row + every on-disk
+  file) once it exceeds a bounded age or count window, whichever comes first; its artifact files
+  alone get their own shorter, independent window, so a run's history can outlive its
+  screenshots/traces. Crash-safe and idempotent (a background sweep safely resumes after a
+  restart), never touches a still-running run, and both a dry-run preview and an on-demand trigger
+  are available to an admin. See `docs/DEPLOYMENT_ARCHITECTURE.md` §6 for the full mechanism.
 - **Step-level reporting** - a `Steps` API instrumented directly in the test code reports
   step-by-step progress inside each test, not just a pass/fail at the end - see it live in the
   dashboard's "Live Focus" panel and, after the fact, as a per-test drill-down.
@@ -147,8 +153,10 @@ security, deployment) is where each of them gets addressed:
 - **Authentication, authorization, and abuse protection are done (Faza D3)** - see "What it does"
   above and `docs/DEPLOYMENT_ARCHITECTURE.md` §4 for the full access matrix; not re-described here
   since it is no longer an open gap.
-- **No artifact retention policy yet (Faza D4)** - screenshots, traces, and logs accumulate under
-  `build/runner-artifacts/<runId>/` indefinitely; nothing currently prunes old runs.
+- **Retention policy is done (Faza D4.1)** - a bounded run-history window (age or count, whichever
+  is hit first) plus a shorter, independent artifact-purge window prune old runs/screenshots/
+  traces/logs automatically; see "What it does" above and `docs/DEPLOYMENT_ARCHITECTURE.md` §6 for
+  the full mechanism.
 
 ## Automation suite
 

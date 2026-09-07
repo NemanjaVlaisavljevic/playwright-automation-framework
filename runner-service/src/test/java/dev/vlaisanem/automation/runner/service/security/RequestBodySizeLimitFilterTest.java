@@ -58,7 +58,12 @@ class RequestBodySizeLimitFilterTest {
         aRule,
         aRule,
         3,
-        maxRequestBodyBytes);
+        maxRequestBodyBytes,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        aRule);
   }
 
   /** A real {@code ObjectMapper}, matching what {@code JacksonConfig} actually provides. */

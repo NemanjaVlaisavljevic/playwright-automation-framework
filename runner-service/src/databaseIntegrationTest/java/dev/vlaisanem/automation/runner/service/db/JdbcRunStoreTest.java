@@ -22,6 +22,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -786,6 +787,199 @@ class JdbcRunStoreTest {
     Run plainRun = all.stream().filter(r -> r.runId().equals(plainRunId)).findFirst().orElseThrow();
     assertThat(customRun.selectedTests()).containsExactlyElementsOf(selection);
     assertThat(plainRun.selectedTests()).isEmpty();
+  }
+
+  // --- D4.1 retention query tests ---
+
+  @Test
+  void findEligibleForCleanupRespectsTheAgeBoundaryExactly() {
+    Instant fixedNow = Instant.parse("2026-06-01T00:00:00Z");
+    Duration maxAge = Duration.ofDays(30);
+    String justUnder = newRunId();
+    String justOver = newRunId();
+    seedTerminalRun(
+        justUnder, fixedNow.minus(Duration.ofDays(40)), fixedNow.minus(maxAge).plusSeconds(1));
+    seedTerminalRun(
+        justOver, fixedNow.minus(Duration.ofDays(40)), fixedNow.minus(maxAge).minusSeconds(1));
+
+    // maxCount deliberately huge so only the age bound can possibly trigger here.
+    List<String> eligible = store.findEligibleForCleanup(fixedNow, maxAge, 1_000_000);
+
+    assertThat(eligible).contains(justOver).doesNotContain(justUnder);
+  }
+
+  @Test
+  void findEligibleForCleanupRespectsTheCountBoundaryExactly() {
+    Instant base = Instant.parse("2026-06-01T00:00:00Z");
+    String oldest = newRunId();
+    String middle = newRunId();
+    String newest = newRunId();
+    seedTerminalRun(oldest, base, base.plusSeconds(10));
+    seedTerminalRun(middle, base.plusSeconds(20), base.plusSeconds(30));
+    seedTerminalRun(newest, base.plusSeconds(40), base.plusSeconds(50));
+
+    // maxAge deliberately huge so only the count bound can possibly trigger here.
+    List<String> eligible =
+        store.findEligibleForCleanup(base.plusSeconds(100), Duration.ofDays(36500), 2);
+
+    assertThat(eligible).contains(oldest).doesNotContain(middle, newest);
+  }
+
+  @Test
+  void findEligibleForCleanupBreaksTiesDeterministically() {
+    Instant sameFinish = Instant.parse("2026-06-01T00:00:00Z");
+    String earlierRequested = newRunId();
+    String laterRequested = newRunId();
+    // requestedAt must be <= finishedAt (chk_runs_finished_at_after_requested) - both comfortably
+    // before sameFinish.
+    seedTerminalRun(earlierRequested, sameFinish.minus(Duration.ofDays(2)), sameFinish);
+    seedTerminalRun(laterRequested, sameFinish.minus(Duration.ofDays(1)), sameFinish);
+
+    // Same finished_at for both - requested_at DESC must break the tie: laterRequested outranks
+    // earlierRequested. This test class shares one accumulating Postgres schema across every test
+    // method, so the eligible set at maxCount=1 also includes whatever other tests' own runs
+    // happen to rank below the single most-recent row overall - only laterRequested (the most
+    // recent finished_at seeded anywhere in this shared class) is guaranteed to be rank 1 and thus
+    // excluded; every assertion below is scoped to these two specific runIds, not the full set.
+    List<String> first =
+        store.findEligibleForCleanup(sameFinish.plusSeconds(1), Duration.ofDays(36500), 1);
+    List<String> second =
+        store.findEligibleForCleanup(sameFinish.plusSeconds(1), Duration.ofDays(36500), 1);
+
+    assertThat(first).contains(earlierRequested).doesNotContain(laterRequested);
+    assertThat(second)
+        .as("repeated calls against unchanged data must return the identical ranking")
+        .isEqualTo(first);
+  }
+
+  @Test
+  void findEligibleForCleanupNeverIncludesANonTerminalRun() {
+    String queuedRunId = newRunId();
+    queue(queuedRunId, Instant.parse("2000-01-01T00:00:00Z"));
+
+    List<String> eligible = store.findEligibleForCleanup(Instant.now(), Duration.ofNanos(1), 0);
+
+    assertThat(eligible).doesNotContain(queuedRunId);
+    assertThat(store.claimForCleanup(queuedRunId))
+        .as("a non-terminal run must never be claimable for cleanup, regardless of age/count")
+        .isFalse();
+  }
+
+  @Test
+  void findEligibleForCleanupExcludesAnAlreadyTombstonedRunButFindPendingCleanupStillSeesIt() {
+    Instant fixedNow = Instant.parse("2026-06-01T00:00:00Z");
+    String runId = newRunId();
+    seedTerminalRun(
+        runId, fixedNow.minus(Duration.ofDays(40)), fixedNow.minus(Duration.ofDays(31)));
+
+    assertThat(store.findEligibleForCleanup(fixedNow, Duration.ofDays(30), 1_000_000))
+        .contains(runId);
+
+    assertThat(store.claimForCleanup(runId)).isTrue();
+
+    assertThat(store.findEligibleForCleanup(fixedNow, Duration.ofDays(30), 1_000_000))
+        .as("a tombstoned run must never occupy a ranking slot once claimed")
+        .doesNotContain(runId);
+    assertThat(store.findPendingCleanup())
+        .as("but it must still be visible to the dedicated crash-resume query")
+        .contains(runId);
+  }
+
+  @Test
+  void claimForCleanupIsAtomicAndIdempotent() {
+    Instant fixedNow = Instant.parse("2026-06-01T00:00:00Z");
+    String runId = newRunId();
+    seedTerminalRun(runId, fixedNow.minus(Duration.ofDays(2)), fixedNow.minus(Duration.ofDays(1)));
+
+    assertThat(store.claimForCleanup(runId)).isTrue();
+    assertThat(store.claimForCleanup(runId))
+        .as("a second claim on an already-tombstoned run must lose, not re-tombstone it")
+        .isFalse();
+  }
+
+  @Test
+  void findEligibleForArtifactPurgeRespectsTheAgeBoundaryAndNeverIncludesANonTerminalRun() {
+    Instant fixedNow = Instant.parse("2026-06-01T00:00:00Z");
+    Duration maxAge = Duration.ofDays(14);
+    String justUnder = newRunId();
+    String justOver = newRunId();
+    String stillRunning = newRunId();
+    seedTerminalRun(
+        justUnder, fixedNow.minus(Duration.ofDays(20)), fixedNow.minus(maxAge).plusSeconds(1));
+    seedTerminalRun(
+        justOver, fixedNow.minus(Duration.ofDays(20)), fixedNow.minus(maxAge).minusSeconds(1));
+    queueAndStart(stillRunning, fixedNow.minus(Duration.ofDays(20)));
+
+    List<String> eligible = store.findEligibleForArtifactPurge(fixedNow, maxAge);
+
+    assertThat(eligible).contains(justOver).doesNotContain(justUnder, stillRunning);
+    assertThat(store.claimForArtifactPurge(stillRunning))
+        .as("a non-terminal run must never be claimable for artifact purge either")
+        .isFalse();
+  }
+
+  @Test
+  void claimForArtifactPurgeIsAtomicAndIdempotent() {
+    Instant fixedNow = Instant.parse("2026-06-01T00:00:00Z");
+    String runId = newRunId();
+    seedTerminalRun(
+        runId, fixedNow.minus(Duration.ofDays(20)), fixedNow.minus(Duration.ofDays(15)));
+
+    assertThat(store.claimForArtifactPurge(runId)).isTrue();
+    assertThat(store.claimForArtifactPurge(runId)).isFalse();
+    assertThat(store.findPendingArtifactPurge()).contains(runId);
+  }
+
+  /**
+   * Proves {@code chk_runs_cleanup_only_when_terminal}/{@code
+   * chk_runs_artifacts_purge_only_when_terminal} as real database invariants - not just something
+   * {@link JdbcRunStore#claimForCleanup}/{@link JdbcRunStore#claimForArtifactPurge}'s own {@code
+   * WHERE status IN (...)} clause is trusted to always get right.
+   */
+  @Test
+  void retentionColumnsCanOnlyEverBeSetForATerminalRunAtTheDatabaseLevel() throws SQLException {
+    String runId = newRunId();
+    queue(runId, Instant.parse("2026-01-01T00:00:00Z"));
+
+    try (Connection connection =
+        DriverManager.getConnection(jdbcUrl, POSTGRES.getUsername(), POSTGRES.getPassword())) {
+      assertThatThrownBy(
+              () -> {
+                try (PreparedStatement statement =
+                    connection.prepareStatement(
+                        "UPDATE runs SET cleanup_started_at = now() WHERE run_id = ?")) {
+                  statement.setString(1, runId);
+                  statement.executeUpdate();
+                }
+              })
+          .isInstanceOf(SQLException.class)
+          .hasMessageContaining("chk_runs_cleanup_only_when_terminal");
+
+      assertThatThrownBy(
+              () -> {
+                try (PreparedStatement statement =
+                    connection.prepareStatement(
+                        "UPDATE runs SET artifacts_purge_started_at = now() WHERE run_id = ?")) {
+                  statement.setString(1, runId);
+                  statement.executeUpdate();
+                }
+              })
+          .isInstanceOf(SQLException.class)
+          .hasMessageContaining("chk_runs_artifacts_purge_only_when_terminal");
+    }
+  }
+
+  private static void seedTerminalRun(String runId, Instant requestedAt, Instant finishedAt) {
+    queueAndStart(runId, requestedAt);
+    Instant startedAt = requestedAt.plusSeconds(1);
+    store.transitionIfNonTerminal(
+        runId,
+        run -> run.transitionTo(RunStatus.RUNNING, startedAt),
+        seq -> RunnerEvent.runStarted(runId, seq, startedAt));
+    store.transitionIfNonTerminal(
+        runId,
+        run -> run.transitionTo(RunStatus.SUCCEEDED, finishedAt),
+        seq -> RunnerEvent.runFinished(runId, seq, finishedAt, RunOutcome.SUCCEEDED, null));
   }
 
   private static void queue(String runId, Instant requestedAt) {

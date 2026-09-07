@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -237,11 +238,18 @@ public class JdbcRunStore implements RunLifecycleStore {
         });
   }
 
+  /**
+   * D4.1 - the {@code AND cleanup_started_at IS NULL} filter is what makes a tombstoned run
+   * disappear from every public read path (including SSE replay, which resolves its runId through
+   * this same method) immediately once cleanup starts, not only once its files are actually gone.
+   */
   @Override
   public Optional<Run> findById(String runId) {
     List<RunRow> matches =
         jdbcTemplate.query(
-            "SELECT * FROM runs WHERE run_id = ?", (rs, rowNum) -> toRunRow(rs), runId);
+            "SELECT * FROM runs WHERE run_id = ? AND cleanup_started_at IS NULL",
+            (rs, rowNum) -> toRunRow(rs),
+            runId);
     return matches.stream().findFirst().map(row -> row.toRun(selectedTestsFor(runId)));
   }
 
@@ -255,7 +263,8 @@ public class JdbcRunStore implements RunLifecycleStore {
   public List<Run> findAll() {
     List<RunRow> rows =
         jdbcTemplate.query(
-            "SELECT * FROM runs ORDER BY requested_at DESC", (rs, rowNum) -> toRunRow(rs));
+            "SELECT * FROM runs WHERE cleanup_started_at IS NULL ORDER BY requested_at DESC",
+            (rs, rowNum) -> toRunRow(rs));
     if (rows.isEmpty()) {
       return List.of();
     }
@@ -285,6 +294,19 @@ public class JdbcRunStore implements RunLifecycleStore {
           + "', '"
           + RunStatus.RUNNING.name()
           + "'";
+
+  /**
+   * D4.1 - the exact literal set {@code chk_runs_cleanup_only_when_terminal}/{@code
+   * chk_runs_artifacts_purge_only_when_terminal} already enforce as a DB invariant, built from
+   * {@link RunStatus#isTerminal()} so it can never silently drift out of sync with that enum - same
+   * reasoning as {@link #NON_TERMINAL_STATUS_LIST} being a literal, not a bound parameter (see that
+   * field's own Javadoc on partial-index predicate matching).
+   */
+  private static final String TERMINAL_STATUS_LIST =
+      java.util.Arrays.stream(RunStatus.values())
+          .filter(RunStatus::isTerminal)
+          .map(s -> "'" + s.name() + "'")
+          .collect(java.util.stream.Collectors.joining(", "));
 
   /**
    * D2.5 - backs {@code RunRecoveryService}'s startup pass with a dedicated, indexed query (see
@@ -328,6 +350,83 @@ public class JdbcRunStore implements RunLifecycleStore {
             (rs, rowNum) -> readJson(rs.getString("payload")),
             runId);
     return matches.stream().findFirst();
+  }
+
+  /** D4.1 - see {@code RunLifecycleStore}'s own Javadoc for the exact eligibility rule. */
+  @Override
+  public List<String> findEligibleForCleanup(Instant now, Duration maxAge, int maxCount) {
+    Instant cutoff = now.minus(maxAge);
+    return jdbcTemplate.query(
+        """
+        SELECT run_id FROM (
+          SELECT run_id, finished_at,
+                 ROW_NUMBER() OVER (
+                   ORDER BY finished_at DESC, requested_at DESC, run_id DESC
+                 ) AS rnk
+          FROM runs
+          WHERE cleanup_started_at IS NULL AND status IN (%s)
+        ) ranked
+        WHERE rnk > ? OR finished_at < ?
+        """
+            .formatted(TERMINAL_STATUS_LIST),
+        (rs, rowNum) -> rs.getString("run_id"),
+        maxCount,
+        Timestamp.from(cutoff));
+  }
+
+  @Override
+  public List<String> findPendingCleanup() {
+    return jdbcTemplate.query(
+        "SELECT run_id FROM runs WHERE cleanup_started_at IS NOT NULL",
+        (rs, rowNum) -> rs.getString("run_id"));
+  }
+
+  @Override
+  public boolean claimForCleanup(String runId) {
+    int updated =
+        jdbcTemplate.update(
+            "UPDATE runs SET cleanup_started_at = now() WHERE run_id = ? AND cleanup_started_at"
+                + " IS NULL AND status IN ("
+                + TERMINAL_STATUS_LIST
+                + ")",
+            runId);
+    return updated > 0;
+  }
+
+  @Override
+  public void deleteRun(String runId) {
+    jdbcTemplate.update("DELETE FROM runs WHERE run_id = ?", runId);
+  }
+
+  @Override
+  public List<String> findEligibleForArtifactPurge(Instant now, Duration maxAge) {
+    Instant cutoff = now.minus(maxAge);
+    return jdbcTemplate.query(
+        "SELECT run_id FROM runs WHERE artifacts_purge_started_at IS NULL AND status IN ("
+            + TERMINAL_STATUS_LIST
+            + ") AND finished_at < ?",
+        (rs, rowNum) -> rs.getString("run_id"),
+        Timestamp.from(cutoff));
+  }
+
+  @Override
+  public List<String> findPendingArtifactPurge() {
+    return jdbcTemplate.query(
+        "SELECT run_id FROM runs WHERE artifacts_purge_started_at IS NOT NULL AND"
+            + " artifacts_purged_at IS NULL",
+        (rs, rowNum) -> rs.getString("run_id"));
+  }
+
+  @Override
+  public boolean claimForArtifactPurge(String runId) {
+    int updated =
+        jdbcTemplate.update(
+            "UPDATE runs SET artifacts_purge_started_at = now() WHERE run_id = ? AND"
+                + " artifacts_purge_started_at IS NULL AND status IN ("
+                + TERMINAL_STATUS_LIST
+                + ")",
+            runId);
+    return updated > 0;
   }
 
   private RunnerEvent readJson(String payload) {

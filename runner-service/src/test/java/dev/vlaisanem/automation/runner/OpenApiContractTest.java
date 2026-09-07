@@ -277,7 +277,8 @@ class OpenApiContractTest {
             "status",
             "requestedAt",
             "processLogUrl",
-            "selectedTests");
+            "selectedTests",
+            "artifactsPurged");
 
     JsonNode properties = runResponse.path("properties");
     for (String terminalField : List.of("startedAt", "finishedAt", "exitCode", "detail")) {
