@@ -285,7 +285,13 @@ class ListenerEventIngestorTest {
     RecordingRunEventAppender appender = new RecordingRunEventAppender();
     ListenerEventIngestor ingestor =
         new ListenerEventIngestor(
-            runId, dataFile, marker, appender, OBJECT_MAPPER, Duration.ofSeconds(10));
+            runId,
+            dataFile,
+            marker,
+            overflowMarkerFor(runId, marker),
+            appender,
+            OBJECT_MAPPER,
+            Duration.ofSeconds(10));
     // Let the loop reach and enter its long poll wait before both callers race to stop it.
     Thread.sleep(200);
 
@@ -380,6 +386,31 @@ class ListenerEventIngestorTest {
     assertThat(result.detail()).contains("unterminated trailing line");
   }
 
+  /**
+   * D4.2 - the writer creates {@code .tests.overflow} instead of {@code .tests.complete} once its
+   * configured byte cap is hit (see {@code RunnerEventJsonlWriter}'s own Javadoc). This must be an
+   * explicit, unconditional validation failure - never folded into the generic "stopped without a
+   * marker" tolerance, which exists for a genuinely different case (an abrupt kill) and must not be
+   * credited with the wrong cause regardless of the run's own eventual process outcome.
+   */
+  @Test
+  void treatsAnOverflowMarkerAsAnExplicitValidationFailure(@TempDir Path dir) throws IOException {
+    String runId = "run-1";
+    Path dataFile = dir.resolve(runId + ".tests.jsonl");
+    Path marker = dir.resolve(runId + ".tests.complete");
+    Path overflowMarker = overflowMarkerFor(runId, marker);
+    writeLines(dataFile, RunnerEvent.testStarted(runId, 1, NOW, "t1", "test one"));
+    Files.createFile(overflowMarker);
+    RecordingRunEventAppender appender = new RecordingRunEventAppender();
+
+    ListenerEventIngestor ingestor = newIngestor(runId, dataFile, marker, appender);
+    IngestionResult result = ingestor.stopAndAwaitFinished(DRAIN_TIMEOUT);
+
+    assertThat(result.valid()).isFalse();
+    assertThat(result.detail()).contains("exceeded its configured size limit");
+    assertThat(Files.exists(marker)).isFalse();
+  }
+
   @Test
   void rejectsAnUnsupportedSchemaVersion(@TempDir Path dir) throws IOException {
     String runId = "run-1";
@@ -422,7 +453,15 @@ class ListenerEventIngestorTest {
     RecordingRunEventAppender appender = new RecordingRunEventAppender();
 
     ListenerEventIngestor ingestor =
-        new ListenerEventIngestor(runId, dataFile, marker, appender, OBJECT_MAPPER, SHORT_POLL, 1);
+        new ListenerEventIngestor(
+            runId,
+            dataFile,
+            marker,
+            overflowMarkerFor(runId, marker),
+            appender,
+            OBJECT_MAPPER,
+            SHORT_POLL,
+            1);
     IngestionResult result = ingestor.stopAndAwaitFinished(DRAIN_TIMEOUT);
 
     assertThat(result.valid()).isTrue();
@@ -445,7 +484,13 @@ class ListenerEventIngestorTest {
     RecordingRunEventAppender appender = new RecordingRunEventAppender();
     ListenerEventIngestor ingestor =
         new ListenerEventIngestor(
-            runId, dataFile, marker, appender, OBJECT_MAPPER, Duration.ofSeconds(10));
+            runId,
+            dataFile,
+            marker,
+            overflowMarkerFor(runId, marker),
+            appender,
+            OBJECT_MAPPER,
+            Duration.ofSeconds(10));
     Thread.sleep(200); // let the loop reach and enter its 10-second sleep before signalling stop
 
     IngestionResult result = ingestor.stopAndAwaitFinished(Duration.ofMillis(200));
@@ -471,7 +516,13 @@ class ListenerEventIngestorTest {
     RecordingRunEventAppender appender = new RecordingRunEventAppender();
     ListenerEventIngestor ingestor =
         new ListenerEventIngestor(
-            runId, dataFile, marker, appender, OBJECT_MAPPER, Duration.ofSeconds(10));
+            runId,
+            dataFile,
+            marker,
+            overflowMarkerFor(runId, marker),
+            appender,
+            OBJECT_MAPPER,
+            Duration.ofSeconds(10));
     // Deterministically let the background loop reach and enter its 10-second sleep before
     // signalling stop - otherwise the stop flag could be set before the loop's very first check,
     // letting it return immediately instead of exercising the timeout path this test targets.
@@ -485,7 +536,18 @@ class ListenerEventIngestorTest {
 
   private ListenerEventIngestor newIngestor(
       String runId, Path dataFile, Path marker, RunEventAppender appender) {
-    return new ListenerEventIngestor(runId, dataFile, marker, appender, OBJECT_MAPPER, SHORT_POLL);
+    return new ListenerEventIngestor(
+        runId,
+        dataFile,
+        marker,
+        overflowMarkerFor(runId, marker),
+        appender,
+        OBJECT_MAPPER,
+        SHORT_POLL);
+  }
+
+  private static Path overflowMarkerFor(String runId, Path completionMarker) {
+    return completionMarker.resolveSibling(runId + ".tests.overflow");
   }
 
   private void writeLines(Path file, RunnerEvent... events) throws IOException {

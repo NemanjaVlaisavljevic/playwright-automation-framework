@@ -33,6 +33,7 @@ public class ListenerEventIngestorFactory {
         runId,
         rawEventsDir.resolve(runId + ".tests.jsonl"),
         rawEventsDir.resolve(runId + ".tests.complete"),
+        rawEventsDir.resolve(runId + ".tests.overflow"),
         eventAppender,
         objectMapper,
         pollInterval);

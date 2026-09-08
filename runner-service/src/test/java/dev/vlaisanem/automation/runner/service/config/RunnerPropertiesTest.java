@@ -67,6 +67,29 @@ class RunnerPropertiesTest {
         });
   }
 
+  @Test
+  void bindsTheRealApplicationYmlDiskProtectionKeysCorrectly() {
+    contextRunner.run(
+        (context) -> {
+          RunnerProperties properties = context.getBean(RunnerProperties.class);
+          assertThat(properties.diskMinFreeBytes()).isEqualTo(1_073_741_824L);
+          assertThat(properties.artifactMaxBytes()).isEqualTo(26_214_400L);
+          assertThat(properties.runMaxTotalArtifactBytes()).isEqualTo(209_715_200L);
+          assertThat(properties.manifestMaxBytes()).isEqualTo(2_097_152L);
+          assertThat(properties.rawEventMaxBytes()).isEqualTo(2_097_152L);
+          assertThat(properties.managedScratchMaxBytes()).isEqualTo(104_857_600L);
+          assertThat(properties.diskUsageRateLimit())
+              .isEqualTo(new RateLimitRule(10, Duration.ofHours(1)));
+          assertThat(properties.runMaxDiskBytes())
+              .isEqualTo(
+                  209_715_200L
+                      + properties.processLogMaxBytes()
+                      + 2_097_152L
+                      + 2_097_152L
+                      + 104_857_600L);
+        });
+  }
+
   private RunnerProperties valid(
       RateLimitRule oauthAuthorizationRateLimit,
       RateLimitRule oauthCallbackRateLimit,
@@ -139,6 +162,52 @@ class RunnerPropertiesTest {
       Duration retentionArtifactMaxAge,
       Duration retentionCleanupInterval,
       RateLimitRule retentionRateLimit) {
+    return validWithDisk(
+        oauthAuthorizationRateLimit,
+        oauthCallbackRateLimit,
+        createRunRateLimitPerMinute,
+        createRunRateLimitPerHour,
+        cancelRunRateLimit,
+        publicReadRateLimit,
+        downloadRateLimit,
+        sseMaxConnectionsPerIp,
+        maxRequestBodyBytes,
+        retentionRunHistoryMaxAge,
+        retentionRunHistoryMaxCount,
+        retentionArtifactMaxAge,
+        retentionCleanupInterval,
+        retentionRateLimit,
+        1_048_576L,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        2_097_152L,
+        104_857_600L,
+        A_RULE);
+  }
+
+  private RunnerProperties validWithDisk(
+      RateLimitRule oauthAuthorizationRateLimit,
+      RateLimitRule oauthCallbackRateLimit,
+      RateLimitRule createRunRateLimitPerMinute,
+      RateLimitRule createRunRateLimitPerHour,
+      RateLimitRule cancelRunRateLimit,
+      RateLimitRule publicReadRateLimit,
+      RateLimitRule downloadRateLimit,
+      int sseMaxConnectionsPerIp,
+      long maxRequestBodyBytes,
+      Duration retentionRunHistoryMaxAge,
+      int retentionRunHistoryMaxCount,
+      Duration retentionArtifactMaxAge,
+      Duration retentionCleanupInterval,
+      RateLimitRule retentionRateLimit,
+      long diskMinFreeBytes,
+      long artifactMaxBytes,
+      long runMaxTotalArtifactBytes,
+      long manifestMaxBytes,
+      long rawEventMaxBytes,
+      long managedScratchMaxBytes,
+      RateLimitRule diskUsageRateLimit) {
     return new RunnerProperties(
         ".",
         Duration.ofMinutes(10),
@@ -168,7 +237,14 @@ class RunnerPropertiesTest {
         retentionRunHistoryMaxCount,
         retentionArtifactMaxAge,
         retentionCleanupInterval,
-        retentionRateLimit);
+        retentionRateLimit,
+        diskMinFreeBytes,
+        artifactMaxBytes,
+        runMaxTotalArtifactBytes,
+        manifestMaxBytes,
+        rawEventMaxBytes,
+        managedScratchMaxBytes,
+        diskUsageRateLimit);
   }
 
   private static final RateLimitRule A_RULE = new RateLimitRule(5, Duration.ofMinutes(1));
@@ -383,5 +459,166 @@ class RunnerPropertiesTest {
                     null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("retention-rate-limit");
+  }
+
+  private RunnerProperties validDisk(
+      long diskMinFreeBytes,
+      long artifactMaxBytes,
+      long runMaxTotalArtifactBytes,
+      long manifestMaxBytes,
+      long rawEventMaxBytes,
+      long managedScratchMaxBytes,
+      RateLimitRule diskUsageRateLimit) {
+    return validWithDisk(
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        3,
+        16384,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        A_RULE,
+        diskMinFreeBytes,
+        artifactMaxBytes,
+        runMaxTotalArtifactBytes,
+        manifestMaxBytes,
+        rawEventMaxBytes,
+        managedScratchMaxBytes,
+        diskUsageRateLimit);
+  }
+
+  @Test
+  void rejectsADiskMinFreeBytesBelow1MiB() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_575L,
+                    26_214_400L,
+                    209_715_200L,
+                    2_097_152L,
+                    2_097_152L,
+                    104_857_600L,
+                    A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("disk-min-free-bytes");
+  }
+
+  @Test
+  void rejectsAnArtifactMaxBytesBelow1024() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L, 1023L, 209_715_200L, 2_097_152L, 2_097_152L, 104_857_600L, A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("artifact-max-bytes");
+  }
+
+  @Test
+  void rejectsARunMaxTotalArtifactBytesBelow1024() {
+    assertThatThrownBy(
+            () -> validDisk(1_048_576L, 1024L, 1023L, 2_097_152L, 2_097_152L, 104_857_600L, A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("run-max-total-artifact-bytes");
+  }
+
+  @Test
+  void rejectsAnArtifactMaxBytesExceedingRunMaxTotalArtifactBytes() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L,
+                    209_715_201L,
+                    209_715_200L,
+                    2_097_152L,
+                    2_097_152L,
+                    104_857_600L,
+                    A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("artifact-max-bytes")
+        .hasMessageContaining("run-max-total-artifact-bytes");
+  }
+
+  @Test
+  void rejectsAManifestMaxBytesBelow1024() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L, 26_214_400L, 209_715_200L, 1023L, 2_097_152L, 104_857_600L, A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("manifest-max-bytes");
+  }
+
+  @Test
+  void rejectsAManifestMaxBytesAbove100MiB() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L,
+                    26_214_400L,
+                    209_715_200L,
+                    104_857_601L,
+                    2_097_152L,
+                    104_857_600L,
+                    A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("manifest-max-bytes");
+  }
+
+  @Test
+  void rejectsARawEventMaxBytesBelow1024() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L, 26_214_400L, 209_715_200L, 2_097_152L, 1023L, 104_857_600L, A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("raw-event-max-bytes");
+  }
+
+  @Test
+  void rejectsAManagedScratchMaxBytesBelow1024() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L, 26_214_400L, 209_715_200L, 2_097_152L, 2_097_152L, 1023L, A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("managed-scratch-max-bytes");
+  }
+
+  @Test
+  void rejectsANullDiskUsageRateLimit() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    1_048_576L,
+                    26_214_400L,
+                    209_715_200L,
+                    2_097_152L,
+                    2_097_152L,
+                    104_857_600L,
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("disk-usage-rate-limit");
+  }
+
+  @Test
+  void rejectsADiskBudgetSumThatOverflowsALong() {
+    assertThatThrownBy(
+            () ->
+                validDisk(
+                    Long.MAX_VALUE - 1024,
+                    26_214_400L,
+                    Long.MAX_VALUE - 2048,
+                    2_097_152L,
+                    2_097_152L,
+                    104_857_600L,
+                    A_RULE))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("overflows a long");
   }
 }

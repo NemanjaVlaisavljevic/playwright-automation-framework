@@ -91,6 +91,34 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     AbuseRateLimitFilter}'s two separate {@code retention-preview}/{@code retention-run}
  *     surfaces), the same way {@code oauthAuthorizationRateLimit}/{@code oauthCallbackRateLimit}
  *     are two related but separately-tracked surfaces.
+ * @param diskMinFreeBytes (D4.2) the floor that must remain free even after a newly-starting run
+ *     consumes up to {@link #runMaxDiskBytes()} more - {@code DiskUsageService}'s submit/pre-launch
+ *     guards reject work once usable space would drop below {@code diskMinFreeBytes +
+ *     runMaxDiskBytes()}, not merely below {@code diskMinFreeBytes} itself.
+ * @param artifactMaxBytes (D4.2) maximum size of a single artifact file (screenshot/trace/video) -
+ *     enforced primarily at the producer (the main automation suite, a true pre-write cap for a
+ *     screenshot, a post-finalization delete-and-reject for a trace) and re-checked here as a
+ *     second, independent layer by {@code ArtifactManifestWriter}.
+ * @param runMaxTotalArtifactBytes (D4.2) maximum total artifact bytes one run may accumulate,
+ *     computed from the real artifacts directory's own contents (not an in-memory counter, which
+ *     would not hold across the two independent OS processes {@code ArtifactManifestWriter} already
+ *     supports) under its existing file lock.
+ * @param manifestMaxBytes (D4.2) maximum size of one run's {@code manifest.jsonl} itself - enforced
+ *     both at the producer ({@code ArtifactManifestWriter}, before appending a line that would
+ *     exceed it) and the consumer ({@code ArtifactManifestReader}'s bounded read, which allocates a
+ *     single in-memory buffer no larger than this value - see the additional ceiling validated
+ *     below).
+ * @param rawEventMaxBytes (D4.2) maximum size of one run's raw {@code <runId>.tests.jsonl} event
+ *     stream - {@code RunnerEventJsonlWriter} stops writing on the first breach and records a
+ *     distinct {@code .tests.overflow} marker instead of the normal completion marker, so {@code
+ *     ListenerEventIngestor} can never mistake a truncated stream for a cleanly complete one.
+ * @param managedScratchMaxBytes (D4.2) a disk-budget reservation for Gradle/JUnit report and
+ *     temporary output this design does not itself enforce - a budget line, not an enforced quota,
+ *     folded into {@link #runMaxDiskBytes()} so the availability guard doesn't undercount a run's
+ *     real total footprint.
+ * @param diskUsageRateLimit (D4.2) per-admin (GitHub numeric id) limit on {@code GET
+ *     /api/v1/disk/usage} - a filesystem-tree walk plus a live Postgres size query is real work,
+ *     the same reasoning {@link #retentionRateLimit} already applies to its own admin-only reads.
  */
 @ConfigurationProperties(prefix = "runner")
 public record RunnerProperties(
@@ -122,7 +150,38 @@ public record RunnerProperties(
     int retentionRunHistoryMaxCount,
     Duration retentionArtifactMaxAge,
     Duration retentionCleanupInterval,
-    RateLimitRule retentionRateLimit) {
+    RateLimitRule retentionRateLimit,
+    long diskMinFreeBytes,
+    long artifactMaxBytes,
+    long runMaxTotalArtifactBytes,
+    long manifestMaxBytes,
+    long rawEventMaxBytes,
+    long managedScratchMaxBytes,
+    RateLimitRule diskUsageRateLimit) {
+
+  private static final long MANIFEST_MAX_BYTES_CEILING = 104_857_600L; // 100 MiB
+
+  /**
+   * Derived, never independently configured: the worst-case total disk one starting run can still
+   * consume across every writer it touches (artifacts, process log, raw events, manifest, and a
+   * reserve for unmanaged Gradle/JUnit scratch output) - see {@link #diskMinFreeBytes} for how the
+   * submit/pre-launch guards use this.
+   */
+  public long runMaxDiskBytes() {
+    try {
+      long total = runMaxTotalArtifactBytes;
+      total = Math.addExact(total, processLogMaxBytes);
+      total = Math.addExact(total, rawEventMaxBytes);
+      total = Math.addExact(total, manifestMaxBytes);
+      total = Math.addExact(total, managedScratchMaxBytes);
+      return total;
+    } catch (ArithmeticException overflow) {
+      throw new IllegalArgumentException(
+          "runner.run-max-total-artifact-bytes + process-log-max-bytes + raw-event-max-bytes +"
+              + " manifest-max-bytes + managed-scratch-max-bytes overflows a long",
+          overflow);
+    }
+  }
 
   public RunnerProperties {
     if (repoRoot == null || repoRoot.isBlank()) {
@@ -234,6 +293,53 @@ public record RunnerProperties(
     }
     if (retentionRateLimit == null) {
       throw new IllegalArgumentException("runner.retention-rate-limit must be set");
+    }
+    if (diskMinFreeBytes < 1_048_576) {
+      throw new IllegalArgumentException("runner.disk-min-free-bytes must be at least 1048576");
+    }
+    if (artifactMaxBytes < 1024) {
+      throw new IllegalArgumentException("runner.artifact-max-bytes must be at least 1024");
+    }
+    if (runMaxTotalArtifactBytes < 1024) {
+      throw new IllegalArgumentException(
+          "runner.run-max-total-artifact-bytes must be at least 1024");
+    }
+    if (artifactMaxBytes > runMaxTotalArtifactBytes) {
+      throw new IllegalArgumentException(
+          "runner.artifact-max-bytes must not exceed runner.run-max-total-artifact-bytes - a"
+              + " single file can never legitimately exceed the whole run's own budget");
+    }
+    if (manifestMaxBytes < 1024) {
+      throw new IllegalArgumentException("runner.manifest-max-bytes must be at least 1024");
+    }
+    if (manifestMaxBytes > MANIFEST_MAX_BYTES_CEILING) {
+      throw new IllegalArgumentException(
+          "runner.manifest-max-bytes must not exceed "
+              + MANIFEST_MAX_BYTES_CEILING
+              + " - ArtifactManifestReader allocates a single in-memory buffer this large");
+    }
+    if (rawEventMaxBytes < 1024) {
+      throw new IllegalArgumentException("runner.raw-event-max-bytes must be at least 1024");
+    }
+    if (managedScratchMaxBytes < 1024) {
+      throw new IllegalArgumentException("runner.managed-scratch-max-bytes must be at least 1024");
+    }
+    if (diskUsageRateLimit == null) {
+      throw new IllegalArgumentException("runner.disk-usage-rate-limit must be set");
+    }
+    try {
+      long runMaxDiskBytes = runMaxTotalArtifactBytes;
+      runMaxDiskBytes = Math.addExact(runMaxDiskBytes, processLogMaxBytes);
+      runMaxDiskBytes = Math.addExact(runMaxDiskBytes, rawEventMaxBytes);
+      runMaxDiskBytes = Math.addExact(runMaxDiskBytes, manifestMaxBytes);
+      runMaxDiskBytes = Math.addExact(runMaxDiskBytes, managedScratchMaxBytes);
+      Math.addExact(diskMinFreeBytes, runMaxDiskBytes);
+    } catch (ArithmeticException overflow) {
+      throw new IllegalArgumentException(
+          "runner.disk-min-free-bytes plus the run-max-total-artifact-bytes/process-log-max-bytes/"
+              + "raw-event-max-bytes/manifest-max-bytes/managed-scratch-max-bytes sum overflows a"
+              + " long",
+          overflow);
     }
   }
 }

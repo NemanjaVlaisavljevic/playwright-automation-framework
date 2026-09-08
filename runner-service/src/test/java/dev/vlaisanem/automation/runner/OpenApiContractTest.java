@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -56,6 +57,10 @@ class OpenApiContractTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
   @MockitoBean private ArtifactRepository artifactRepository;
+  // D4.2 adds the exact same problem one level down again: DiskUsageService also needs a
+  // JdbcTemplate, and RunService now depends on it - mocked here for the same reason as the two
+  // above (it isn't behind an interface, so nothing else already satisfies this edge).
+  @MockitoBean private DiskUsageService diskUsageService;
 
   private static final List<String> EXPECTED_OPERATION_IDS =
       List.of(

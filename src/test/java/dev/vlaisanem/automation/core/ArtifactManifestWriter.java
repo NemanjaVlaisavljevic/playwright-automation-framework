@@ -8,12 +8,18 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Appends one {@link ArtifactManifestEntry} JSON Line per artifact to {@code manifest.jsonl} inside
@@ -43,6 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class ArtifactManifestWriter {
 
+  private static final Logger LOGGER = LoggerFactory.getLogger(ArtifactManifestWriter.class);
   private static final ConcurrentHashMap<Path, Object> LOCKS_BY_MANIFEST_PATH =
       new ConcurrentHashMap<>();
 
@@ -51,11 +58,18 @@ final class ArtifactManifestWriter {
   /**
    * Builds the entry (a fresh opaque {@code artifactId}, the file's actual size once it is fully
    * written, {@code relativePath} normalized to forward slashes regardless of platform) and appends
-   * it. Callers are expected to catch {@link IOException} the same way they already treat any other
-   * best-effort artifact-capture failure - this never throws anything artifact capture itself did
-   * not already risk throwing.
+   * it - unless {@code artifactFile} itself already exceeds {@code artifactMaxBytes} (a second,
+   * independent layer of defense in depth behind whatever pre-write cap the caller may already have
+   * applied - the only layer at all for a capture API, like a Playwright trace, with no in-memory
+   * alternative), or the manifest/per-run-total D4.2 budgets reject it (see {@link #append}) - in
+   * either case {@code artifactFile} is deleted and this returns {@code false} rather than leaving
+   * a disk-consuming file with no manifest reference at all. Callers are expected to catch {@link
+   * IOException} the same way they already treat any other best-effort artifact-capture failure -
+   * this never throws anything artifact capture itself did not already risk throwing.
+   *
+   * @return {@code true} if the entry was actually recorded in the manifest.
    */
-  static void record(
+  static boolean record(
       Path artifactsRoot,
       String runId,
       String testId,
@@ -63,8 +77,21 @@ final class ArtifactManifestWriter {
       String stepId,
       ArtifactType type,
       Path artifactFile,
-      String mediaType)
+      String mediaType,
+      long artifactMaxBytes,
+      long runMaxTotalArtifactBytes,
+      long manifestMaxBytes)
       throws IOException {
+    long actualSize = Files.size(artifactFile);
+    if (actualSize > artifactMaxBytes) {
+      LOGGER.warn(
+          "Deleting artifact {} ({} bytes) - exceeds the configured {}-byte per-artifact limit",
+          artifactFile,
+          actualSize,
+          artifactMaxBytes);
+      Files.deleteIfExists(artifactFile);
+      return false;
+    }
     String relativePath = artifactsRoot.relativize(artifactFile).toString().replace('\\', '/');
     ArtifactManifestEntry entry =
         new ArtifactManifestEntry(
@@ -77,12 +104,28 @@ final class ArtifactManifestWriter {
             type,
             relativePath,
             mediaType,
-            Files.size(artifactFile),
+            actualSize,
             Instant.now());
-    append(artifactsRoot, entry);
+    boolean recorded = append(artifactsRoot, entry, runMaxTotalArtifactBytes, manifestMaxBytes);
+    if (!recorded) {
+      Files.deleteIfExists(artifactFile);
+    }
+    return recorded;
   }
 
-  private static void append(Path artifactsRoot, ArtifactManifestEntry entry) throws IOException {
+  /**
+   * @return {@code true} if the line was actually appended; {@code false} if either D4.2 budget
+   *     (the manifest's own size, or the run's real total artifact-directory size, computed fresh
+   *     under this same lock rather than an in-memory counter - a counter would not hold across the
+   *     two separate OS processes this method already supports, see this class's own Javadoc)
+   *     rejected it.
+   */
+  private static boolean append(
+      Path artifactsRoot,
+      ArtifactManifestEntry entry,
+      long runMaxTotalArtifactBytes,
+      long manifestMaxBytes)
+      throws IOException {
     Path manifestFile = artifactsRoot.resolve("manifest.jsonl").toAbsolutePath().normalize();
     byte[] line = (JsonSupport.write(entry) + "\n").getBytes(StandardCharsets.UTF_8);
     Object inProcessLock =
@@ -92,12 +135,51 @@ final class ArtifactManifestWriter {
       try (FileChannel channel =
               FileChannel.open(manifestFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
           FileLock fileLock = channel.lock()) {
-        channel.position(channel.size());
+        long manifestSizeSoFar = channel.size();
+        if (manifestSizeSoFar + line.length > manifestMaxBytes) {
+          LOGGER.warn(
+              "Refusing to append to {} - would grow past the configured {}-byte manifest limit",
+              manifestFile,
+              manifestMaxBytes);
+          return false;
+        }
+        // The candidate artifact file this entry describes was already written to disk before
+        // record() was ever called, so this walk already includes it - no separate "plus the new
+        // file's own size" addition is needed.
+        long runArtifactTotal = directorySize(artifactsRoot);
+        if (runArtifactTotal > runMaxTotalArtifactBytes) {
+          LOGGER.warn(
+              "Refusing to append to {} - run's total artifact bytes ({}) would exceed the"
+                  + " configured {}-byte per-run limit",
+              manifestFile,
+              runArtifactTotal,
+              runMaxTotalArtifactBytes);
+          return false;
+        }
+        channel.position(manifestSizeSoFar);
         ByteBuffer buffer = ByteBuffer.wrap(line);
         while (buffer.hasRemaining()) {
           channel.write(buffer);
         }
+        return true;
       }
     }
+  }
+
+  private static long directorySize(Path dir) throws IOException {
+    if (!Files.exists(dir)) {
+      return 0L;
+    }
+    AtomicLong total = new AtomicLong();
+    Files.walkFileTree(
+        dir,
+        new SimpleFileVisitor<>() {
+          @Override
+          public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+            total.addAndGet(attrs.size());
+            return FileVisitResult.CONTINUE;
+          }
+        });
+    return total.get();
   }
 }

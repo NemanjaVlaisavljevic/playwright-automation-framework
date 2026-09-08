@@ -134,6 +134,26 @@ class RetentionServiceTest {
     assertThat(rawRunExists(runId)).isFalse();
   }
 
+  /**
+   * D4.2 - a run whose raw event stream overflowed its configured size cap gets a {@code
+   * .tests.overflow} marker instead of {@code .tests.complete} (see {@code
+   * RunnerEventJsonlWriter}'s own Javadoc); a full-run cleanup must remove it too, or it would
+   * linger forever after the run itself is otherwise fully purged.
+   */
+  @Test
+  void cleansUpAnOverflowMarkerAlongsideEveryOtherRawEventFile() throws IOException {
+    Instant now = Instant.parse("2026-06-01T00:00:00Z");
+    String runId = seedTerminalRun(now.minus(Duration.ofDays(40)), now.minus(Duration.ofDays(31)));
+    seedRunFiles(runId);
+    Path overflowMarker = rawEventsDir.resolve(runId + ".tests.overflow");
+    Files.writeString(overflowMarker, "");
+
+    RetentionReport report = retentionService.sweep(false);
+
+    assertThat(report.runDeletedCount()).isEqualTo(1);
+    assertThat(Files.exists(overflowMarker)).isFalse();
+  }
+
   @Test
   void crashAfterFileDeletionBeforeDbDeleteIsResumedByTheNextSweep() throws IOException {
     Instant now = Instant.parse("2026-06-01T00:00:00Z");
@@ -605,6 +625,13 @@ class RetentionServiceTest {
         retentionRunHistoryMaxCount,
         retentionArtifactMaxAge,
         Duration.ofHours(1),
+        aRule,
+        1_048_576L,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        2_097_152L,
+        104_857_600L,
         aRule);
   }
 

@@ -22,6 +22,7 @@ import dev.vlaisanem.automation.support.JsonSupport;
 import io.qameta.allure.Allure;
 import java.io.InputStream;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -135,18 +136,64 @@ class TestFixtureTest {
     assertThat(readManifest(artifactsDir)).isEmpty();
   }
 
+  /**
+   * D4.2 - a probe that cannot determine free space at all (here: the configured directory never
+   * existing) must fail closed (skip the capture), never fail open and assume there's room.
+   */
+  @Test
+  void hasEnoughFreeSpaceForTraceCaptureFailsClosedWhenTheFilesystemProbeFails(
+      @TempDir Path artifactsDir) throws Exception {
+    TestFixture fixture =
+        new TestFixture(
+            configWithArtifactsDir(artifactsDir.resolve("never-created"), Long.MAX_VALUE), null);
+
+    assertThat(fixture.hasEnoughFreeSpaceForTraceCapture(context("someTest"))).isFalse();
+  }
+
+  /**
+   * D4.2 - an impossibly large configured floor guarantees the real (finite) disk always reports as
+   * below it, deterministically proving the skip-on-low-space path without needing to actually
+   * exhaust a real disk.
+   */
+  @Test
+  void hasEnoughFreeSpaceForTraceCaptureSkipsWhenBelowTheConfiguredFloor(@TempDir Path artifactsDir)
+      throws Exception {
+    TestFixture fixture =
+        new TestFixture(configWithArtifactsDir(artifactsDir, Long.MAX_VALUE), null);
+
+    assertThat(fixture.hasEnoughFreeSpaceForTraceCapture(context("someTest"))).isFalse();
+  }
+
+  private static TestConfig configWithArtifactsDir(
+      Path artifactsDir, long traceCaptureMinFreeBytes) {
+    return new TestConfig(
+        "https://automationintesting.online",
+        BrowserName.CHROMIUM,
+        true,
+        Duration.ofSeconds(10),
+        Duration.ofSeconds(30),
+        true,
+        false,
+        artifactsDir,
+        "run-1",
+        "admin",
+        "password",
+        "https://automationintesting.online",
+        false,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        traceCaptureMinFreeBytes,
+        true);
+  }
+
   private static Page workingScreenshotPage() {
     Page page = mock(Page.class);
     when(page.isClosed()).thenReturn(false);
-    doAnswer(
-            invocation -> {
-              Page.ScreenshotOptions options = invocation.getArgument(0);
-              Files.createDirectories(options.path.getParent());
-              Files.writeString(options.path, "fake screenshot bytes");
-              return new byte[0];
-            })
-        .when(page)
-        .screenshot(any(Page.ScreenshotOptions.class));
+    // TestFixture now captures to memory first (no setPath on the options), so the mock simply
+    // returns bytes - TestFixture itself writes them to disk once they pass the size check.
+    when(page.screenshot(any(Page.ScreenshotOptions.class)))
+        .thenReturn("fake screenshot bytes".getBytes(StandardCharsets.UTF_8));
     return page;
   }
 
@@ -183,7 +230,12 @@ class TestFixtureTest {
             "admin",
             "password",
             "https://automationintesting.online",
-            false);
+            false,
+            26_214_400L,
+            209_715_200L,
+            2_097_152L,
+            104_857_600L,
+            true);
     TestFixture fixture = new TestFixture(config, null);
     setField(fixture, "browserContext", browserContext);
     setField(fixture, "page", page);

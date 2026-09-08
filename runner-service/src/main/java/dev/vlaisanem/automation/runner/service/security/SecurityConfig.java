@@ -210,6 +210,10 @@ public class SecurityConfig {
                     .hasRole("ADMIN")
                     .requestMatchers(HttpMethod.POST, "/api/v1/retention/run")
                     .hasRole("ADMIN")
+                    // D4.2 - admin-only operational tooling (DiskUsageController), same role
+                    // requirement as every other admin-only diagnostic route on this chain.
+                    .requestMatchers(HttpMethod.GET, "/api/v1/disk/usage")
+                    .hasRole("ADMIN")
                     .anyRequest()
                     .denyAll())
         .oauth2Login(

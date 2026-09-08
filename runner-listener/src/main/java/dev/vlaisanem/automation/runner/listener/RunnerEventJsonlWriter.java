@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongFunction;
+import java.util.logging.Logger;
 
 /**
  * Appends {@link RunnerEvent}s as JSON Lines to a single file, one JSON object per line, assigning
@@ -47,21 +48,45 @@ import java.util.function.LongFunction;
  * skips creating the marker, since JUnit Platform catches and merely logs an exception thrown from
  * a listener callback - without this, a failed write could be silently swallowed by JUnit while the
  * marker still claimed the run's event log was complete.
+ *
+ * <p>D4.2 - {@code maxBytes} bounds this stream's own growth. A naive cap that simply stopped
+ * writing while still creating the normal {@code completionMarker} would defeat {@code
+ * ListenerEventIngestor}'s own documented contract (its marker's mere existence is its
+ * "unconditional promise that the raw stream is complete and internally consistent") - a run could
+ * finish reporting success despite silently missing test/step events. Instead, the first write that
+ * would breach the cap is dropped (logged once, not per dropped event) and {@link #close()} creates
+ * a distinct {@code overflowMarker} in place of the normal {@code completionMarker} - a signal the
+ * consumer must check for and treat as failure, never as a clean completion.
  */
 final class RunnerEventJsonlWriter implements AutoCloseable {
+
+  // java.util.logging, not slf4j - this module deliberately has no logging-framework dependency
+  // (it runs inside the main framework's own JVM, on the JDK's classpath alone).
+  private static final Logger log = Logger.getLogger(RunnerEventJsonlWriter.class.getName());
 
   private final ObjectMapper objectMapper;
   private final Writer writer;
   private final Path file;
   private final Path completionMarker;
+  private final Path overflowMarker;
+  private final long maxBytes;
   private final AtomicLong sequence = new AtomicLong(0);
   private final Object lock = new Object();
   private boolean failed;
+  private boolean overflowed;
+  private long bytesWritten;
 
-  RunnerEventJsonlWriter(Path file, Path completionMarker, ObjectMapper objectMapper) {
+  RunnerEventJsonlWriter(
+      Path file,
+      Path completionMarker,
+      Path overflowMarker,
+      long maxBytes,
+      ObjectMapper objectMapper) {
     this.objectMapper = objectMapper;
     this.file = file;
     this.completionMarker = completionMarker;
+    this.overflowMarker = overflowMarker;
+    this.maxBytes = maxBytes;
     try {
       // CREATE_NEW below only protects file. A stale/orphan completion marker left behind without
       // its data file (e.g. a runId reused after manual cleanup that missed the marker) would
@@ -71,6 +96,10 @@ final class RunnerEventJsonlWriter implements AutoCloseable {
       if (Files.exists(completionMarker)) {
         throw new FileAlreadyExistsException(
             completionMarker.toString(), null, "stale completion marker for " + file);
+      }
+      if (Files.exists(overflowMarker)) {
+        throw new FileAlreadyExistsException(
+            overflowMarker.toString(), null, "stale overflow marker for " + file);
       }
       Path parent = file.toAbsolutePath().getParent();
       if (parent != null) {
@@ -85,11 +114,29 @@ final class RunnerEventJsonlWriter implements AutoCloseable {
 
   void write(LongFunction<RunnerEvent> eventFactory) {
     synchronized (lock) {
+      if (overflowed) {
+        // Already logged once, below, the first time this was hit - every later dropped event
+        // must stay silent, not spam a log line per event.
+        return;
+      }
       try {
         RunnerEvent event = eventFactory.apply(sequence.incrementAndGet());
-        writer.write(objectMapper.writeValueAsString(event));
+        String json = objectMapper.writeValueAsString(event);
+        long lineBytes = (json.getBytes(StandardCharsets.UTF_8).length) + 1L;
+        if (bytesWritten + lineBytes > maxBytes) {
+          overflowed = true;
+          log.warning(
+              "Raw event stream "
+                  + file
+                  + " exceeded its configured "
+                  + maxBytes
+                  + "-byte limit - no further events will be written for this run");
+          return;
+        }
+        writer.write(json);
         writer.write("\n");
         writer.flush();
+        bytesWritten += lineBytes;
       } catch (IOException exception) {
         failed = true;
         throw new UncheckedIOException("Could not write runner event", exception);
@@ -105,7 +152,9 @@ final class RunnerEventJsonlWriter implements AutoCloseable {
     synchronized (lock) {
       try {
         writer.close();
-        if (!failed) {
+        if (overflowed) {
+          Files.createFile(overflowMarker);
+        } else if (!failed) {
           Files.createFile(completionMarker);
         }
       } catch (IOException exception) {

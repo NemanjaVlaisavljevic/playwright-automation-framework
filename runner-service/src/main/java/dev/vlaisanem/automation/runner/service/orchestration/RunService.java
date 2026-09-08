@@ -4,6 +4,8 @@ import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogEntry;
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService.DiskUsageSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
@@ -12,6 +14,7 @@ import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.IngestionResult;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestor;
 import dev.vlaisanem.automation.runner.service.events.ListenerEventIngestorFactory;
+import dev.vlaisanem.automation.runner.service.exception.DiskSpaceLowException;
 import dev.vlaisanem.automation.runner.service.exception.ProcessTerminationException;
 import dev.vlaisanem.automation.runner.service.exception.RunLogNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
@@ -90,6 +93,7 @@ public class RunService {
   private final RunLifecycleStore store;
   private final RunLifecycleCoordinator lifecycle;
   private final RunRecoveryService recoveryService;
+  private final DiskUsageService diskUsageService;
   private final ProcessLauncher processLauncher;
   private final ListenerEventIngestorFactory ingestorFactory;
   private final TestCatalogService testCatalogService;
@@ -102,6 +106,11 @@ public class RunService {
   private final Duration degradedPollInterval;
   private final Duration ingestionDrainTimeout;
   private final int queueCapacity;
+  private final long rawEventMaxBytes;
+  private final long artifactMaxBytes;
+  private final long runMaxTotalArtifactBytes;
+  private final long manifestMaxBytes;
+  private final long traceCaptureMinFreeBytes;
   private final ThreadPoolExecutor executor;
   private final ScheduledExecutorService reaperExecutor;
   private final Map<String, ActiveRun> activeRuns = new ConcurrentHashMap<>();
@@ -122,6 +131,7 @@ public class RunService {
       RunLifecycleStore store,
       RunLifecycleCoordinator lifecycle,
       RunRecoveryService recoveryService,
+      DiskUsageService diskUsageService,
       ProcessLauncher processLauncher,
       ListenerEventIngestorFactory ingestorFactory,
       TestCatalogService testCatalogService,
@@ -130,6 +140,7 @@ public class RunService {
     this.store = store;
     this.lifecycle = lifecycle;
     this.recoveryService = recoveryService;
+    this.diskUsageService = diskUsageService;
     this.processLauncher = processLauncher;
     this.ingestorFactory = ingestorFactory;
     this.testCatalogService = testCatalogService;
@@ -142,6 +153,14 @@ public class RunService {
     this.degradedPollInterval = properties.degradedPollInterval();
     this.ingestionDrainTimeout = properties.ingestionDrainTimeout();
     this.queueCapacity = properties.queueCapacity();
+    this.rawEventMaxBytes = properties.rawEventMaxBytes();
+    this.artifactMaxBytes = properties.artifactMaxBytes();
+    this.runMaxTotalArtifactBytes = properties.runMaxTotalArtifactBytes();
+    this.manifestMaxBytes = properties.manifestMaxBytes();
+    // D4.2 - derived, not independently configured: the producer's own pre-trace-capture
+    // free-space floor must be at least as conservative as "the submit-time guard's own floor,
+    // plus room for one more artifact" - never a smaller, independently-drifting number.
+    this.traceCaptureMinFreeBytes = properties.diskMinFreeBytes() + properties.artifactMaxBytes();
     this.executor =
         new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
@@ -168,6 +187,10 @@ public class RunService {
     recoveryService.requireRecoveryComplete();
     if (availability.get() == Availability.DEGRADED) {
       throw new RunnerDegradedException(degradedSurvivingPids());
+    }
+    DiskUsageSnapshot submitTimeUsage = diskUsageService.snapshot();
+    if (submitTimeUsage.belowThreshold()) {
+      throw new DiskSpaceLowException(submitTimeUsage);
     }
     RunRequestValidator.validate(availabilityPolicy, environment, suite);
     List<TestCatalogEntry> catalog =
@@ -328,7 +351,13 @@ public class RunService {
 
       List<String> command =
           SuiteCommandFactory.commandFor(
-              environment, suite, repoRoot, runId, rawEventsDir, selectedTests);
+              environment,
+              suite,
+              repoRoot,
+              runId,
+              rawEventsDir,
+              artifactsRootDir.resolve(runId).resolve("allure-results"),
+              selectedTests);
       process = awaitAvailableThenStart(runId, activeRun, command);
       if (process == null) {
         // Already recorded a terminal status (CANCELLED while waiting, or ERROR from a start()
@@ -489,9 +518,54 @@ public class RunService {
           // go back and wait properly rather than launching into a now-unsafe window.
           continue;
         }
+        // A submit()-time disk check alone does not protect a run that was already queued: with a
+        // bounded queue and a single worker, several requests can each pass that earlier check
+        // before the first actually consumes disk. Re-checked here, immediately before the process
+        // that would actually consume it starts - unlike DEGRADED above, this never loops/retries:
+        // disk pressure isn't something this service resolves on its own schedule, so a queued run
+        // that can't safely start is terminalized now, not launched and not waited out.
+        DiskUsageSnapshot preLaunchUsage = diskUsageService.snapshot();
+        if (preLaunchUsage.belowThreshold()) {
+          lifecycle.finishIfLive(
+              runId,
+              RunStatus.ERROR,
+              null,
+              "Run was not started: available disk space is below the configured safety threshold"
+                  + " ("
+                  + preLaunchUsage.usableFreeBytes()
+                  + " bytes usable, "
+                  + (preLaunchUsage.diskMinFreeBytes() + preLaunchUsage.runMaxDiskBytes())
+                  + " bytes required)",
+              Instant.now());
+          return null;
+        }
         try {
+          // D4.2 - threaded down from this same RunnerProperties-sourced config so a
+          // dashboard-launched run's producer-side limits (enforced in the main framework/
+          // runner-listener child process) always agree with the consumer-side limits it's later
+          // checked against - a standalone Gradle invocation this service never launched falls
+          // back to TestConfig's own defaults instead.
           Map<String, String> environment =
-              Map.of("ARTIFACTS_DIR", reserveArtifactsDirectory(runId).toString());
+              Map.of(
+                  "ARTIFACTS_DIR", reserveArtifactsDirectory(runId).toString(),
+                  "ARTIFACT_MAX_BYTES", String.valueOf(artifactMaxBytes),
+                  "RUN_MAX_TOTAL_ARTIFACT_BYTES", String.valueOf(runMaxTotalArtifactBytes),
+                  "MANIFEST_MAX_BYTES", String.valueOf(manifestMaxBytes),
+                  "TRACE_CAPTURE_MIN_FREE_BYTES", String.valueOf(traceCaptureMinFreeBytes),
+                  // An environment variable, not a -D flag: it must reach
+                  // RunnerEventWriterRegistry inside the forked JUnit test-worker JVM itself, and
+                  // (unlike system properties) an env var set here on the spawned build JVM is
+                  // inherited automatically by that forked worker - no build.gradle forwarding
+                  // needed, unlike -Drunner.allureResultsDir= below.
+                  "RUNNER_RAW_EVENT_MAX_BYTES", String.valueOf(rawEventMaxBytes),
+                  "ALLURE_ATTACHMENTS_ENABLED", "false",
+                  // D4.2 - video recording never goes through ArtifactManifestWriter at all (it is
+                  // written directly by Playwright on browser-context close, with no producer-side
+                  // cap/manifest-entry/delete-on-reject the way screenshots and traces get), so it
+                  // is not a supported artifact type on this execution path - forced off
+                  // regardless of the host environment's own RECORD_VIDEO setting, rather than
+                  // silently letting an unbounded video file bypass every D4.2 budget.
+                  "RECORD_VIDEO", "false");
           return processLauncher.start(command, repoRoot, processLogPath(runId), environment);
         } catch (IOException exception) {
           lifecycle.finishIfLive(

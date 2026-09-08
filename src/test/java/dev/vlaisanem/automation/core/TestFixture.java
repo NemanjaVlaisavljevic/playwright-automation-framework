@@ -11,6 +11,8 @@ import dev.vlaisanem.automation.runner.contract.ArtifactType;
 import io.qameta.allure.Allure;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -46,6 +48,12 @@ final class TestFixture implements AutoCloseable {
               .setLocale("en-GB")
               .setTimezoneId("Europe/London")
               .setViewportSize(1440, 900);
+      // D4.2 - video is deliberately not a disk-protected artifact type: unlike a screenshot or a
+      // trace, Playwright writes it directly to disk on browser-context close, with no producer-
+      // side path through ArtifactManifestWriter at all (no size cap, no manifest entry, no
+      // delete-on-reject). RunService forces RECORD_VIDEO=false for every dashboard-launched run
+      // regardless of the host environment's own setting - this only ever runs for a standalone
+      // local invocation, where D4.2's own protections were never in scope to begin with.
       if (config.recordVideo()) {
         options.setRecordVideoDir(config.artifactsDirectory().resolve("videos"));
       }
@@ -110,22 +118,47 @@ final class TestFixture implements AutoCloseable {
             && safelyGet(context, "check whether the page is open", () -> !page.isClosed(), false);
     if (pageOpen) {
       Path screenshot = testDirectory.resolve("failure.png");
+      // Captured to memory first, not straight to disk (Page's no-path overload returns byte[]) -
+      // a real, preventive D4.2 hard cap for this artifact type: nothing is ever written for a
+      // screenshot that already exceeds config.artifactMaxBytes(), unlike a trace below (Playwright
+      // has no in-memory-buffer alternative for tracing, so that one stays post-finalization
+      // enforcement only - see this method's own trace branch).
       boolean captured =
-          safely(
+          safelyGet(
               context,
               "capture a failure screenshot",
-              () ->
-                  page.screenshot(
-                      new Page.ScreenshotOptions().setPath(screenshot).setFullPage(true)));
+              () -> {
+                byte[] bytes = page.screenshot(new Page.ScreenshotOptions().setFullPage(true));
+                if (bytes.length > config.artifactMaxBytes()) {
+                  LOGGER.warn(
+                      "Skipping failure screenshot for {} ({} bytes) - exceeds the configured {}"
+                          + "-byte per-artifact limit",
+                      context.getDisplayName(),
+                      bytes.length,
+                      config.artifactMaxBytes());
+                  return false;
+                }
+                try {
+                  Files.write(screenshot, bytes);
+                } catch (IOException e) {
+                  throw new UncheckedIOException(e);
+                }
+                return true;
+              },
+              false);
       if (captured) {
-        safely(
-            context,
-            "record the screenshot artifact manifest entry",
-            () -> recordArtifact(context, ArtifactType.SCREENSHOT, screenshot, "image/png"));
-        safely(
-            context,
-            "attach the failure screenshot to Allure",
-            () -> attach("Failure screenshot", "image/png", screenshot, ".png"));
+        boolean recorded =
+            safelyGet(
+                context,
+                "record the screenshot artifact manifest entry",
+                () -> recordArtifact(context, ArtifactType.SCREENSHOT, screenshot, "image/png"),
+                false);
+        if (recorded && config.allureAttachmentsEnabled()) {
+          safely(
+              context,
+              "attach the failure screenshot to Allure",
+              () -> attach("Failure screenshot", "image/png", screenshot, ".png"));
+        }
       }
     }
 
@@ -135,22 +168,65 @@ final class TestFixture implements AutoCloseable {
       // way - even a failed attempt must not be retried (e.g. from close()) or left permanently
       // "still running".
       traceRunning = false;
+      // Playwright's trace recorder streams directly to disk with no in-memory-buffer
+      // alternative, so this pre-flight check - skip the capture entirely if space is already
+      // critically low - is the only preventive mitigation available here; the real enforcement
+      // stays post-finalization (recordArtifact, below), a documented gap D4.2's own plan is
+      // explicit is not a hard filesystem quota for this specific artifact type.
       boolean captured =
+          hasEnoughFreeSpaceForTraceCapture(context)
+              && safely(
+                  context,
+                  "stop the Playwright trace",
+                  () -> browserContext.tracing().stop(new Tracing.StopOptions().setPath(trace)));
+      if (captured) {
+        boolean recorded =
+            safelyGet(
+                context,
+                "record the trace artifact manifest entry",
+                () -> recordArtifact(context, ArtifactType.TRACE, trace, "application/zip"),
+                false);
+        if (recorded && config.allureAttachmentsEnabled()) {
           safely(
               context,
-              "stop the Playwright trace",
-              () -> browserContext.tracing().stop(new Tracing.StopOptions().setPath(trace)));
-      if (captured) {
-        safely(
-            context,
-            "record the trace artifact manifest entry",
-            () -> recordArtifact(context, ArtifactType.TRACE, trace, "application/zip"));
-        safely(
-            context,
-            "attach the Playwright trace to Allure",
-            () -> attach("Playwright trace", "application/zip", trace, ".zip"));
+              "attach the Playwright trace to Allure",
+              () -> attach("Playwright trace", "application/zip", trace, ".zip"));
+        }
       }
     }
+  }
+
+  /**
+   * Fail-closed, not fail-open: a probe that cannot determine free space at all is exactly the
+   * moment this guard exists to protect against, so a failure here must skip the capture, never
+   * default to "assume there's room." Package-private, not private: {@code TestFixtureTest} calls
+   * this directly to prove the fail-closed/threshold behavior deterministically, without needing a
+   * real disk to actually be low on space.
+   */
+  boolean hasEnoughFreeSpaceForTraceCapture(ExtensionContext context) {
+    return safelyGet(
+        context,
+        "check free disk space before finalizing a trace",
+        () -> {
+          long usable;
+          try {
+            FileStore store = Files.getFileStore(config.artifactsDirectory());
+            usable = store.getUsableSpace();
+          } catch (IOException e) {
+            throw new UncheckedIOException(e);
+          }
+          if (usable < config.traceCaptureMinFreeBytes()) {
+            LOGGER.warn(
+                "Skipping trace capture for {} - only {} bytes free, below the configured {}-byte"
+                    + " floor",
+                context.getDisplayName(),
+                usable,
+                config.traceCaptureMinFreeBytes());
+            return false;
+          }
+          return true;
+        },
+        false);
   }
 
   private boolean safely(ExtensionContext context, String step, ThrowingRunnable action) {
@@ -213,24 +289,33 @@ final class TestFixture implements AutoCloseable {
     return slug + "-" + Integer.toHexString(context.getUniqueId().hashCode());
   }
 
-  private void recordArtifact(
-      ExtensionContext context, ArtifactType type, Path artifactFile, String mediaType)
-      throws IOException {
+  /**
+   * @return {@code true} if the artifact was actually recorded in the manifest.
+   */
+  private boolean recordArtifact(
+      ExtensionContext context, ArtifactType type, Path artifactFile, String mediaType) {
     // Only the step whose action threw the exact instance JUnit reports as this test's own
     // execution exception counts - not merely "the last step that happened to fail" (see
     // Steps#stepIdForFailure), so a test that catches a step's failure and fails later for an
     // unrelated reason never mis-attributes its artifact to that earlier, already-handled step.
     String stepId =
         steps == null ? null : steps.stepIdForFailure(context.getExecutionException().orElse(null));
-    ArtifactManifestWriter.record(
-        config.artifactsDirectory(),
-        config.runId(),
-        context.getUniqueId(),
-        context.getDisplayName(),
-        stepId,
-        type,
-        artifactFile,
-        mediaType);
+    try {
+      return ArtifactManifestWriter.record(
+          config.artifactsDirectory(),
+          config.runId(),
+          context.getUniqueId(),
+          context.getDisplayName(),
+          stepId,
+          type,
+          artifactFile,
+          mediaType,
+          config.artifactMaxBytes(),
+          config.runMaxTotalArtifactBytes(),
+          config.manifestMaxBytes());
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   private static void attach(String name, String mediaType, Path path, String extension)

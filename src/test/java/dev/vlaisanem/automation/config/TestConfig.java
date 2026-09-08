@@ -19,7 +19,12 @@ public record TestConfig(
     String adminUsername,
     String adminPassword,
     String sharedTargetBaseUrl,
-    boolean allowMutationAgainstSharedTarget) {
+    boolean allowMutationAgainstSharedTarget,
+    long artifactMaxBytes,
+    long runMaxTotalArtifactBytes,
+    long manifestMaxBytes,
+    long traceCaptureMinFreeBytes,
+    boolean allureAttachmentsEnabled) {
 
   private static final TestConfig INSTANCE = load();
 
@@ -44,6 +49,22 @@ public record TestConfig(
       throw new IllegalArgumentException("sharedTargetBaseUrl must not be blank");
     }
     sharedTargetBaseUrl = stripTrailingSlash(sharedTargetBaseUrl);
+    if (artifactMaxBytes <= 0) {
+      throw new IllegalArgumentException("artifactMaxBytes must be positive");
+    }
+    if (runMaxTotalArtifactBytes <= 0) {
+      throw new IllegalArgumentException("runMaxTotalArtifactBytes must be positive");
+    }
+    if (artifactMaxBytes > runMaxTotalArtifactBytes) {
+      throw new IllegalArgumentException(
+          "artifactMaxBytes must not exceed runMaxTotalArtifactBytes");
+    }
+    if (manifestMaxBytes <= 0) {
+      throw new IllegalArgumentException("manifestMaxBytes must be positive");
+    }
+    if (traceCaptureMinFreeBytes <= 0) {
+      throw new IllegalArgumentException("traceCaptureMinFreeBytes must be positive");
+    }
   }
 
   /**
@@ -101,7 +122,20 @@ public record TestConfig(
         setting(
             "sharedTargetBaseUrl", "SHARED_TARGET_BASE_URL", "https://automationintesting.online"),
         booleanSetting(
-            "allowMutationAgainstSharedTarget", "ALLOW_MUTATION_AGAINST_SHARED_TARGET", false));
+            "allowMutationAgainstSharedTarget", "ALLOW_MUTATION_AGAINST_SHARED_TARGET", false),
+        // D4.2 - disk protection. Defaults match runner-service's own RunnerProperties defaults
+        // (application.yml's D4.2 block) so a dashboard-launched run's producer-side limits agree
+        // with the consumer-side limits it's checked against - runner-service threads its own
+        // configured values down as env vars for every run it launches (see RunService), so these
+        // defaults only apply to a standalone Gradle invocation it never launched.
+        longSetting("artifactMaxBytes", "ARTIFACT_MAX_BYTES", 26_214_400L),
+        longSetting("runMaxTotalArtifactBytes", "RUN_MAX_TOTAL_ARTIFACT_BYTES", 209_715_200L),
+        longSetting("manifestMaxBytes", "MANIFEST_MAX_BYTES", 2_097_152L),
+        // Default matches runner-service's own derived floor (RunnerProperties' default
+        // diskMinFreeBytes 1 GiB + artifactMaxBytes 25 MiB) - see RunService's own Javadoc for why
+        // this must never independently drift from the submit-time guard's own floor.
+        longSetting("traceCaptureMinFreeBytes", "TRACE_CAPTURE_MIN_FREE_BYTES", 1_099_956_224L),
+        booleanSetting("allureAttachmentsEnabled", "ALLURE_ATTACHMENTS_ENABLED", true));
   }
 
   private static String setting(String property, String environment, String fallback) {

@@ -127,3 +127,17 @@ runner:
   retention-rate-limit:
     max-attempts: 10
     window: PT1H
+  # D4.2 - disk protection. Defaults locked off real measurements taken against this repo's own
+  # workspace (2026-09-08): observed screenshots ~0.8-1.5 MB, traces ~1.3-2.4 MB, a historical Allure
+  # corpus averaging ~1.06 MB/screenshot and ~0.73 MB/trace across 750 files; raw event JSONL topped
+  # out at ~204 KB and process logs at ~5 KB across nearly a thousand real historical runs. Each
+  # value below is deliberately generous relative to those real numbers, not a guess.
+  disk-min-free-bytes: 1073741824 # 1 GiB
+  artifact-max-bytes: 26214400 # 25 MiB - single screenshot/trace/video file
+  run-max-total-artifact-bytes: 209715200 # 200 MiB - one run's whole artifact footprint
+  manifest-max-bytes: 2097152 # 2 MiB
+  raw-event-max-bytes: 2097152 # 2 MiB
+  managed-scratch-max-bytes: 104857600 # 100 MiB - Gradle/JUnit report/temp reserve, not enforced
+  disk-usage-rate-limit:
+    max-attempts: 10
+    window: PT1H

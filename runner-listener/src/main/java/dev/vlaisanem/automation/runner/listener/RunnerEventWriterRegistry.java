@@ -25,6 +25,13 @@ public final class RunnerEventWriterRegistry {
   static final String RAW_EVENTS_DIR_PROPERTY = "runner.rawEventsDir";
   private static final String RAW_EVENTS_DIR_ENV = "RUNNER_RAW_EVENTS_DIR";
   private static final String DEFAULT_RAW_EVENTS_DIR = "build/runner-events/raw";
+  // D4.2 - disk protection. Mirrors runner-service's own RunnerProperties#rawEventMaxBytes default
+  // (application.yml's D4.2 block) so a dashboard-launched run's producer-side cap agrees with what
+  // ListenerEventIngestor is configured to expect - runner-service threads its own configured value
+  // down as this exact system property for every run it launches (see SuiteCommandFactory).
+  static final String RAW_EVENT_MAX_BYTES_PROPERTY = "runner.rawEventMaxBytes";
+  private static final String RAW_EVENT_MAX_BYTES_ENV = "RUNNER_RAW_EVENT_MAX_BYTES";
+  private static final long DEFAULT_RAW_EVENT_MAX_BYTES = 2_097_152L;
 
   private static final ConcurrentHashMap<String, RunnerEventJsonlWriter> WRITERS_BY_RUN_ID =
       new ConcurrentHashMap<>();
@@ -62,11 +69,43 @@ public final class RunnerEventWriterRegistry {
     return new RunnerEventJsonlWriter(
         rawEventsDir.resolve(runId + ".tests.jsonl"),
         rawEventsDir.resolve(runId + ".tests.complete"),
+        rawEventsDir.resolve(runId + ".tests.overflow"),
+        resolveRawEventMaxBytes(),
         RunnerEventObjectMapper.create());
   }
 
   private static Path resolveRawEventsDir() {
     return Path.of(setting(RAW_EVENTS_DIR_PROPERTY, RAW_EVENTS_DIR_ENV, DEFAULT_RAW_EVENTS_DIR));
+  }
+
+  private static final long MIN_RAW_EVENT_MAX_BYTES = 1024L;
+
+  private static long resolveRawEventMaxBytes() {
+    String value =
+        setting(
+            RAW_EVENT_MAX_BYTES_PROPERTY,
+            RAW_EVENT_MAX_BYTES_ENV,
+            Long.toString(DEFAULT_RAW_EVENT_MAX_BYTES));
+    long maxBytes;
+    try {
+      maxBytes = Long.parseLong(value);
+    } catch (NumberFormatException exception) {
+      throw new IllegalArgumentException(
+          RAW_EVENT_MAX_BYTES_PROPERTY + " must be a whole number, but was '" + value + "'",
+          exception);
+    }
+    // A non-positive (or implausibly tiny) value would make the very first event overflow
+    // immediately - fail closed at resolution time with a clear cause, rather than silently
+    // producing a run that always reports ERROR with no obvious reason why.
+    if (maxBytes < MIN_RAW_EVENT_MAX_BYTES) {
+      throw new IllegalArgumentException(
+          RAW_EVENT_MAX_BYTES_PROPERTY
+              + " must be at least "
+              + MIN_RAW_EVENT_MAX_BYTES
+              + ", but was "
+              + maxBytes);
+    }
+    return maxBytes;
   }
 
   private static String setting(String property, String environment, String fallback) {

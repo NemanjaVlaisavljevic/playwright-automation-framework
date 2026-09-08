@@ -15,6 +15,9 @@ import org.junit.jupiter.api.Test;
 
 class SuiteCommandFactoryTest {
 
+  private static final Path ALLURE_RESULTS_DIR =
+      Path.of("/repo/build/runner-artifacts/run-1/allure-results");
+
   private static final Map<RunCatalog.Key, String> EXPECTED_TASK =
       Map.of(
           new RunCatalog.Key(Environment.PUBLIC, Suite.SMOKE), "smokeTest",
@@ -36,6 +39,7 @@ class SuiteCommandFactoryTest {
                   Path.of("/repo"),
                   "run-1",
                   Path.of("/repo/build/runner-events"),
+                  ALLURE_RESULTS_DIR,
                   List.of());
           assertThat(command).contains(task);
         });
@@ -50,6 +54,7 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             List.of());
 
     assertThat(command).contains("localJourneyTest");
@@ -65,6 +70,7 @@ class SuiteCommandFactoryTest {
                     Path.of("/repo"),
                     "run-1",
                     Path.of("/repo/build/runner-events"),
+                    ALLURE_RESULTS_DIR,
                     List.of()))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("LOCAL")
@@ -80,6 +86,7 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             List.of());
 
     assertThat(command).contains("--rerun");
@@ -94,6 +101,7 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             List.of());
 
     assertThat(command).contains("--no-daemon");
@@ -108,10 +116,35 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             List.of());
 
     assertThat(command).contains("-Drunner.runId=run-1");
     assertThat(command).contains("-Drunner.rawEventsDir=" + Path.of("/repo/build/runner-events"));
+  }
+
+  /**
+   * D4.2 review round 3 - this is deliberately a system property, not an environment variable: it
+   * must reach {@code build.gradle}'s own configuration code (the outer, {@code --no-daemon} build
+   * JVM this command line actually starts), which uses it to override the Allure Gradle plugin's
+   * own {@code adapter.resultsDir} - see {@code SuiteCommandFactory}'s own Javadoc for why the raw
+   * event byte limit is threaded completely differently (an environment variable, since it must
+   * reach {@code RunnerEventWriterRegistry} inside the forked JUnit test-worker JVM itself, which a
+   * system property set here never reaches on its own).
+   */
+  @Test
+  void forwardsAllureResultsDirectoryAsASystemProperty() {
+    List<String> command =
+        SuiteCommandFactory.commandFor(
+            Environment.PUBLIC,
+            Suite.SMOKE,
+            Path.of("/repo"),
+            "run-1",
+            Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
+            List.of());
+
+    assertThat(command).contains("-Drunner.allureResultsDir=" + ALLURE_RESULTS_DIR);
   }
 
   @Test
@@ -123,6 +156,7 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             List.of());
 
     String gradlew = command.get(0);
@@ -142,6 +176,7 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             List.of());
 
     assertThat(command).doesNotContain("--tests");
@@ -167,6 +202,7 @@ class SuiteCommandFactoryTest {
             Path.of("/repo"),
             "run-1",
             Path.of("/repo/build/runner-events"),
+            ALLURE_RESULTS_DIR,
             selected);
 
     assertThat(command)

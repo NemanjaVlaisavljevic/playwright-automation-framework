@@ -3,8 +3,11 @@ package dev.vlaisanem.automation.runner.service.artifacts;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -69,6 +72,8 @@ public class ArtifactIngestionService {
   private final ArtifactManifestReader manifestReader;
   private final ArtifactRepository repository;
   private final Path artifactsRootDir;
+  private final long manifestMaxBytes;
+  private final long artifactMaxBytes;
   private final ScheduledExecutorService reconciliationExecutor =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> {
@@ -83,6 +88,8 @@ public class ArtifactIngestionService {
     this.manifestReader = new ArtifactManifestReader(objectMapper);
     this.repository = repository;
     this.artifactsRootDir = Path.of(properties.artifactsDir()).toAbsolutePath().normalize();
+    this.manifestMaxBytes = properties.manifestMaxBytes();
+    this.artifactMaxBytes = properties.artifactMaxBytes();
   }
 
   /**
@@ -117,7 +124,55 @@ public class ArtifactIngestionService {
   public ArtifactIngestionOutcome ingestAvailableEntries(String runId, boolean runTerminal) {
     try {
       Path manifestFile = artifactsRootDir.resolve(runId).resolve(MANIFEST_FILE_NAME);
-      List<ArtifactManifestEntry> entries = manifestReader.read(manifestFile, runId, runTerminal);
+      List<ArtifactManifestEntry> entries =
+          manifestReader.read(manifestFile, runId, runTerminal, manifestMaxBytes);
+      // D4.2 - a real anomaly detector, not routine size enforcement: the producer (the main
+      // automation suite) already deletes an oversized artifact before ever recording it in the
+      // manifest, so a real/manifested size mismatch here can only mean a bug, a race, or
+      // tampering - exactly as untrustworthy as a duplicate artifactId or a runId mismatch the
+      // manifest reader itself already treats as corruption, so this poisons the whole pass the
+      // same way (never auto-deletes the file - unlike the producer's own reject path, an anomaly
+      // here is worth investigating, not silently cleaned up).
+      for (ArtifactManifestEntry entry : entries) {
+        Path resolved = ArtifactFileResolver.resolve(artifactsRootDir, runId, entry);
+        long realSize;
+        try {
+          realSize = Files.size(resolved);
+        } catch (IOException e) {
+          throw new ArtifactManifestCorruptException(
+              runId, "could not stat " + resolved + ": " + e.getMessage());
+        }
+        if (realSize != entry.sizeBytes()) {
+          throw new ArtifactManifestCorruptException(
+              runId,
+              "artifact "
+                  + entry.artifactId()
+                  + " at "
+                  + resolved
+                  + " is "
+                  + realSize
+                  + " bytes on disk but the manifest claims "
+                  + entry.sizeBytes());
+        }
+        // D4.2 - the producer is a genuine trust boundary, not this service's own guarantee: an
+        // oversized file that somehow reached disk (a producer bug, a bypassed/older client) must
+        // never be served just because its own manifest entry happens to agree with its real size.
+        // runner-service independently enforces the same limit it advertises, rather than only
+        // trusting the child process to have enforced it.
+        if (realSize > artifactMaxBytes) {
+          throw new ArtifactManifestCorruptException(
+              runId,
+              "artifact "
+                  + entry.artifactId()
+                  + " at "
+                  + resolved
+                  + " is "
+                  + realSize
+                  + " bytes, exceeding the configured "
+                  + artifactMaxBytes
+                  + "-byte per-artifact limit");
+        }
+      }
       repository.ingest(entries);
       if (runTerminal) {
         repository.markIngestionComplete(runId);

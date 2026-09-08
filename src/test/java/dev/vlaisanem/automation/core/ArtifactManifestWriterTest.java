@@ -35,7 +35,10 @@ class ArtifactManifestWriterTest {
         null,
         ArtifactType.SCREENSHOT,
         artifact,
-        "image/png");
+        "image/png",
+        26_214_400L,
+        209_715_200L,
+        2_097_152L);
 
     List<ArtifactManifestEntry> entries = readManifest(artifactsRoot);
     assertThat(entries).hasSize(1);
@@ -67,7 +70,10 @@ class ArtifactManifestWriterTest {
         null,
         ArtifactType.SCREENSHOT,
         first,
-        "image/png");
+        "image/png",
+        26_214_400L,
+        209_715_200L,
+        2_097_152L);
     ArtifactManifestWriter.record(
         artifactsRoot,
         "run-1",
@@ -76,7 +82,10 @@ class ArtifactManifestWriterTest {
         null,
         ArtifactType.TRACE,
         second,
-        "application/zip");
+        "application/zip",
+        26_214_400L,
+        209_715_200L,
+        2_097_152L);
 
     List<ArtifactManifestEntry> entries = readManifest(artifactsRoot);
     assertThat(entries)
@@ -128,7 +137,10 @@ class ArtifactManifestWriterTest {
                                 null,
                                 ArtifactType.SCREENSHOT,
                                 artifact,
-                                "image/png");
+                                "image/png",
+                                26_214_400L,
+                                209_715_200L,
+                                2_097_152L);
                             return null;
                           }))
               .collect(Collectors.toList());
@@ -147,8 +159,106 @@ class ArtifactManifestWriterTest {
     }
   }
 
+  @Test
+  void rejectsAndDeletesAnOversizedArtifact(@TempDir Path artifactsRoot) throws IOException {
+    Path artifact = artifactsRoot.resolve("failure.png");
+    Files.writeString(artifact, "this is definitely more than eight bytes");
+
+    boolean recorded =
+        ArtifactManifestWriter.record(
+            artifactsRoot,
+            "run-1",
+            "test-1",
+            "test one",
+            null,
+            ArtifactType.SCREENSHOT,
+            artifact,
+            "image/png",
+            8L,
+            209_715_200L,
+            2_097_152L);
+
+    assertThat(recorded).isFalse();
+    assertThat(artifact).doesNotExist();
+    assertThat(readManifest(artifactsRoot)).isEmpty();
+  }
+
+  @Test
+  void refusesToGrowTheManifestPastItsConfiguredLimitAndDeletesTheArtifact(
+      @TempDir Path artifactsRoot) throws IOException {
+    Path artifact = artifactsRoot.resolve("failure.png");
+    Files.writeString(artifact, "x");
+
+    boolean recorded =
+        ArtifactManifestWriter.record(
+            artifactsRoot,
+            "run-1",
+            "test-1",
+            "test one",
+            null,
+            ArtifactType.SCREENSHOT,
+            artifact,
+            "image/png",
+            26_214_400L,
+            209_715_200L,
+            // A single manifest line is well over 1 byte, so this always rejects.
+            1L);
+
+    assertThat(recorded).isFalse();
+    assertThat(artifact).doesNotExist();
+    assertThat(readManifest(artifactsRoot)).isEmpty();
+  }
+
+  @Test
+  void rejectsAndDeletesAnArtifactThatWouldExceedTheRunTotalBudget(@TempDir Path artifactsRoot)
+      throws IOException {
+    Path first = artifactsRoot.resolve("first.png");
+    Path second = artifactsRoot.resolve("second.png");
+    Files.write(first, new byte[10]);
+
+    boolean firstRecorded =
+        ArtifactManifestWriter.record(
+            artifactsRoot,
+            "run-1",
+            "test-1",
+            "test one",
+            null,
+            ArtifactType.SCREENSHOT,
+            first,
+            "image/png",
+            26_214_400L,
+            15L,
+            2_097_152L);
+    // Written only now, mirroring real usage: the next artifact's own file doesn't exist on disk
+    // until its own capture step runs, immediately before its own record() call.
+    Files.write(second, new byte[10]);
+    boolean secondRecorded =
+        ArtifactManifestWriter.record(
+            artifactsRoot,
+            "run-1",
+            "test-2",
+            "test two",
+            null,
+            ArtifactType.SCREENSHOT,
+            second,
+            "image/png",
+            26_214_400L,
+            15L,
+            2_097_152L);
+
+    assertThat(firstRecorded).isTrue();
+    assertThat(secondRecorded).isFalse();
+    assertThat(first).exists();
+    assertThat(second).doesNotExist();
+    List<ArtifactManifestEntry> entries = readManifest(artifactsRoot);
+    assertThat(entries).extracting(ArtifactManifestEntry::testId).containsExactly("test-1");
+  }
+
   private static List<ArtifactManifestEntry> readManifest(Path artifactsRoot) throws IOException {
     Path manifest = artifactsRoot.resolve("manifest.jsonl");
+    if (!Files.exists(manifest)) {
+      return List.of();
+    }
     return Files.readAllLines(manifest).stream()
         .map(line -> JsonSupport.read(line, ArtifactManifestEntry.class))
         .toList();

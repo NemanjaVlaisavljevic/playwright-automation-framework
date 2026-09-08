@@ -30,7 +30,12 @@ class TestConfigTest {
         "admin",
         "password",
         sharedTargetBaseUrl,
-        false);
+        false,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        104_857_600L,
+        true);
   }
 
   @ParameterizedTest(name = "baseUrl={0} sharedTarget={1} -> shared")

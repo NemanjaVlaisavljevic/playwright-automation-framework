@@ -5,12 +5,14 @@ import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -52,18 +54,55 @@ final class ArtifactManifestReader {
     this.objectMapper = objectMapper;
   }
 
-  List<ArtifactManifestEntry> read(Path manifestFile, String expectedRunId, boolean runTerminal) {
+  List<ArtifactManifestEntry> read(
+      Path manifestFile, String expectedRunId, boolean runTerminal, long manifestMaxBytes) {
     if (!Files.exists(manifestFile)) {
       return List.of();
     }
-    byte[] content;
-    try {
-      content = Files.readAllBytes(manifestFile);
+    byte[] content = boundedRead(manifestFile, expectedRunId, manifestMaxBytes);
+    return parseLines(content, manifestFile, expectedRunId, runTerminal);
+  }
+
+  /**
+   * A single bounded channel session, not a separate {@code Files.size()} check followed by an
+   * independent {@code Files.readAllBytes()} - the latter has a TOCTOU gap on a file the writer can
+   * still be actively appending to between the two calls (the size check could see 4.9 MB, then the
+   * file grow past the limit before the unbounded read runs). Here, one {@code channel.size()}
+   * snapshot decides both whether to reject and exactly how many bytes to read - nothing else can
+   * make this read larger than what that single snapshot saw.
+   */
+  private static byte[] boundedRead(
+      Path manifestFile, String expectedRunId, long manifestMaxBytes) {
+    try (FileChannel channel = FileChannel.open(manifestFile, StandardOpenOption.READ)) {
+      long size = channel.size();
+      if (size > manifestMaxBytes) {
+        throw new ArtifactManifestCorruptException(
+            expectedRunId,
+            manifestFile
+                + " is "
+                + size
+                + " bytes, exceeding the configured "
+                + manifestMaxBytes
+                + "-byte manifest limit");
+      }
+      ByteBuffer buffer = ByteBuffer.allocate((int) size);
+      while (buffer.hasRemaining()) {
+        if (channel.read(buffer) < 0) {
+          break;
+        }
+      }
+      buffer.flip();
+      byte[] content = new byte[buffer.remaining()];
+      buffer.get(content);
+      return content;
     } catch (IOException e) {
       throw new ArtifactManifestCorruptException(
           expectedRunId, "could not read " + manifestFile + ": " + e.getMessage());
     }
+  }
 
+  private List<ArtifactManifestEntry> parseLines(
+      byte[] content, Path manifestFile, String expectedRunId, boolean runTerminal) {
     List<ArtifactManifestEntry> entries = new ArrayList<>();
     Set<String> seenArtifactIds = new HashSet<>();
     int start = 0;

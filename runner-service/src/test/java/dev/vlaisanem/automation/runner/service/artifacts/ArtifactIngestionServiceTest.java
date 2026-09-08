@@ -191,6 +191,68 @@ class ArtifactIngestionServiceTest {
         .isEqualTo(5);
   }
 
+  /**
+   * D4.2 - because the producer already deletes an oversized artifact before ever recording it in
+   * the manifest, a real/manifested size mismatch here can only be a genuine anomaly (bug, race,
+   * tampering) - treated exactly like any other manifest corruption: the whole pass fails, nothing
+   * from it is ingested.
+   */
+  @Test
+  void treatsARealSizeMismatchAgainstTheManifestAsCorruption(@TempDir Path artifactsRoot)
+      throws IOException {
+    ArtifactManifestEntry entry = entry("a", "test-1");
+    Path runRoot = artifactsRoot.resolve(RUN_ID);
+    Files.createDirectories(runRoot);
+    Files.write(
+        runRoot.resolve("manifest.jsonl"),
+        (OBJECT_MAPPER.writeValueAsString(entry) + "\n").getBytes(StandardCharsets.UTF_8));
+    // Real file deliberately a different size than the manifest's own sizeBytes() claim.
+    Files.write(runRoot.resolve(entry.relativePath()), new byte[1]);
+    FakeArtifactRepository repository = new FakeArtifactRepository();
+    ArtifactIngestionService service = serviceFor(artifactsRoot, repository);
+
+    assertThat(service.ingestAvailableEntries(RUN_ID, true))
+        .isEqualTo(ArtifactIngestionOutcome.FAILED);
+    assertThat(repository.findForRun(RUN_ID, null)).isEmpty();
+  }
+
+  /**
+   * D4.2 - the producer is a genuine trust boundary, not a guarantee runner-service can rely on
+   * alone: a file whose real size agrees with its own manifest entry (so the consistency check
+   * above would not catch it) but exceeds the configured per-artifact limit must still be rejected
+   * independently - a producer bug or a bypassed/older client must never let an oversized file
+   * reach the served index just because its own manifest entry happens to agree with it.
+   */
+  @Test
+  void rejectsAnArtifactWhoseRealSizeAgreesWithTheManifestButExceedsTheConfiguredLimit(
+      @TempDir Path artifactsRoot) throws IOException {
+    ArtifactManifestEntry entry =
+        new ArtifactManifestEntry(
+            ArtifactManifestEntry.CURRENT_SCHEMA_VERSION,
+            "a",
+            RUN_ID,
+            "test-1",
+            "display name for test-1",
+            null,
+            ArtifactType.SCREENSHOT,
+            "a.png",
+            "image/png",
+            2000,
+            Instant.parse("2026-01-01T00:00:00Z"));
+    Path runRoot = artifactsRoot.resolve(RUN_ID);
+    Files.createDirectories(runRoot);
+    Files.write(
+        runRoot.resolve("manifest.jsonl"),
+        (OBJECT_MAPPER.writeValueAsString(entry) + "\n").getBytes(StandardCharsets.UTF_8));
+    Files.write(runRoot.resolve(entry.relativePath()), new byte[2000]);
+    FakeArtifactRepository repository = new FakeArtifactRepository();
+    ArtifactIngestionService service = serviceFor(artifactsRoot, repository, 1024L);
+
+    assertThat(service.ingestAvailableEntries(RUN_ID, true))
+        .isEqualTo(ArtifactIngestionOutcome.FAILED);
+    assertThat(repository.findForRun(RUN_ID, null)).isEmpty();
+  }
+
   private static void writeCorruptManifest(Path artifactsRoot) throws IOException {
     Path runRoot = artifactsRoot.resolve(RUN_ID);
     Files.createDirectories(runRoot);
@@ -208,7 +270,18 @@ class ArtifactIngestionServiceTest {
         OBJECT_MAPPER, repository, propertiesWithArtifactsDir(artifactsRoot));
   }
 
+  private static ArtifactIngestionService serviceFor(
+      Path artifactsRoot, FakeArtifactRepository repository, long artifactMaxBytes) {
+    return new ArtifactIngestionService(
+        OBJECT_MAPPER, repository, propertiesWithArtifactsDir(artifactsRoot, artifactMaxBytes));
+  }
+
   private static RunnerProperties propertiesWithArtifactsDir(Path artifactsRoot) {
+    return propertiesWithArtifactsDir(artifactsRoot, 26_214_400L);
+  }
+
+  private static RunnerProperties propertiesWithArtifactsDir(
+      Path artifactsRoot, long artifactMaxBytes) {
     return new RunnerProperties(
         ".",
         Duration.ofMinutes(10),
@@ -238,6 +311,13 @@ class ArtifactIngestionServiceTest {
         500,
         Duration.ofDays(14),
         Duration.ofHours(1),
+        new RateLimitRule(10, Duration.ofHours(1)),
+        1_048_576L,
+        artifactMaxBytes,
+        209_715_200L,
+        2_097_152L,
+        2_097_152L,
+        104_857_600L,
         new RateLimitRule(10, Duration.ofHours(1)));
   }
 
@@ -256,6 +336,12 @@ class ArtifactIngestionServiceTest {
         Instant.parse("2026-01-01T00:00:00Z"));
   }
 
+  /**
+   * Also writes a real file at each entry's own {@code relativePath}, exactly {@code sizeBytes()}
+   * long - D4.2's ingestion-side consistency check now stats the real resolved file and compares it
+   * against the manifest's own claim, so a fixture manifest entry with no matching real file (or a
+   * mismatched size) would itself now be treated as corruption.
+   */
   private static void writeManifest(Path artifactsRoot, ArtifactManifestEntry... entries)
       throws IOException {
     Path runRoot = artifactsRoot.resolve(RUN_ID);
@@ -264,6 +350,7 @@ class ArtifactIngestionServiceTest {
     StringBuilder content = new StringBuilder();
     for (ArtifactManifestEntry entry : entries) {
       content.append(OBJECT_MAPPER.writeValueAsString(entry)).append('\n');
+      Files.write(runRoot.resolve(entry.relativePath()), new byte[(int) entry.sizeBytes()]);
     }
     Files.write(
         manifest,

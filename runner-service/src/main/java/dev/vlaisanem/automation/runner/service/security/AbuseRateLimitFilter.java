@@ -125,7 +125,15 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
                 HttpMethod.POST,
                 List.of("/api/v1/retention/run"),
                 KeyStrategy.ADMIN_GITHUB_ID,
-                List.of(new NamedRule("retention-run", properties.retentionRateLimit()))));
+                List.of(new NamedRule("retention-run", properties.retentionRateLimit()))),
+            // D4.2 - a filesystem-tree walk plus a live Postgres size query is real work, so this
+            // new admin-only diagnostic route gets its own conservative rate limit by default, the
+            // same reasoning already applied to every other admin-only surface above.
+            new Surface(
+                HttpMethod.GET,
+                List.of("/api/v1/disk/usage"),
+                KeyStrategy.ADMIN_GITHUB_ID,
+                List.of(new NamedRule("disk-usage", properties.diskUsageRateLimit()))));
   }
 
   @Override

@@ -3,6 +3,7 @@ package dev.vlaisanem.automation.runner.service.security;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -43,6 +44,9 @@ class OAuth2ChainAppliesAbuseRateLimitTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
   @MockitoBean private ArtifactRepository artifactRepository;
+  // D4.2: DiskUsageService also needs a JdbcTemplate and isn't behind an interface, so it must be
+  // mocked here too for the same reason as the two stores above.
+  @MockitoBean private DiskUsageService diskUsageService;
 
   @Value("${local.server.port}")
   private int port;

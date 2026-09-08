@@ -3,6 +3,7 @@ package dev.vlaisanem.automation.runner;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -32,6 +33,9 @@ class ServerBindingTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
   @MockitoBean private ArtifactRepository artifactRepository;
+  // D4.2: DiskUsageService also needs a JdbcTemplate and isn't behind an interface, so it must be
+  // mocked here too for the same reason as the two stores above.
+  @MockitoBean private DiskUsageService diskUsageService;
 
   @Value("${server.address}")
   private String configuredAddress;

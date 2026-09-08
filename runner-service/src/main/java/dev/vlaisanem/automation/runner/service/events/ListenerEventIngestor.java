@@ -72,6 +72,7 @@ public final class ListenerEventIngestor {
   private final String runId;
   private final Path dataFile;
   private final Path completionMarker;
+  private final Path overflowMarker;
   private final RunEventAppender eventAppender;
   private final ObjectMapper objectMapper;
   private final Duration pollInterval;
@@ -86,6 +87,7 @@ public final class ListenerEventIngestor {
       String runId,
       Path dataFile,
       Path completionMarker,
+      Path overflowMarker,
       RunEventAppender eventAppender,
       ObjectMapper objectMapper,
       Duration pollInterval) {
@@ -93,6 +95,7 @@ public final class ListenerEventIngestor {
         runId,
         dataFile,
         completionMarker,
+        overflowMarker,
         eventAppender,
         objectMapper,
         pollInterval,
@@ -107,6 +110,7 @@ public final class ListenerEventIngestor {
       String runId,
       Path dataFile,
       Path completionMarker,
+      Path overflowMarker,
       RunEventAppender eventAppender,
       ObjectMapper objectMapper,
       Duration pollInterval,
@@ -114,6 +118,7 @@ public final class ListenerEventIngestor {
     this.runId = runId;
     this.dataFile = dataFile;
     this.completionMarker = completionMarker;
+    this.overflowMarker = overflowMarker;
     this.eventAppender = eventAppender;
     this.objectMapper = objectMapper;
     this.pollInterval = pollInterval;
@@ -234,8 +239,26 @@ public final class ListenerEventIngestor {
           pending = Arrays.copyOfRange(combined, start, combined.length);
         }
         boolean complete = Files.exists(completionMarker);
+        boolean overflow = Files.exists(overflowMarker);
         boolean stop = stopRequested.get();
-        if (newBytes.length == 0 && (complete || stop)) {
+        if (newBytes.length == 0 && (complete || overflow || stop)) {
+          // D4.2 - checked before the completion-marker handling below, and unconditionally: the
+          // writer already stopped appending once it hit the configured cap (see
+          // RunnerEventJsonlWriter's own Javadoc), so nothing about a trailing/complete line
+          // applies here. Reported as its own explicit validation failure - never folded into the
+          // generic "stopped without ever seeing a marker" tolerance below, which exists for a
+          // genuinely different case (an abrupt kill) and must never be credited with the wrong
+          // cause, regardless of the process's own eventual exit classification.
+          if (overflow) {
+            throw new RawEventValidationException(
+                diagnostic(
+                    lineNumber + 1,
+                    consumedOffset,
+                    lastSourceSequence + 1,
+                    null,
+                    "raw event stream exceeded its configured size limit and was truncated by the"
+                        + " writer"));
+          }
           if (complete) {
             if (pending.length > 0) {
               throw new RawEventValidationException(

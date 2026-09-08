@@ -37,7 +37,12 @@ class RunnerEventJsonlWriterTest {
       throws Exception {
     Path file = tempDir.resolve("concurrent.jsonl");
     RunnerEventJsonlWriter writer =
-        new RunnerEventJsonlWriter(file, tempDir.resolve("concurrent.complete"), OBJECT_MAPPER);
+        new RunnerEventJsonlWriter(
+            file,
+            tempDir.resolve("concurrent.complete"),
+            tempDir.resolve("concurrent.overflow"),
+            1_000_000L,
+            OBJECT_MAPPER);
 
     int threadCount = 8;
     int writesPerThread = 50;
@@ -73,7 +78,9 @@ class RunnerEventJsonlWriterTest {
   void closeCreatesACompletionMarkerOnlyAfterClosing(@TempDir Path tempDir) {
     Path file = tempDir.resolve("run.jsonl");
     Path marker = tempDir.resolve("run.complete");
-    RunnerEventJsonlWriter writer = new RunnerEventJsonlWriter(file, marker, OBJECT_MAPPER);
+    RunnerEventJsonlWriter writer =
+        new RunnerEventJsonlWriter(
+            file, marker, tempDir.resolve("run.overflow"), 1_000_000L, OBJECT_MAPPER);
 
     assertThat(Files.exists(marker)).isFalse();
     writer.close();
@@ -90,7 +97,9 @@ class RunnerEventJsonlWriterTest {
   void closeDoesNotCreateAMarkerAfterAFailedWrite(@TempDir Path tempDir) {
     Path file = tempDir.resolve("run.jsonl");
     Path marker = tempDir.resolve("run.complete");
-    RunnerEventJsonlWriter writer = new RunnerEventJsonlWriter(file, marker, OBJECT_MAPPER);
+    RunnerEventJsonlWriter writer =
+        new RunnerEventJsonlWriter(
+            file, marker, tempDir.resolve("run.overflow"), 1_000_000L, OBJECT_MAPPER);
 
     assertThatThrownBy(
             () ->
@@ -117,7 +126,48 @@ class RunnerEventJsonlWriterTest {
     Path marker = tempDir.resolve("run.complete");
     Files.createFile(marker);
 
-    assertThatThrownBy(() -> new RunnerEventJsonlWriter(file, marker, OBJECT_MAPPER))
+    assertThatThrownBy(
+            () ->
+                new RunnerEventJsonlWriter(
+                    file, marker, tempDir.resolve("run.overflow"), 1_000_000L, OBJECT_MAPPER))
+        .isInstanceOf(UncheckedIOException.class);
+
+    assertThat(Files.exists(file)).isFalse();
+  }
+
+  /**
+   * D4.2 - once the configured byte cap is hit, further events are silently dropped (logged once,
+   * not per event) and {@code close()} must create the distinct overflow marker instead of the
+   * normal completion marker - a consumer (see {@code ListenerEventIngestor}) must never mistake a
+   * truncated stream for a cleanly complete one.
+   */
+  @Test
+  void createsAnOverflowMarkerInsteadOfACompletionMarkerOnceTheByteCapIsHit(@TempDir Path tempDir) {
+    Path file = tempDir.resolve("run.jsonl");
+    Path marker = tempDir.resolve("run.complete");
+    Path overflowMarker = tempDir.resolve("run.overflow");
+    // Small enough that even the very first event breaches it.
+    RunnerEventJsonlWriter writer =
+        new RunnerEventJsonlWriter(file, marker, overflowMarker, 1L, OBJECT_MAPPER);
+
+    writer.write(seq -> RunnerEvent.testStarted("run-1", seq, Instant.now(), "test-id", "name"));
+    writer.write(seq -> RunnerEvent.testStarted("run-1", seq, Instant.now(), "test-id", "name"));
+    writer.close();
+
+    assertThat(Files.exists(marker)).isFalse();
+    assertThat(Files.exists(overflowMarker)).isTrue();
+  }
+
+  @Test
+  void refusesToOpenWhenOnlyAStaleOverflowMarkerExists(@TempDir Path tempDir) throws IOException {
+    Path file = tempDir.resolve("run.jsonl");
+    Path marker = tempDir.resolve("run.complete");
+    Path overflowMarker = tempDir.resolve("run.overflow");
+    Files.createFile(overflowMarker);
+
+    assertThatThrownBy(
+            () ->
+                new RunnerEventJsonlWriter(file, marker, overflowMarker, 1_000_000L, OBJECT_MAPPER))
         .isInstanceOf(UncheckedIOException.class);
 
     assertThat(Files.exists(file)).isFalse();

@@ -32,6 +32,7 @@ public final class SuiteCommandFactory {
       Path repoRoot,
       String runId,
       Path rawEventsDir,
+      Path allureResultsDir,
       List<SelectedTestSnapshot> selectedTests) {
     String task =
         RunCatalog.gradleTaskFor(environment, suite)
@@ -57,6 +58,21 @@ public final class SuiteCommandFactory {
     }
     command.add("-Drunner.runId=" + runId);
     command.add("-Drunner.rawEventsDir=" + rawEventsDir);
+    // D4.2 - read by build.gradle itself (the outer, --no-daemon build JVM this command line
+    // actually reaches), never by the forked JUnit test-worker JVM directly - a raw system
+    // property set here does NOT propagate to that forked worker on its own (see build.gradle's
+    // own forwardRunnerEventProperties comment for why only env vars are inherited automatically).
+    // build.gradle uses this to override the Allure Gradle plugin's own `adapter.resultsDir`,
+    // which is what actually computes the real `-Dallure.results.directory=` argument the plugin
+    // hands to the forked worker - redirecting Allure's automatic per-test result JSON/TXT writing
+    // (which happens regardless of whether TestFixture ever calls Allure.addAttachment) into this
+    // run's own artifacts subdirectory, included in DiskUsageService's runnerDataBytes() and D4.1's
+    // retention purge for free, rather than growing unbounded in the shared build/allure-results
+    // directory outside every disk-protection mechanism this project has. The raw-event byte limit
+    // is threaded differently (as the RUNNER_RAW_EVENT_MAX_BYTES environment variable set by
+    // RunService, not a -D flag here) precisely because it must reach RunnerEventWriterRegistry
+    // inside the forked worker itself, not build.gradle's own configuration code.
+    command.add("-Drunner.allureResultsDir=" + allureResultsDir);
     return List.copyOf(command);
   }
 

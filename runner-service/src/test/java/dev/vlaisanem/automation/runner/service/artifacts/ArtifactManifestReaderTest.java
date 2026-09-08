@@ -27,12 +27,14 @@ class ArtifactManifestReaderTest {
           .registerModule(new JavaTimeModule())
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
   private static final String RUN_ID = "run-1";
+  private static final long MANIFEST_MAX_BYTES = 1_000_000L;
 
   private final ArtifactManifestReader reader = new ArtifactManifestReader(OBJECT_MAPPER);
 
   @Test
   void returnsAnEmptyListWhenTheManifestFileDoesNotExist(@TempDir Path dir) {
-    List<ArtifactManifestEntry> entries = reader.read(dir.resolve("manifest.jsonl"), RUN_ID, false);
+    List<ArtifactManifestEntry> entries =
+        reader.read(dir.resolve("manifest.jsonl"), RUN_ID, false, MANIFEST_MAX_BYTES);
 
     assertThat(entries).isEmpty();
   }
@@ -41,7 +43,7 @@ class ArtifactManifestReaderTest {
   void parsesEveryCompleteLine(@TempDir Path dir) throws IOException {
     Path manifest = writeLines(dir, line(entry("a")), line(entry("b")));
 
-    List<ArtifactManifestEntry> entries = reader.read(manifest, RUN_ID, true);
+    List<ArtifactManifestEntry> entries = reader.read(manifest, RUN_ID, true, MANIFEST_MAX_BYTES);
 
     assertThat(entries).extracting(ArtifactManifestEntry::artifactId).containsExactly("a", "b");
   }
@@ -50,7 +52,7 @@ class ArtifactManifestReaderTest {
   void skipsBlankLinesBetweenEntries(@TempDir Path dir) throws IOException {
     Path manifest = writeRaw(dir, line(entry("a")) + "\n" + line(entry("b")));
 
-    List<ArtifactManifestEntry> entries = reader.read(manifest, RUN_ID, true);
+    List<ArtifactManifestEntry> entries = reader.read(manifest, RUN_ID, true, MANIFEST_MAX_BYTES);
 
     assertThat(entries).extracting(ArtifactManifestEntry::artifactId).containsExactly("a", "b");
   }
@@ -61,7 +63,7 @@ class ArtifactManifestReaderTest {
     // No trailing '\n' after the second entry - simulates reading mid-append.
     Path manifest = writeRaw(dir, line(entry("a")) + toJson(entry("b")));
 
-    List<ArtifactManifestEntry> entries = reader.read(manifest, RUN_ID, false);
+    List<ArtifactManifestEntry> entries = reader.read(manifest, RUN_ID, false, MANIFEST_MAX_BYTES);
 
     assertThat(entries).extracting(ArtifactManifestEntry::artifactId).containsExactly("a");
   }
@@ -72,7 +74,8 @@ class ArtifactManifestReaderTest {
     Path manifest = writeRaw(dir, line(entry("a")) + toJson(entry("b")));
 
     assertCorruptWithDiagnosticContaining(
-        () -> reader.read(manifest, RUN_ID, true), "unterminated trailing line");
+        () -> reader.read(manifest, RUN_ID, true, MANIFEST_MAX_BYTES),
+        "unterminated trailing line");
   }
 
   @Test
@@ -81,7 +84,7 @@ class ArtifactManifestReaderTest {
     Path manifest = writeRaw(dir, "{not valid json\n");
 
     assertCorruptWithDiagnosticContaining(
-        () -> reader.read(manifest, RUN_ID, false), "malformed entry");
+        () -> reader.read(manifest, RUN_ID, false, MANIFEST_MAX_BYTES), "malformed entry");
   }
 
   @Test
@@ -95,7 +98,7 @@ class ArtifactManifestReaderTest {
     Path manifest = writeRaw(dir, badJson + "\n");
 
     assertCorruptWithDiagnosticContaining(
-        () -> reader.read(manifest, RUN_ID, true), "malformed entry");
+        () -> reader.read(manifest, RUN_ID, true, MANIFEST_MAX_BYTES), "malformed entry");
   }
 
   @Test
@@ -115,7 +118,8 @@ class ArtifactManifestReaderTest {
             Instant.parse("2026-01-01T00:00:00Z"));
     Path manifest = writeLines(dir, line(wrongRun));
 
-    assertCorruptWithDiagnosticContaining(() -> reader.read(manifest, RUN_ID, false), "runId");
+    assertCorruptWithDiagnosticContaining(
+        () -> reader.read(manifest, RUN_ID, false, MANIFEST_MAX_BYTES), "runId");
   }
 
   @Test
@@ -139,7 +143,7 @@ class ArtifactManifestReaderTest {
     }
 
     assertCorruptWithDiagnosticContaining(
-        () -> reader.read(manifest, RUN_ID, false), "invalid UTF-8");
+        () -> reader.read(manifest, RUN_ID, false, MANIFEST_MAX_BYTES), "invalid UTF-8");
   }
 
   @Test
@@ -147,7 +151,20 @@ class ArtifactManifestReaderTest {
     Path manifest = writeLines(dir, line(entry("a")), line(entry("a")));
 
     assertCorruptWithDiagnosticContaining(
-        () -> reader.read(manifest, RUN_ID, false), "duplicate artifactId");
+        () -> reader.read(manifest, RUN_ID, false, MANIFEST_MAX_BYTES), "duplicate artifactId");
+  }
+
+  /**
+   * D4.2 - a single {@code channel.size()} snapshot decides both whether to reject and how many
+   * bytes to read, closing the TOCTOU gap a separate {@code Files.size()}-then-{@code
+   * readAllBytes()} pair would have on a file the writer can still be actively appending to.
+   */
+  @Test
+  void rejectsAManifestExceedingTheConfiguredByteLimit(@TempDir Path dir) throws IOException {
+    Path manifest = writeLines(dir, line(entry("a")), line(entry("b")));
+
+    assertCorruptWithDiagnosticContaining(
+        () -> reader.read(manifest, RUN_ID, false, 10L), "exceeding the configured");
   }
 
   /**

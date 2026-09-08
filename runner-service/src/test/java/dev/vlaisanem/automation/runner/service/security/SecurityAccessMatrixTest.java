@@ -17,6 +17,9 @@ import dev.vlaisanem.automation.runner.service.api.RunController;
 import dev.vlaisanem.automation.runner.service.api.RunExceptionHandler;
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.config.JacksonConfig;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageController;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService.DiskUsageSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
@@ -74,7 +77,8 @@ import org.springframework.web.filter.ForwardedHeaderFilter;
       RunController.class,
       RunExceptionHandler.class,
       CurrentUserController.class,
-      RetentionController.class
+      RetentionController.class,
+      DiskUsageController.class
     })
 @Import({
   // D3.3 - SecurityConfig itself now provides InMemoryRateLimiter/AbuseRateLimitFilter as
@@ -102,6 +106,7 @@ class SecurityAccessMatrixTest {
   @MockitoBean private RunService runService;
   @MockitoBean private ArtifactRepository artifactRepository;
   @MockitoBean private RetentionService retentionService;
+  @MockitoBean private DiskUsageService diskUsageService;
 
   /**
    * A {@code @WebMvcTest} slice does not retain {@code OAuth2ClientAutoConfiguration} (unlike a
@@ -680,6 +685,61 @@ class SecurityAccessMatrixTest {
 
     mockMvc
         .perform(get("/api/v1/retention/preview").with(authentication(admin)))
+        .andExpect(status().isTooManyRequests())
+        .andExpect(header().exists("Retry-After"))
+        .andExpect(jsonPath("$.status").value(429));
+  }
+
+  // --- D4.2: DiskUsageController - same full access-matrix treatment (401/403/200/429) as every
+  // other admin-only diagnostic surface above. ---
+
+  private static final DiskUsageSnapshot A_SNAPSHOT =
+      new DiskUsageSnapshot(1_000_000_000L, 1_048_576L, 314_572_800L, Instant.now());
+
+  @Test
+  void anonymousDiskUsageIsRejectedWithAProblemDetail401() throws Exception {
+    mockMvc
+        .perform(get("/api/v1/disk/usage"))
+        .andExpect(status().isUnauthorized())
+        .andExpect(jsonPath("$.status").value(401));
+  }
+
+  @Test
+  @WithMockUser
+  void authenticatedNonAdminDiskUsageIsForbidden() throws Exception {
+    mockMvc
+        .perform(get("/api/v1/disk/usage"))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.status").value(403));
+  }
+
+  @Test
+  @WithMockUser(roles = "ADMIN")
+  void authenticatedAdminDiskUsageSucceeds() throws Exception {
+    when(diskUsageService.snapshot()).thenReturn(A_SNAPSHOT);
+
+    mockMvc.perform(get("/api/v1/disk/usage")).andExpect(status().isOk());
+  }
+
+  /**
+   * Regression test for the same review pattern D4.1's retention endpoints already established: a
+   * filesystem-tree walk plus a live Postgres size query is real work, so this admin-only route
+   * must be rate-limited per admin just like every other admin-only surface above. Real {@code
+   * application.yml} default is 10/hour - the 11th call in the same window is rejected.
+   */
+  @Test
+  void diskUsageIsRateLimitedPerAdminAfterTheConfiguredThreshold() throws Exception {
+    when(diskUsageService.snapshot()).thenReturn(A_SNAPSHOT);
+    Authentication admin = realAdminAuthentication();
+
+    for (int i = 0; i < 10; i++) {
+      mockMvc
+          .perform(get("/api/v1/disk/usage").with(authentication(admin)))
+          .andExpect(status().isOk());
+    }
+
+    mockMvc
+        .perform(get("/api/v1/disk/usage").with(authentication(admin)))
         .andExpect(status().isTooManyRequests())
         .andExpect(header().exists("Retry-After"))
         .andExpect(jsonPath("$.status").value(429));

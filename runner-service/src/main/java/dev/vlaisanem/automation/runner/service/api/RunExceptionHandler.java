@@ -4,6 +4,8 @@ import dev.vlaisanem.automation.runner.service.catalog.TestCatalogUnavailableExc
 import dev.vlaisanem.automation.runner.service.catalog.UnsupportedTestCatalogEnvironmentException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactNotFoundException;
+import dev.vlaisanem.automation.runner.service.exception.DiskSpaceLowException;
+import dev.vlaisanem.automation.runner.service.exception.DiskUsageUnavailableException;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
 import dev.vlaisanem.automation.runner.service.exception.RunEventPersistenceException;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
@@ -75,6 +77,22 @@ public class RunExceptionHandler {
 
   @ExceptionHandler(RunnerRecoveringException.class)
   public ProblemDetail handleRecovering(RunnerRecoveringException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
+  }
+
+  @ExceptionHandler(DiskSpaceLowException.class)
+  public ProblemDetail handleDiskSpaceLow(DiskSpaceLowException exception) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
+  }
+
+  /**
+   * The disk-usage probe itself failing (not merely reporting low space) is its own distinct 503 -
+   * see {@link DiskUsageUnavailableException}'s own Javadoc: a fail-closed guard that cannot answer
+   * its own question must refuse work, never silently fall through to a generic 500.
+   */
+  @ExceptionHandler(DiskUsageUnavailableException.class)
+  public ProblemDetail handleDiskUsageUnavailable(DiskUsageUnavailableException exception) {
+    log.error("Disk usage probe failed: {}", exception.getMessage(), exception);
     return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage());
   }
 

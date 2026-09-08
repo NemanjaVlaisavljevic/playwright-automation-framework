@@ -62,8 +62,8 @@ public class RunController {
         responseCode = "503",
         description =
             "The run queue is full, the runner is degraded, the runner is still recovering"
-                + " non-terminal runs from a restart, or the canonical event journal is"
-                + " unavailable.",
+                + " non-terminal runs from a restart, available disk space is below the"
+                + " configured safety threshold, or the canonical event journal is unavailable.",
         content =
             @Content(
                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,

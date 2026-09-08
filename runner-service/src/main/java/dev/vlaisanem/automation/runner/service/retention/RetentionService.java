@@ -245,6 +245,10 @@ public class RetentionService {
     deleteIfExists(logsDir.resolve(safeRunId + ".log"));
     deleteIfExists(rawEventsDir.resolve(safeRunId + ".tests.jsonl"));
     deleteIfExists(rawEventsDir.resolve(safeRunId + ".tests.complete"));
+    // D4.2 - a run whose raw event stream overflowed its configured size cap gets this marker
+    // instead of .tests.complete (see RunnerEventJsonlWriter's own Javadoc); it must be cleaned up
+    // here too, or it would linger forever after the run itself is otherwise fully purged.
+    deleteIfExists(rawEventsDir.resolve(safeRunId + ".tests.overflow"));
     runStore.deleteRun(runId);
     return freed;
   }

@@ -63,6 +63,35 @@ dependencies {
     testRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
 }
 
+// D4.2 - a dashboard-launched run passes -Drunner.allureResultsDir=<run-scoped path> (see
+// SuiteCommandFactory) so this run's Allure raw results (written automatically by the Allure
+// JUnit5 listener for every test, regardless of whether TestFixture ever calls
+// Allure.addAttachment) land inside DiskUsageService's own accounting and D4.1's retention purge,
+// rather than growing unbounded in the shared build/allure-results directory outside every
+// disk-protection mechanism this project has.
+//
+// This must be set through the Allure plugin's own `adapter.resultsDir` extension property, not a
+// raw -D flag added directly to a Test task: the plugin itself computes the actual
+// -Dallure.results.directory= argument the forked test-worker JVM receives, lazily, from this
+// exact property (see AllureAdapterExtension#internalGatherResultsFrom in the plugin's own
+// sources) - a separately-added flag would either be silently ignored or racily overridden by the
+// plugin's own argument provider, not reliably win.
+//
+// Read once, directly from this invocation's own system properties: a dashboard-launched run's
+// build JVM is always --no-daemon (see SuiteCommandFactory's own Javadoc for why), so there is no
+// stale-daemon-reuse concern here - every such invocation is a genuinely fresh JVM, evaluating
+// this script fresh, with this exact invocation's own -D value visible via System.getProperty.
+// Absent entirely (a standalone local invocation never launched by runner-service), the Allure
+// plugin's own unmodified default (build/allure-results) applies, exactly as before D4.2.
+def customAllureResultsDir = System.getProperty('runner.allureResultsDir')
+if (customAllureResultsDir) {
+    allure {
+        adapter {
+            resultsDir.fileValue(new File(customAllureResultsDir))
+        }
+    }
+}
+
 // The runner-listener module writes one JSONL file per runId (see RunnerEventTestExecutionListener)
 // and assumes exactly one JVM process ever writes it. Gradle's Test JVM does not inherit -D system
 // properties from the Gradle invocation by default (only environment variables are inherited
@@ -663,6 +692,31 @@ tasks.register('stabilityTest') {
                     "see per-run reports under ${resultsRoot}")
         }
     }
+}
+
+// D4.2 review round 3 - a real, permanent Gradle task rather than relying on session/institutional
+// memory: this exact multi-module repo has more than one real Test task (this project's own
+// default `test`, each module's own `test`, and runner-service's Testcontainers-backed
+// `databaseIntegrationTest`, which is Docker-only and deliberately never wired into `check`/CI's
+// default push/PR gate - see quality-gate.yml/local-sut.yml). A cross-cutting change (a shared
+// constructor, a shared config record) can silently leave one of these uncompiled/unrun for an
+// entire session even while every routine `./gradlew.bat test` looks green, exactly as happened
+// here. `check`/`test` deliberately stay fast and Docker-free for everyday iteration - this task
+// is the one place that always runs everything real in one command, whenever a real Docker
+// daemon is available (a developer's own machine, or a manually-triggered CI job).
+tasks.register('fullBackendGate') {
+    description = 'Runs every real Java/module test task, including runner-service\'s Docker-backed ' +
+        'databaseIntegrationTest - the thorough, not-necessarily-fast gate. check/test stay fast and ' +
+        'Docker-free; use this before considering a cross-cutting backend change fully verified.'
+    group = 'verification'
+    dependsOn(
+        'spotlessCheck',
+        'test',
+        ':runner-contract:test',
+        ':runner-listener:test',
+        ':runner-service:test',
+        ':runner-service:databaseIntegrationTest'
+    )
 }
 
 // --- Dashboard E2E (real browser + real runner-service + real runner-dashboard) -----------------

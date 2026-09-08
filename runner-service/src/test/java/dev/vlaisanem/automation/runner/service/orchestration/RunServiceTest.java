@@ -17,6 +17,8 @@ import dev.vlaisanem.automation.runner.service.catalog.RunAvailabilityPolicy.Dep
 import dev.vlaisanem.automation.runner.service.catalog.TestCatalogService;
 import dev.vlaisanem.automation.runner.service.config.RateLimitRule;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService;
+import dev.vlaisanem.automation.runner.service.disk.DiskUsageService.DiskUsageSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Environment;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
@@ -104,6 +106,92 @@ class RunServiceTest {
     RunRecoveryService recoveryService = new RunRecoveryService(store, lifecycle);
     recoveryService.run(null);
     return recoveryService;
+  }
+
+  /**
+   * A {@link DiskUsageService} that never touches a real filesystem/database - its real constructor
+   * only resolves configured directory paths (no I/O), and {@code snapshot()} is overridden here so
+   * the real {@code FileStore}/{@code JdbcTemplate} calls it would otherwise make are never
+   * reached. Mirrors this file's existing {@code FakeRunLifecycleStore}/{@code FakeProcessLauncher}
+   * style for a collaborator this test suite needs to fully control.
+   */
+  private static DiskUsageService fixedDiskUsageService(DiskUsageSnapshot fixed) {
+    return new DiskUsageService(minimalDiskUsageProperties(), null) {
+      @Override
+      public DiskUsageSnapshot snapshot() {
+        return fixed;
+      }
+    };
+  }
+
+  private static DiskUsageService alwaysAvailableDiskUsageService() {
+    return fixedDiskUsageService(
+        new DiskUsageSnapshot(Long.MAX_VALUE, 1_048_576L, 314_572_800L, Instant.now()));
+  }
+
+  private static DiskUsageService belowThresholdDiskUsageService() {
+    return fixedDiskUsageService(
+        new DiskUsageSnapshot(0L, 1_048_576L, 314_572_800L, Instant.now()));
+  }
+
+  /**
+   * Returns {@code snapshots} in order, one per call, then repeats the last one forever - used to
+   * prove the pre-launch guard is a genuinely separate check from the submit-time one: a run that
+   * passed the first (submit-time) snapshot can still be terminalized if a later (pre-launch)
+   * snapshot reports disk has since dropped below threshold.
+   */
+  private static DiskUsageService sequencedDiskUsageService(DiskUsageSnapshot... snapshots) {
+    RunnerProperties minimalProperties = minimalDiskUsageProperties();
+    java.util.concurrent.atomic.AtomicInteger callCount =
+        new java.util.concurrent.atomic.AtomicInteger();
+    return new DiskUsageService(minimalProperties, null) {
+      @Override
+      public DiskUsageSnapshot snapshot() {
+        int index = Math.min(callCount.getAndIncrement(), snapshots.length - 1);
+        return snapshots[index];
+      }
+    };
+  }
+
+  private static RunnerProperties minimalDiskUsageProperties() {
+    RateLimitRule aRule = new RateLimitRule(5, Duration.ofMinutes(1));
+    return new RunnerProperties(
+        ".",
+        Duration.ofMinutes(10),
+        "build/runner-events/raw",
+        "build/runner-logs",
+        "src/test/resources/catalog/public-test-catalog.json",
+        "build/runner-artifacts",
+        1024 * 1024,
+        Duration.ofSeconds(5),
+        Duration.ofSeconds(2),
+        5,
+        Duration.ofMillis(150),
+        Duration.ofSeconds(5),
+        100,
+        Duration.ofSeconds(15),
+        Duration.ofMinutes(10),
+        aRule,
+        aRule,
+        aRule,
+        aRule,
+        aRule,
+        aRule,
+        aRule,
+        3,
+        16384,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        aRule,
+        1_048_576L,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        2_097_152L,
+        104_857_600L,
+        aRule);
   }
 
   private RunService service;
@@ -709,6 +797,13 @@ class RunServiceTest {
             500,
             Duration.ofDays(14),
             Duration.ofHours(1),
+            new RateLimitRule(10, Duration.ofHours(1)),
+            1_048_576L,
+            26_214_400L,
+            209_715_200L,
+            2_097_152L,
+            2_097_152L,
+            104_857_600L,
             new RateLimitRule(10, Duration.ofHours(1)));
     store = new FakeRunLifecycleStore();
     RunEventBroker broker =
@@ -729,6 +824,7 @@ class RunServiceTest {
             store,
             lifecycle,
             recoveryAlreadyComplete(store, lifecycle),
+            alwaysAvailableDiskUsageService(),
             launcher,
             blockingIngestorFactory,
             new TestCatalogService(properties, OBJECT_MAPPER),
@@ -790,6 +886,49 @@ class RunServiceTest {
     survivor.exitNow(0);
     Run recovered = awaitRecoveredSubmit(Environment.PUBLIC, Suite.SMOKE);
     awaitStatus(recovered.runId(), RunStatus.RUNNING);
+  }
+
+  /** D4.2 - submit() itself must refuse a new run outright once disk is already below threshold. */
+  @Test
+  void submitRejectsWithDiskSpaceLowExceptionWhenDiskIsAlreadyBelowThreshold(
+      @TempDir Path eventsDir) {
+    service =
+        newServiceWithDiskUsage(
+            new FakeProcessLauncher(), eventsDir, 1, belowThresholdDiskUsageService());
+
+    assertThatThrownBy(() -> service.submit(Environment.PUBLIC, Suite.SMOKE))
+        .isInstanceOf(
+            dev.vlaisanem.automation.runner.service.exception.DiskSpaceLowException.class);
+  }
+
+  /**
+   * D4.2 - a submit()-time check alone does not protect a run that was already queued: disk can
+   * drop below threshold in the window between accepting the submission and the single worker
+   * actually getting to it. The pre-launch guard (immediately before {@code processLauncher.start})
+   * must catch this and terminalize the run as {@code ERROR}, never silently launch it anyway.
+   */
+  @Test
+  void aQueuedRunTerminalizesAsErrorWhenDiskDropsBelowThresholdBeforeLaunch(@TempDir Path eventsDir)
+      throws Exception {
+    DiskUsageSnapshot available =
+        new DiskUsageSnapshot(Long.MAX_VALUE, 1_048_576L, 314_572_800L, Instant.now());
+    DiskUsageSnapshot belowThreshold =
+        new DiskUsageSnapshot(0L, 1_048_576L, 314_572_800L, Instant.now());
+    // First call (submit()'s own check) reports available; every call after (the pre-launch
+    // re-check) reports below threshold - proves the two are genuinely separate checks.
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service =
+        newServiceWithDiskUsage(
+            launcher, eventsDir, 1, sequencedDiskUsageService(available, belowThreshold));
+
+    Run run = service.submit(Environment.PUBLIC, Suite.SMOKE);
+
+    Run finished = awaitTerminal(run.runId());
+    assertThat(finished.status()).isEqualTo(RunStatus.ERROR);
+    assertThat(finished.detail()).contains("disk space");
+    assertThat(launcher.startedCommands)
+        .as("the process must never actually launch once the pre-launch guard rejects it")
+        .isEmpty();
   }
 
   /**
@@ -1007,6 +1146,21 @@ class RunServiceTest {
         new FakeRunLifecycleStore(), launcher, eventsDir, queueCapacity, Duration.ofSeconds(30));
   }
 
+  private RunService newServiceWithDiskUsage(
+      ProcessLauncher launcher,
+      Path eventsDir,
+      int queueCapacity,
+      DiskUsageService diskUsageService) {
+    return newServiceWithPolicyAndDiskUsage(
+        new FakeRunLifecycleStore(),
+        launcher,
+        eventsDir,
+        queueCapacity,
+        Duration.ofSeconds(30),
+        RunAvailabilityPolicy.localDev(),
+        diskUsageService);
+  }
+
   private RunService newService(
       RunLifecycleStore lifecycleStore,
       ProcessLauncher launcher,
@@ -1050,6 +1204,24 @@ class RunServiceTest {
       int queueCapacity,
       Duration processTimeout,
       RunAvailabilityPolicy policy) {
+    return newServiceWithPolicyAndDiskUsage(
+        lifecycleStore,
+        launcher,
+        eventsDir,
+        queueCapacity,
+        processTimeout,
+        policy,
+        alwaysAvailableDiskUsageService());
+  }
+
+  private RunService newServiceWithPolicyAndDiskUsage(
+      RunLifecycleStore lifecycleStore,
+      ProcessLauncher launcher,
+      Path eventsDir,
+      int queueCapacity,
+      Duration processTimeout,
+      RunAvailabilityPolicy policy,
+      DiskUsageService diskUsageService) {
     RunnerProperties properties =
         new RunnerProperties(
             ".",
@@ -1080,6 +1252,13 @@ class RunServiceTest {
             500,
             Duration.ofDays(14),
             Duration.ofHours(1),
+            new RateLimitRule(10, Duration.ofHours(1)),
+            1_048_576L,
+            26_214_400L,
+            209_715_200L,
+            2_097_152L,
+            2_097_152L,
+            104_857_600L,
             new RateLimitRule(10, Duration.ofHours(1)));
     RunEventBroker broker =
         new RunEventBroker(lifecycleStore, properties, noopArtifactIngestionService(properties));
@@ -1094,6 +1273,7 @@ class RunServiceTest {
         lifecycleStore,
         lifecycle,
         recoveryAlreadyComplete(lifecycleStore, lifecycle),
+        diskUsageService,
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
@@ -1144,6 +1324,13 @@ class RunServiceTest {
             500,
             Duration.ofDays(14),
             Duration.ofHours(1),
+            new RateLimitRule(10, Duration.ofHours(1)),
+            1_048_576L,
+            26_214_400L,
+            209_715_200L,
+            2_097_152L,
+            2_097_152L,
+            104_857_600L,
             new RateLimitRule(10, Duration.ofHours(1)));
     RunEventBroker broker =
         new RunEventBroker(fakeStore, properties, noopArtifactIngestionService(properties));
@@ -1155,6 +1342,7 @@ class RunServiceTest {
         fakeStore,
         lifecycle,
         recoveryAlreadyComplete(fakeStore, lifecycle),
+        alwaysAvailableDiskUsageService(),
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
