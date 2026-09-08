@@ -20,10 +20,14 @@ import dev.vlaisanem.automation.runner.service.exception.RunLogNotFoundException
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
+import dev.vlaisanem.automation.runner.service.logging.MdcScope;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.process.ProcessLauncher;
 import dev.vlaisanem.automation.runner.service.process.ProcessOutcome;
 import dev.vlaisanem.automation.runner.service.process.SuiteCommandFactory;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
@@ -94,6 +98,7 @@ public class RunService {
   private final RunLifecycleCoordinator lifecycle;
   private final RunRecoveryService recoveryService;
   private final DiskUsageService diskUsageService;
+  private final RunnerMetrics metrics;
   private final ProcessLauncher processLauncher;
   private final ListenerEventIngestorFactory ingestorFactory;
   private final TestCatalogService testCatalogService;
@@ -132,6 +137,8 @@ public class RunService {
       RunLifecycleCoordinator lifecycle,
       RunRecoveryService recoveryService,
       DiskUsageService diskUsageService,
+      RunnerMetrics metrics,
+      MeterRegistry meterRegistry,
       ProcessLauncher processLauncher,
       ListenerEventIngestorFactory ingestorFactory,
       TestCatalogService testCatalogService,
@@ -141,6 +148,7 @@ public class RunService {
     this.lifecycle = lifecycle;
     this.recoveryService = recoveryService;
     this.diskUsageService = diskUsageService;
+    this.metrics = metrics;
     this.processLauncher = processLauncher;
     this.ingestorFactory = ingestorFactory;
     this.testCatalogService = testCatalogService;
@@ -164,6 +172,13 @@ public class RunService {
     this.executor =
         new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
+    // D4.3.2 - named for what this single-worker executor actually reflects (STARTING + RUNNING +
+    // in-flight cleanup), not assumed to equal "runs with RunStatus.RUNNING" - reads the
+    // executor's own already-tracked state directly, no separate counter to keep in sync.
+    Gauge.builder("runner.executor.active", executor, ThreadPoolExecutor::getActiveCount)
+        .register(meterRegistry);
+    Gauge.builder("runner.executor.queued", executor, e -> e.getQueue().size())
+        .register(meterRegistry);
     this.reaperExecutor =
         Executors.newSingleThreadScheduledExecutor(
             runnable -> {
@@ -190,6 +205,7 @@ public class RunService {
     }
     DiskUsageSnapshot submitTimeUsage = diskUsageService.snapshot();
     if (submitTimeUsage.belowThreshold()) {
+      metrics.recordDiskRejection(RunnerMetrics.DiskRejectionPhase.SUBMIT);
       throw new DiskSpaceLowException(submitTimeUsage);
     }
     RunRequestValidator.validate(availabilityPolicy, environment, suite);
@@ -201,7 +217,12 @@ public class RunService {
     Run run = lifecycle.queue(runId, environment, suite, Instant.now(), selectedTests);
     ActiveRun activeRun = new ActiveRun();
     activeRuns.put(runId, activeRun);
-    Runnable queuedTask = () -> executeRun(runId, environment, suite, selectedTests, activeRun);
+    Runnable queuedTask =
+        () ->
+            MdcScope.withMdc(
+                "runId",
+                runId,
+                () -> executeRun(runId, environment, suite, selectedTests, activeRun));
     activeRun.queuedTask().set(queuedTask);
 
     try {
@@ -223,6 +244,16 @@ public class RunService {
     return store.findAll();
   }
 
+  /**
+   * D4.3 - used by {@code RunnerAvailabilityHealthIndicator} to report a temporary, self-resolving
+   * {@code OUT_OF_SERVICE} (the background reaper clears this on its own once every known-surviving
+   * process actually exits) rather than {@code DOWN} - never throws the way {@link #submit} does
+   * when degraded.
+   */
+  public boolean isDegraded() {
+    return availability.get() == Availability.DEGRADED;
+  }
+
   public Path processLog(String runId) {
     find(runId);
     Path logFile = processLogPath(runId);
@@ -242,6 +273,14 @@ public class RunService {
    * synchronously as {@code CANCELLED}, since no worker or process remains to acknowledge it.
    */
   public Run cancel(String runId) {
+    // D4.3.3 - the whole method's own body stays unchanged below; only wrapped so every log
+    // statement it (or anything it calls synchronously, e.g. terminateWithinLifecycleGate) emits
+    // on this HTTP thread carries the real runId as a structured MDC field, not just embedded in
+    // whatever text a given message happens to include.
+    return MdcScope.withMdc("runId", runId, () -> cancelInternal(runId));
+  }
+
+  private Run cancelInternal(String runId) {
     recoveryService.requireRecoveryComplete();
     Run current = find(runId);
     if (current.status().isTerminal()) {
@@ -289,7 +328,10 @@ public class RunService {
     try {
       terminateWithinLifecycleGate(process);
     } catch (ProcessTerminationException exception) {
-      log.error("Could not terminate the process tree for cancelled run {}", runId, exception);
+      log.atError()
+          .addKeyValue("runId", runId)
+          .setCause(exception)
+          .log("Could not terminate the process tree for cancelled run");
       // This run's own worker may be stuck arbitrarily long inside awaitCompletion() on the same
       // (unkillable) process, so its ingestor (if one was ever started) may still be forwarding
       // legitimately-occurred test events. Stopping and draining it here, from this thread,
@@ -526,6 +568,7 @@ public class RunService {
         // that can't safely start is terminalized now, not launched and not waited out.
         DiskUsageSnapshot preLaunchUsage = diskUsageService.snapshot();
         if (preLaunchUsage.belowThreshold()) {
+          metrics.recordDiskRejection(RunnerMetrics.DiskRejectionPhase.PRE_LAUNCH);
           lifecycle.finishIfLive(
               runId,
               RunStatus.ERROR,
@@ -566,7 +609,8 @@ public class RunService {
                   // regardless of the host environment's own RECORD_VIDEO setting, rather than
                   // silently letting an unbounded video file bypass every D4.2 budget.
                   "RECORD_VIDEO", "false");
-          return processLauncher.start(command, repoRoot, processLogPath(runId), environment);
+          return processLauncher.start(
+              runId, command, repoRoot, processLogPath(runId), environment);
         } catch (IOException exception) {
           lifecycle.finishIfLive(
               runId,

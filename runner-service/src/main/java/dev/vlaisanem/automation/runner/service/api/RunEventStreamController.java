@@ -7,6 +7,7 @@ import dev.vlaisanem.automation.runner.service.events.RunEventSubscriber;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscription;
 import dev.vlaisanem.automation.runner.service.events.SseConnectionsPerIpTracker;
 import dev.vlaisanem.automation.runner.service.exception.SseConnectionLimitExceededException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -48,6 +49,7 @@ public class RunEventStreamController {
   private final RunEventBroker broker;
   private final RunRecoveryService recoveryService;
   private final SseConnectionsPerIpTracker connectionsPerIpTracker;
+  private final RunnerMetrics metrics;
   private final int maxConnectionsPerIp;
   private final long heartbeatIntervalMillis;
   private final long emitterTimeoutMillis;
@@ -65,11 +67,13 @@ public class RunEventStreamController {
       RunEventBroker broker,
       RunRecoveryService recoveryService,
       SseConnectionsPerIpTracker connectionsPerIpTracker,
+      RunnerMetrics metrics,
       RunnerProperties properties) {
     this.runService = runService;
     this.broker = broker;
     this.recoveryService = recoveryService;
     this.connectionsPerIpTracker = connectionsPerIpTracker;
+    this.metrics = metrics;
     this.maxConnectionsPerIp = properties.sseMaxConnectionsPerIp();
     this.heartbeatIntervalMillis = properties.sseHeartbeatInterval().toMillis();
     this.emitterTimeoutMillis = properties.sseEmitterTimeout().toMillis();
@@ -103,6 +107,7 @@ public class RunEventStreamController {
     // rejected caller never pays for either.
     String clientIp = request.getRemoteAddr();
     if (!connectionsPerIpTracker.tryAcquire(clientIp)) {
+      metrics.recordSseRejection(RunnerMetrics.SseRejectionReason.PER_IP_CAP);
       throw new SseConnectionLimitExceededException(maxConnectionsPerIp);
     }
 

@@ -67,10 +67,47 @@ This was already the intended design, not a new decision - `runner-dashboard/vit
 existing comment states the frontend only ever calls relative URLs specifically to match this
 same-origin, Caddy-fronted deployment. No frontend code changes were needed to make this work.
 
-`/actuator/*` and `/v3/api-docs` are **not** proxied wholesale. Only `/actuator/health` is exposed
-publicly (see `deploy/web/Caddyfile`) - the OpenAPI document is only ever needed against a real
-running instance directly during dashboard development (`npm run api:check:contract`), never
-through the public edge.
+`/actuator/*` and `/v3/api-docs` are **not** proxied wholesale. D4.3.1 added real Kubernetes-style
+liveness/readiness probe groups (`management.endpoint.health.probes.enabled`, see
+`runner-service/src/main/resources/application.yml`), so exactly three health paths are exposed
+publicly (see `deploy/web/Caddyfile`): `/actuator/health` (the plain aggregate - now a genuinely
+more honest signal too, since every custom indicator below also registers as a top-level
+contributor by Spring Boot's own default convention), `/actuator/health/liveness` (JVM/process
+alive only - `livenessState`, nothing else; deliberately never composed with anything that could
+turn a self-resolving condition into a Docker restart-loop), and `/actuator/health/readiness`
+(ready to accept a new run - `readinessState`, `db`, `recovery`, `disk`, `runnerAvailability`).
+Every *other* `/actuator/*` path (`/actuator/env`, `/actuator/configprops`, a typo of one of the
+three health paths above, ...) gets an explicit fail-closed `404` from Caddy itself, not the SPA's
+`index.html` - see that file's own `@actuatorOther` matcher. `/actuator/prometheus` (D4.3.2) is the
+one exception worth calling out explicitly: unauthenticated at the Spring Security layer, the same
+posture as the three health paths (a real Prometheus scraper cannot perform an interactive GitHub
+OAuth2 login), but - like every other non-health actuator path - still gets Caddy's own fail-closed
+`404` externally; it is reachable only from inside the Compose network (no Prometheus/Grafana
+container exists yet - deliberately deferred, D4.3.2's own scope) or via `docker-compose.debug.yml`'s
+loopback-only override, never from outside. Both `show-details` and
+`show-components` are `never` in `application.yml`, so an anonymous caller only ever sees a bare
+`{"status": "..."}` on any of the three paths - never a contributor name, an exception message, or
+a file-system path (verified for both the runner's permissive *and* real OAuth2-configured
+security chains - `HealthEndpointAnonymousAccessTest` and
+`OAuth2ChainAppliesAbuseRateLimitTest#probeSubPathIsReachableAnonymouslyOnTheOAuth2ChainToo`,
+respectively). The `db`/`disk`/`recovery`/`runnerAvailability` -> `DOWN`/`OUT_OF_SERVICE` status
+split is deliberate: a real Postgres outage (`db`) is the one failure class that genuinely needs
+infra/operator action, so it reports `DOWN`; the other three are temporary, self-resolving
+conditions (a low-disk warning, an in-progress D2.5 recovery scan, a `DEGRADED` runner waiting on
+an unkillable process tree), so they report `OUT_OF_SERVICE` instead - never conflated, and
+neither ever restarts the container by itself (`runner-service`'s Docker healthcheck targets
+`/actuator/health/readiness`, but `restart: unless-stopped` only reacts to process *exit*, never to
+health status alone - a real bootRun acceptance pass confirmed readiness reports `DOWN` within the
+healthcheck's own 4-second bound during a real Postgres outage, and recovers back to `UP` on its
+own once Postgres returns, with no `runner-service` restart involved). `web` (Caddy) does **not**
+gate its own startup on `runner-service`'s health (`depends_on` stays a plain, unconditional
+dependency, never `condition: service_healthy`) - the dashboard's own proven "backend unavailable"
+UI and auto-recovery (`BackendUnavailableE2eTest`) must keep working even while the backend itself
+is degraded or still recovering. The OpenAPI document is only ever needed against a real running
+instance directly during dashboard development (`npm run api:check:contract`), never through the
+public edge. The real `docker compose up` transition (`starting` -> `healthy`) and the Caddy
+fail-closed matrix against a live Compose stack are acceptance-tested manually as part of D4.3.4's
+consolidated pass, not automated here.
 
 ## 2. LOCAL is out of scope for the portfolio deployment
 
@@ -1246,10 +1283,10 @@ rest of the filter chain, guaranteeing a real `413` even against a chunked or fa
 | Live SSE event stream | Public, anonymous - capped at 3 concurrent connections per client IP, on top of the existing global `sseMaxSubscribers` |
 | GitHub OAuth login (authorization/callback) | Public - rate-limited 5/min (authorization) and 10/min (callback) per client IP |
 | Launch a run, cancel a run | Requires `ROLE_ADMIN` (GitHub OAuth2 Login, numeric-ID allowlist) and a valid CSRF token - additionally rate-limited (3/min and 10/hour for create, 10/min for cancel) per admin GitHub numeric ID |
-| `/actuator/health` | Public at both the Spring Security layer and the production Caddy edge (liveness only) |
-| `/actuator/info` | Public at the Spring Security layer, but the production Caddy edge continues to expose only `/actuator/health` - `/actuator/info` remains unreachable publicly (a deliberate two-layer distinction: app-level permission vs. edge-level exposure, not an inconsistency) |
+| `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness` | Public at both the Spring Security layer and the production Caddy edge. D4.3.1's real Kubernetes-style probe groups: root `/actuator/health` is now an aggregate that folds in DB/disk/recovery/runner-availability (no longer liveness-only - every custom indicator also registers as a top-level contributor by Spring Boot's own default convention); `/liveness` stays `livenessState`-only (JVM/process alive, never gated on Postgres/disk/recovery, so a condition a restart can't fix never restart-loops the container); `/readiness` composes `readinessState`, `db`, `recovery`, `disk`, `runnerAvailability`. `show-details`/`show-components` are both `never`, so every anonymous response is a bare `{"status": "..."}` on all three paths, on both the permissive and OAuth2-configured chains alike |
+| `/actuator/info` | Public at the Spring Security layer, but the production Caddy edge continues to expose only the three health paths above - `/actuator/info` remains unreachable publicly (a deliberate two-layer distinction: app-level permission vs. edge-level exposure, not an inconsistency) |
 | `/v3/api-docs` | Public at the Spring Security layer (so `npm run api:export`/`api:check:contract` keep working against a local `bootRun` once OAuth2 is enabled) - never proxied publicly by Caddy either way |
-| Any other actuator endpoint | Not proxied publicly at all |
+| Any other actuator endpoint (`/actuator/prometheus`, `/actuator/env`, `/actuator/configprops`, a typo of one of the three health paths, ...) | Not proxied publicly at all - Caddy responds `404` itself (see `deploy/web/Caddyfile`'s `@actuatorOther` matcher), never the SPA's `index.html` |
 | PostgreSQL | No published port anywhere, on any network - reachable only from `runner-service`, the only service attached to both `edge` and `data`; `web` has no membership on `data` at all, so it cannot reach `postgres` regardless of `internal: true` (see §1's corrected explanation of what that flag does and does not do) |
 | `runner-service` itself | No published port in the base Compose file at all - only reachable through `web`. `docker-compose.debug.yml` publishes a loopback-only debug port for local measurement/troubleshooting; never applied in a real deployment |
 | Docker socket | Never mounted into any container - nothing here starts/stops/manages other containers or the host |

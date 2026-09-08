@@ -21,12 +21,16 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.InOrder;
+import org.slf4j.MDC;
 
 /**
  * Exercises {@link GradleProcessRunner} against a real OS process (see {@link SleepAndExitFixture})
@@ -39,7 +43,8 @@ class GradleProcessRunnerTest {
   void completesNormallyWithTheChildsExitCode(@TempDir Path tempDir) throws IOException {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Path outputFile = tempDir.resolve("run.log");
-    Process process = runner.start(sleepAndExitCommand(0, 7), tempDir, outputFile, Map.of());
+    Process process =
+        runner.start("test-run", sleepAndExitCommand(0, 7), tempDir, outputFile, Map.of());
 
     ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofSeconds(30));
 
@@ -53,7 +58,12 @@ class GradleProcessRunnerTest {
   void killsAndReportsTimedOutWhenTheDeadlinePasses(@TempDir Path tempDir) throws IOException {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Process process =
-        runner.start(sleepAndExitCommand(10_000, 0), tempDir, tempDir.resolve("run.log"), Map.of());
+        runner.start(
+            "test-run",
+            sleepAndExitCommand(10_000, 0),
+            tempDir,
+            tempDir.resolve("run.log"),
+            Map.of());
 
     ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofMillis(200));
 
@@ -68,6 +78,7 @@ class GradleProcessRunnerTest {
     Path outputFile = tempDir.resolve("env.log");
     Process process =
         runner.start(
+            "test-run",
             envPrintingCommand("ARTIFACTS_DIR"),
             tempDir,
             outputFile,
@@ -77,6 +88,37 @@ class GradleProcessRunnerTest {
 
     assertThat(outcome.kind()).isEqualTo(ProcessOutcome.Kind.COMPLETED);
     assertThat(outputFile).content().contains("/some/run-scoped/path");
+  }
+
+  /**
+   * D4.3.3 review finding - the output-drainer thread is a distinct thread from whichever one
+   * called {@code start()}, so MDC does not carry {@code runId} onto it automatically. A normal,
+   * successful drain never itself logs anything observable from that thread (the class's own two
+   * log statements only fire on an I/O error), so proving this needs the {@code
+   * afterDrainerThreadMdcEstablished} test seam - mirrors {@code RunEventHubTest}'s own protected-
+   * method-override pattern for exactly the same reason.
+   */
+  @Test
+  void theOutputDrainerThreadCarriesTheRealRunIdInItsOwnMdc(@TempDir Path tempDir)
+      throws Exception {
+    AtomicReference<String> observedRunId = new AtomicReference<>();
+    CountDownLatch observed = new CountDownLatch(1);
+    GradleProcessRunner runner =
+        new GradleProcessRunner(properties(Duration.ofSeconds(5), 1024 * 1024)) {
+          @Override
+          void afterDrainerThreadMdcEstablished() {
+            observedRunId.set(MDC.get("runId"));
+            observed.countDown();
+          }
+        };
+    Path outputFile = tempDir.resolve("mdc.log");
+
+    Process process =
+        runner.start("run-carrying-mdc", sleepAndExitCommand(0, 0), tempDir, outputFile, Map.of());
+    runner.awaitCompletion(process, Duration.ofSeconds(30));
+
+    assertThat(observed.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(observedRunId.get()).isEqualTo("run-carrying-mdc");
   }
 
   /**
@@ -90,7 +132,8 @@ class GradleProcessRunnerTest {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Path outputFile = tempDir.resolve("never-created.log");
 
-    assertThatThrownBy(() -> runner.start(sleepAndExitCommand(0, 0), tempDir, outputFile, null))
+    assertThatThrownBy(
+            () -> runner.start("test-run", sleepAndExitCommand(0, 0), tempDir, outputFile, null))
         .isInstanceOf(NullPointerException.class);
 
     assertThat(outputFile).doesNotExist();
@@ -101,7 +144,7 @@ class GradleProcessRunnerTest {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024);
     Path outputFile = tempDir.resolve("chatty.log");
     Process process =
-        runner.start(sleepAndExitCommand(0, 0, 100_000), tempDir, outputFile, Map.of());
+        runner.start("test-run", sleepAndExitCommand(0, 0, 100_000), tempDir, outputFile, Map.of());
 
     ProcessOutcome outcome = runner.awaitCompletion(process, Duration.ofSeconds(30));
 
@@ -121,7 +164,12 @@ class GradleProcessRunnerTest {
     GradleProcessRunner runner = newRunner(Duration.ofSeconds(5), 1024 * 1024);
     Path pidFile = tempDir.resolve("child.pid");
     Process process =
-        runner.start(processTreeCommand(pidFile), tempDir, tempDir.resolve("tree.log"), Map.of());
+        runner.start(
+            "test-run",
+            processTreeCommand(pidFile),
+            tempDir,
+            tempDir.resolve("tree.log"),
+            Map.of());
 
     long childPid = awaitPidFile(pidFile);
     ProcessHandle childHandle = ProcessHandle.of(childPid).orElseThrow();
@@ -351,45 +399,48 @@ class GradleProcessRunnerTest {
   }
 
   private GradleProcessRunner newRunner(Duration terminationGracePeriod, long maxLogBytes) {
-    RunnerProperties properties =
-        new RunnerProperties(
-            ".",
-            Duration.ofSeconds(30),
-            "build/events/raw",
-            "build/logs",
-            "src/test/resources/catalog/public-test-catalog.json",
-            "build/artifacts",
-            maxLogBytes,
-            terminationGracePeriod,
-            Duration.ofSeconds(1),
-            1,
-            Duration.ofMillis(150),
-            Duration.ofSeconds(5),
-            10_000,
-            Duration.ofSeconds(15),
-            Duration.ofMinutes(10),
-            new RateLimitRule(5, Duration.ofMinutes(1)),
-            new RateLimitRule(10, Duration.ofMinutes(1)),
-            new RateLimitRule(3, Duration.ofMinutes(1)),
-            new RateLimitRule(10, Duration.ofHours(1)),
-            new RateLimitRule(10, Duration.ofMinutes(1)),
-            new RateLimitRule(120, Duration.ofMinutes(1)),
-            new RateLimitRule(30, Duration.ofMinutes(1)),
-            3,
-            16384,
-            Duration.ofDays(30),
-            500,
-            Duration.ofDays(14),
-            Duration.ofHours(1),
-            new RateLimitRule(10, Duration.ofHours(1)),
-            1_048_576L,
-            26_214_400L,
-            209_715_200L,
-            2_097_152L,
-            2_097_152L,
-            104_857_600L,
-            new RateLimitRule(10, Duration.ofHours(1)));
-    return new GradleProcessRunner(properties);
+    return new GradleProcessRunner(properties(terminationGracePeriod, maxLogBytes));
+  }
+
+  private RunnerProperties properties(Duration terminationGracePeriod, long maxLogBytes) {
+    return new RunnerProperties(
+        ".",
+        Duration.ofSeconds(30),
+        "build/events/raw",
+        "build/logs",
+        "src/test/resources/catalog/public-test-catalog.json",
+        "build/artifacts",
+        maxLogBytes,
+        terminationGracePeriod,
+        Duration.ofSeconds(1),
+        1,
+        Duration.ofMillis(150),
+        Duration.ofSeconds(5),
+        10_000,
+        Duration.ofSeconds(15),
+        Duration.ofMinutes(10),
+        new RateLimitRule(5, Duration.ofMinutes(1)),
+        new RateLimitRule(10, Duration.ofMinutes(1)),
+        new RateLimitRule(3, Duration.ofMinutes(1)),
+        new RateLimitRule(10, Duration.ofHours(1)),
+        new RateLimitRule(10, Duration.ofMinutes(1)),
+        new RateLimitRule(120, Duration.ofMinutes(1)),
+        new RateLimitRule(30, Duration.ofMinutes(1)),
+        3,
+        16384,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        new RateLimitRule(10, Duration.ofHours(1)),
+        1_048_576L,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        2_097_152L,
+        104_857_600L,
+        new RateLimitRule(10, Duration.ofHours(1)),
+        Duration.ofSeconds(60));
   }
 
   private String javaExecutable() {

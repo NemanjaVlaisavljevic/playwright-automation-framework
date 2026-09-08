@@ -318,7 +318,8 @@ class ArtifactIngestionServiceTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        new RateLimitRule(10, Duration.ofHours(1)));
+        new RateLimitRule(10, Duration.ofHours(1)),
+        Duration.ofSeconds(60));
   }
 
   private static ArtifactManifestEntry entry(String artifactId, String testId) {

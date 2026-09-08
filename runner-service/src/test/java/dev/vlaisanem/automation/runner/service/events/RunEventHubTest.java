@@ -7,6 +7,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.vlaisanem.automation.runner.contract.RunOutcome;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -29,7 +31,9 @@ class RunEventHubTest {
    */
   private static final int UNBOUNDED_FOR_TESTS = 10_000;
 
-  private final RunEventHub hub = new RunEventHub(UNBOUNDED_FOR_TESTS);
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+  private final RunnerMetrics metrics = new RunnerMetrics(meterRegistry);
+  private final RunEventHub hub = new RunEventHub(UNBOUNDED_FOR_TESTS, metrics, meterRegistry);
 
   @Test
   void deliversLiveEventsInOrder() throws Exception {
@@ -42,6 +46,25 @@ class RunEventHubTest {
     awaitReceivedCount(subscriber, 2);
     assertThat(subscriber.received).extracting(RunnerEvent::sequence).containsExactly(1L, 2L);
     subscription.close();
+  }
+
+  /**
+   * D4.3.2 review finding - {@code runner.sse.connections.active} must reflect the real
+   * subscribe/close lifecycle, not just be registered at {@code 0} and never asserted again.
+   */
+  @Test
+  void activeConnectionsGaugeTracksSubscribeAndClose() throws Exception {
+    assertThat(meterRegistry.find("runner.sse.connections.active").gauge().value()).isEqualTo(0.0);
+
+    RecordingSubscriber subscriber = new RecordingSubscriber();
+    RunEventSubscription subscription = hub.subscribe("run-1", List.of(), subscriber);
+
+    assertThat(meterRegistry.find("runner.sse.connections.active").gauge().value()).isEqualTo(1.0);
+
+    subscription.close();
+    assertThat(subscriber.completedLatch.await(5, TimeUnit.SECONDS)).isTrue();
+
+    assertThat(meterRegistry.find("runner.sse.connections.active").gauge().value()).isEqualTo(0.0);
   }
 
   /**
@@ -140,7 +163,7 @@ class RunEventHubTest {
    */
   @Test
   void subscribeRejectsOnceTheConfiguredCapacityIsReached() {
-    RunEventHub boundedHub = new RunEventHub(1);
+    RunEventHub boundedHub = new RunEventHub(1, metrics, meterRegistry);
     RecordingSubscriber first = new RecordingSubscriber();
     RecordingSubscriber second = new RecordingSubscriber();
     boundedHub.subscribe("run-1", List.of(), first);
@@ -148,12 +171,20 @@ class RunEventHubTest {
     assertThatThrownBy(() -> boundedHub.subscribe("run-2", List.of(), second))
         .isInstanceOf(RunEventSubscriptionRejectedException.class)
         .hasMessageContaining("Maximum of 1");
+
+    assertThat(
+            meterRegistry
+                .find("runner.sse.connections.rejected")
+                .tag("reason", "GLOBAL_CAP")
+                .counter()
+                .count())
+        .isEqualTo(1.0);
   }
 
   /** A rejected subscribe attempt must not itself count against the capacity it was rejected by. */
   @Test
   void aRejectedSubscribeDoesNotPermanentlyConsumeACapacitySlot() throws Exception {
-    RunEventHub boundedHub = new RunEventHub(1);
+    RunEventHub boundedHub = new RunEventHub(1, metrics, meterRegistry);
     RecordingSubscriber first = new RecordingSubscriber();
     RunEventSubscription firstSubscription = boundedHub.subscribe("run-1", List.of(), first);
     assertThatThrownBy(() -> boundedHub.subscribe("run-2", List.of(), new RecordingSubscriber()))
@@ -202,7 +233,7 @@ class RunEventHubTest {
     CountDownLatch subscribeEnteredCriticalSection = new CountDownLatch(1);
     CountDownLatch releaseSubscribe = new CountDownLatch(1);
     RunEventHub testHub =
-        new RunEventHub(UNBOUNDED_FOR_TESTS) {
+        new RunEventHub(UNBOUNDED_FOR_TESTS, metrics, meterRegistry) {
           @Override
           void beforeSubscribeRegistration() {
             subscribeEnteredCriticalSection.countDown();
@@ -249,7 +280,7 @@ class RunEventHubTest {
     CountDownLatch closeEnteredCriticalSection = new CountDownLatch(1);
     CountDownLatch releaseClose = new CountDownLatch(1);
     RunEventHub testHub =
-        new RunEventHub(UNBOUNDED_FOR_TESTS) {
+        new RunEventHub(UNBOUNDED_FOR_TESTS, metrics, meterRegistry) {
           @Override
           void beforeCloseNotify() {
             closeEnteredCriticalSection.countDown();

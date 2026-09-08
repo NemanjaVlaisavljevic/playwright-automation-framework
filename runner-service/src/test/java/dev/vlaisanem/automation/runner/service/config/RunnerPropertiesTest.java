@@ -183,7 +183,8 @@ class RunnerPropertiesTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        A_RULE);
+        A_RULE,
+        Duration.ofSeconds(60));
   }
 
   private RunnerProperties validWithDisk(
@@ -207,7 +208,8 @@ class RunnerPropertiesTest {
       long manifestMaxBytes,
       long rawEventMaxBytes,
       long managedScratchMaxBytes,
-      RateLimitRule diskUsageRateLimit) {
+      RateLimitRule diskUsageRateLimit,
+      Duration metricsSampleInterval) {
     return new RunnerProperties(
         ".",
         Duration.ofMinutes(10),
@@ -244,7 +246,8 @@ class RunnerPropertiesTest {
         manifestMaxBytes,
         rawEventMaxBytes,
         managedScratchMaxBytes,
-        diskUsageRateLimit);
+        diskUsageRateLimit,
+        metricsSampleInterval);
   }
 
   private static final RateLimitRule A_RULE = new RateLimitRule(5, Duration.ofMinutes(1));
@@ -490,7 +493,8 @@ class RunnerPropertiesTest {
         manifestMaxBytes,
         rawEventMaxBytes,
         managedScratchMaxBytes,
-        diskUsageRateLimit);
+        diskUsageRateLimit,
+        Duration.ofSeconds(60));
   }
 
   @Test
@@ -620,5 +624,76 @@ class RunnerPropertiesTest {
                     A_RULE))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("overflows a long");
+  }
+
+  @Test
+  void bindsTheRealApplicationYmlMetricsSampleIntervalCorrectly() {
+    contextRunner.run(
+        (context) -> {
+          RunnerProperties properties = context.getBean(RunnerProperties.class);
+          assertThat(properties.metricsSampleInterval()).isEqualTo(Duration.ofSeconds(60));
+        });
+  }
+
+  private RunnerProperties validMetrics(Duration metricsSampleInterval) {
+    return validWithDisk(
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        A_RULE,
+        3,
+        16384,
+        Duration.ofDays(30),
+        500,
+        Duration.ofDays(14),
+        Duration.ofHours(1),
+        A_RULE,
+        1_048_576L,
+        26_214_400L,
+        209_715_200L,
+        2_097_152L,
+        2_097_152L,
+        104_857_600L,
+        A_RULE,
+        metricsSampleInterval);
+  }
+
+  @Test
+  void rejectsAZeroMetricsSampleInterval() {
+    assertThatThrownBy(() -> validMetrics(Duration.ZERO))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("metrics-sample-interval");
+  }
+
+  @Test
+  void rejectsANegativeMetricsSampleInterval() {
+    assertThatThrownBy(() -> validMetrics(Duration.ofSeconds(-1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("metrics-sample-interval");
+  }
+
+  @Test
+  void rejectsANullMetricsSampleInterval() {
+    assertThatThrownBy(() -> validMetrics(null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("metrics-sample-interval");
+  }
+
+  /**
+   * D4.3.2 review finding - a merely-positive sub-millisecond {@code Duration} used to pass this
+   * class's own validation yet truncate to {@code 0} via {@code DiskMetricsSampler}'s own {@code
+   * toMillis()} call, which {@code ScheduledExecutorService#scheduleWithFixedDelay} then rejected
+   * outright (it requires a strictly positive delay) - a confusing failure deep inside {@code
+   * java.util.concurrent} during bean creation, not a clear, property-named error at config
+   * validation time.
+   */
+  @Test
+  void rejectsASubMillisecondMetricsSampleInterval() {
+    assertThatThrownBy(() -> validMetrics(Duration.ofNanos(1)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("metrics-sample-interval");
   }
 }

@@ -18,9 +18,11 @@ import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.CommittedRunChange;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.jdbc.JdbcRunStore;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
@@ -70,6 +72,8 @@ class RetentionServiceTest {
   private JdbcRunStore runStore;
   private JdbcArtifactRepository artifactRepository;
   private RetentionService retentionService;
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+  private final RunnerMetrics metrics = new RunnerMetrics(meterRegistry);
   private Path artifactsDir;
   private Path logsDir;
   private Path rawEventsDir;
@@ -113,7 +117,7 @@ class RetentionServiceTest {
     RunnerProperties properties =
         testProperties(
             artifactsDir, logsDir, rawEventsDir, Duration.ofDays(30), 500, Duration.ofDays(14));
-    retentionService = new RetentionService(runStore, artifactRepository, properties);
+    retentionService = new RetentionService(runStore, artifactRepository, properties, metrics);
   }
 
   @Test
@@ -225,12 +229,8 @@ class RetentionServiceTest {
             blockingStore,
             artifactRepository,
             testProperties(
-                artifactsDir,
-                logsDir,
-                rawEventsDir,
-                Duration.ofDays(30),
-                500,
-                Duration.ofDays(14)));
+                artifactsDir, logsDir, rawEventsDir, Duration.ofDays(30), 500, Duration.ofDays(14)),
+            metrics);
 
     ExecutorService executor = Executors.newSingleThreadExecutor();
     try {
@@ -481,6 +481,8 @@ class RetentionServiceTest {
     assertThat(preview.runDeletedCount()).isZero();
     assertThat(Files.exists(eligibleRunDir)).as("dry run must not touch anything").isTrue();
     assertThat(rawRunExists(eligibleRunId)).isTrue();
+    // A dry-run preview must never record cleanup metrics - it never claimed or deleted anything.
+    assertThat(meterRegistry.find("runner.retention.runs_deleted").counter()).isNull();
 
     RetentionReport real = retentionService.sweep(false);
 
@@ -491,6 +493,8 @@ class RetentionServiceTest {
     assertThat(runStore.findById(activeRunId))
         .as("the still-active run must be completely untouched")
         .isPresent();
+    assertThat(meterRegistry.find("runner.retention.runs_deleted").counter().count())
+        .isEqualTo(1.0);
   }
 
   private String seedTerminalRun(Instant requestedAt, Instant finishedAt) {
@@ -632,7 +636,8 @@ class RetentionServiceTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        aRule);
+        aRule,
+        Duration.ofSeconds(60));
   }
 
   /**

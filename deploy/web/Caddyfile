@@ -44,12 +44,26 @@
 	# alone). Wrapping everything in one `route` block forces genuine top-to-bottom evaluation, so
 	# the two reverse_proxy matchers below always get first refusal.
 	route {
-		# Only a bare health check is exposed publicly - not the full actuator surface (info is
+		# Only the three health paths are exposed publicly - not the full actuator surface (info is
 		# enabled server-side too, per application.yml, but deliberately not proxied here) and not
 		# /v3/api-docs (the OpenAPI document only ever needs to be reachable from the dashboard's
 		# own build tooling, against a real running instance directly, not through the public edge
 		# - see runner-dashboard/README.md's api:check:contract script).
 		reverse_proxy /actuator/health runner-service:8080
+		# D4.3.1 - the Kubernetes-style liveness/readiness probe groups (see application.yml's
+		# management.endpoint.health.group.readiness).
+		reverse_proxy /actuator/health/liveness runner-service:8080
+		reverse_proxy /actuator/health/readiness runner-service:8080
+
+		# D4.3.1 - fail closed on every *other* /actuator/* path (e.g. /actuator/prometheus,
+		# /actuator/env, /actuator/configprops, or a plain typo of one of the three paths above).
+		# Without this, an unmatched /actuator/* request would otherwise fall through to the SPA's
+		# own try_files fallback below and silently return React's index.html with a 200 - making
+		# "is this surface actually exposed publicly" impossible to verify by response code alone.
+		# Placed after the three allowed proxies above (which take priority) and before the SPA
+		# fallback below.
+		@actuatorOther path /actuator/*
+		respond @actuatorOther 404
 
 		# SSE-safe by default - Caddy's reverse_proxy streams a chunked/event-stream response as it
 		# arrives rather than buffering the whole thing, so RunEventStreamController's long-lived

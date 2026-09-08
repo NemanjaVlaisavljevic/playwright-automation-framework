@@ -26,6 +26,16 @@ spring:
     url: jdbc:postgresql://localhost:5433/runner
     username: runner
     password: runner
+    # D4.3.1 - bounds the real worst-case latency of Spring Boot's own auto-configured `db` health
+    # indicator (part of the readiness group below) - HikariCP's own default connectionTimeout is
+    # 30s, far longer than the Docker healthcheck's 4s bound, so an unbounded pool would let curl
+    # time out and report unhealthy correctly while the JDBC call inside the JVM kept waiting,
+    # letting repeated probes accumulate blocked pool-acquisition attempts server-side. A global
+    # pool setting, not a bespoke health-check-only timeout: nothing else in this service is
+    # latency-sensitive enough for a low-seconds bound to matter under normal (healthy) operation.
+    hikari:
+      connection-timeout: 2000 # ms - wait for a pooled connection
+      validation-timeout: 1000 # ms - validate a possibly-stale pooled connection
 
 # address defaults to loopback-only: this service can launch arbitrary Gradle/Playwright processes
 # on request, so it must never be reachable from other machines on the network without explicit
@@ -58,10 +68,36 @@ server:
       timeout: 4h
 
 management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      # Two genuinely separate settings, both explicit: show-details controls per-component detail
+      # (a status/exception), show-components controls whether component names are listed at all
+      # - an anonymous caller must see neither, only the bare top-level status.
+      show-details: never
+      show-components: never
+      group:
+        # D4.3.1 - readinessState (Spring Boot's own default member) plus every condition that
+        # means this instance cannot currently accept a new run: db (Spring Boot's own
+        # auto-configured indicator - a real Postgres outage), recovery (D2.5's startup pass not
+        # yet finished), disk (D4.2's own guard), runnerAvailability (DEGRADED - an unkillable
+        # process tree). Deliberately never added to the liveness group below it (left at Spring
+        # Boot's own default, readinessState only) - none of these conditions should ever restart
+        # the JVM; each either self-resolves or needs operator/infra action, never a process kill.
+        readiness:
+          include: readinessState, db, recovery, disk, runnerAvailability
   endpoints:
     web:
       exposure:
-        include: health,info
+        # D4.3.2 - /actuator/prometheus. Unauthenticated at the Spring Security layer (see
+        # SecurityConfig's own comment on this exact path) - never reachable from outside the
+        # Compose network regardless: Caddy's own @actuatorOther matcher already fail-closed
+        # rejects every /actuator/* path except the three health probes (see
+        # deploy/web/Caddyfile), and runner-service publishes no port at all in the base
+        # deploy/docker-compose.yml - only docker-compose.debug.yml exposes it, and only on
+        # loopback.
+        include: health,info,prometheus
 
 # deployment-profile defaults to LOCAL_DEV (today's unrestricted behavior: every combination
 # RunCatalog allows, PUBLIC and LOCAL alike). The portfolio Compose deployment overrides this to
@@ -141,3 +177,7 @@ runner:
   disk-usage-rate-limit:
     max-attempts: 10
     window: PT1H
+  # D4.3.2 - DiskMetricsSampler recomputes runnerDataBytes()/databaseBytes() on this fixed delay and
+  # caches the result; the Prometheus gauges themselves only ever read that cache, never recompute
+  # live on scrape.
+  metrics-sample-interval: PT60S

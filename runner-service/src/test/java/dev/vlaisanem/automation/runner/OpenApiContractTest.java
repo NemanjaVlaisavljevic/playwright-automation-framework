@@ -39,20 +39,31 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  */
 // D2.3: RunnerServiceApplication no longer excludes DataSourceAutoConfiguration/
 // FlywayAutoConfiguration itself (JdbcRunStore is a real @Component now), so this Docker-free,
-// real-Postgres-free full-context test re-excludes both at the test level - this test is about the
-// generated OpenAPI document, not the store's own behavior, and must never need a real Postgres to
-// even start. @MockitoBean below covers the other half: with no DataSource/JdbcTemplate/
-// TransactionTemplate beans, JdbcRunStore's own constructor could not be satisfied even if it were
-// still eligible to run - RunEventBroker/RunLifecycleCoordinator get a mock instead. D2.4 adds the
-// exact same problem one level down: JdbcArtifactRepository also needs a JdbcTemplate, and
-// ArtifactService/ArtifactIngestionService/RunEventBroker/RunLifecycleCoordinator all now depend on
-// ArtifactRepository transitively - mocked here for the same reason.
+// real-Postgres-free full-context test re-excludes Flyway at the test level (see D4.3.1 comment
+// below for why DataSourceAutoConfiguration itself is no longer also excluded) - this test is
+// about the generated OpenAPI document, not the store's own behavior, and must never need a real
+// Postgres to even start. @MockitoBean below covers the rest: with JdbcRunStore/
+// JdbcArtifactRepository's bean *definitions* replaced by mocks of the interfaces they implement,
+// neither is ever constructed regardless of whether the real (but unreachable-in-this-test)
+// DataSource is reachable - RunEventBroker/RunLifecycleCoordinator get the mocks instead. D2.4
+// adds the exact same problem one level down: JdbcArtifactRepository also needs a JdbcTemplate,
+// and ArtifactService/ArtifactIngestionService/RunEventBroker/RunLifecycleCoordinator all now
+// depend on ArtifactRepository transitively - mocked here for the same reason.
+// D4.3.1 - no longer excludes DataSourceAutoConfiguration: application.yml's readiness group now
+// unconditionally includes the `db` contributor, so a full-context test without a real DataSource
+// bean fails to start at all (Spring Boot's HealthEndpointGroupsFailureAnalyzer). Flyway stays
+// excluded (migrations need a real, reachable, schema-correct Postgres, which this test
+// deliberately has neither) and hikari.initialization-fail-timeout=-1 stops HikariCP's own eager
+// startup connection check from failing context refresh when nothing is listening on the
+// configured (unreachable-in-this-test) datasource URL - see HealthEndpointGroupMembershipTest's
+// own Javadoc for the full reasoning.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
-    properties =
-        "spring.autoconfigure.exclude="
-            + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
-            + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration")
+    properties = {
+      "spring.autoconfigure.exclude="
+          + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration",
+      "spring.datasource.hikari.initialization-fail-timeout=-1"
+    })
 class OpenApiContractTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;

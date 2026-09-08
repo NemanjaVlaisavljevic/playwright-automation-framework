@@ -7,6 +7,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.LongFunction;
+import org.slf4j.MDC;
 
 /**
  * In-memory {@link RunEventAppender} for tests that exercise a lifecycle coordinator or service
@@ -20,9 +21,16 @@ public final class RecordingRunEventAppender implements RunEventAppender {
   private final List<RunnerEvent> events = new CopyOnWriteArrayList<>();
   private final Set<String> closedRunIds = ConcurrentHashMap.newKeySet();
   private final Object lock = new Object();
+  // D4.3.3 review finding - captured here rather than via a test-only field on any production
+  // class: this is already the real collaborator ListenerEventIngestor's own background thread
+  // invokes for every forwarded event, so observing MDC at that exact call is proof enough that
+  // runId is really set on the thread that matters, with no test-only mutable state added to any
+  // production object.
+  private volatile String lastAppendMdcRunId;
 
   @Override
   public RunnerEvent append(String runId, LongFunction<RunnerEvent> eventFactory) {
+    lastAppendMdcRunId = MDC.get("runId");
     synchronized (lock) {
       if (closedRunIds.contains(runId)) {
         throw new RunEventJournalConflictException(
@@ -58,5 +66,10 @@ public final class RecordingRunEventAppender implements RunEventAppender {
   /** Every event ever appended, across every runId - proves nothing was emitted at all. */
   public int totalEventCount() {
     return events.size();
+  }
+
+  /** The {@code runId} MDC held on whichever thread most recently called {@link #append}. */
+  public String lastAppendMdcRunId() {
+    return lastAppendMdcRunId;
   }
 }

@@ -21,14 +21,16 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  * a config-property check) so a future refactor that accidentally drops or overrides {@code
  * server.address} fails loudly here, not in production.
  */
-// D2.3: see OpenApiContractTest's own identical annotation for why this Docker-free, full-context
-// test re-excludes DataSource/Flyway autoconfiguration and mocks out the real store.
+// D2.3/D4.3.1: see OpenApiContractTest's own identical annotation for why this Docker-free,
+// full-context test re-excludes Flyway (not DataSourceAutoConfiguration - application.yml's
+// readiness group needs the real `db` contributor to exist) and mocks out the real store.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
-    properties =
-        "spring.autoconfigure.exclude="
-            + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
-            + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration")
+    properties = {
+      "spring.autoconfigure.exclude="
+          + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration",
+      "spring.datasource.hikari.initialization-fail-timeout=-1"
+    })
 class ServerBindingTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;

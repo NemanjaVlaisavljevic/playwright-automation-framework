@@ -188,9 +188,30 @@ public class SecurityConfig {
                         "/api/v1/auth/me",
                         "/api/v1/auth/csrf",
                         "/actuator/health",
+                        // D4.3.1 - the liveness/readiness probe groups. Caddy proxies these three
+                        // exact paths publicly (and fail-closed rejects every other /actuator/*
+                        // path - see the Caddyfile) - both stay permitAll for the same reason
+                        // /actuator/health already was: an unauthenticated healthcheck caller (a
+                        // real Docker healthcheck, a future uptime monitor) must never need admin
+                        // credentials, and show-details/show-components are both `never` globally
+                        // regardless of caller identity anyway.
+                        "/actuator/health/liveness",
+                        "/actuator/health/readiness",
+                        // D4.3.2 - unauthenticated for the same reason as the health paths above,
+                        // but with a different one added: a real Prometheus scraper cannot perform
+                        // an interactive GitHub OAuth2 login, so gating this behind ROLE_ADMIN
+                        // would just have to be undone once a real scraper exists. Never actually
+                        // reachable from outside the Compose network regardless of this permitAll:
+                        // Caddy's own @actuatorOther matcher fail-closed rejects this exact path
+                        // externally (see the Caddyfile), and runner-service publishes no port at
+                        // all in the base docker-compose.yml - only docker-compose.debug.yml
+                        // reaches it, and only on loopback. If stronger protection is ever needed
+                        // (a real scraper on an untrusted network), that should be a separate
+                        // monitoring network / machine credential, not a GitHub session.
+                        "/actuator/prometheus",
                         "/actuator/info",
-                        // Not proxied publicly at all (Caddy only ever forwards /actuator/health
-                        // and /api/*) - permitted here purely so npm run api:export/
+                        // Not proxied publicly at all (Caddy only ever forwards the three health
+                        // paths above and /api/*) - permitted here purely so npm run api:export/
                         // api:check:contract can still fetch it from a local bootRun once GitHub
                         // OAuth2 is enabled, the same tooling this repo already relies on today.
                         "/v3/api-docs")

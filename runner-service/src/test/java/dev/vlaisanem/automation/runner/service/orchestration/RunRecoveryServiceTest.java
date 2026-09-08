@@ -18,8 +18,10 @@ import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -42,7 +44,9 @@ class RunRecoveryServiceTest {
   private static final Instant NOW = Instant.parse("2026-08-30T12:00:00Z");
 
   private final FakeRunLifecycleStore store = new FakeRunLifecycleStore();
-  private final RunLifecycleCoordinator coordinator = newCoordinator(store);
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+  private final RunnerMetrics metrics = new RunnerMetrics(meterRegistry);
+  private final RunLifecycleCoordinator coordinator = newCoordinator(store, metrics);
 
   @Test
   void recoversEveryNonTerminalRunToErrorAndLeavesTerminalRunsUntouched() {
@@ -60,7 +64,7 @@ class RunRecoveryServiceTest {
     coordinator.markRunning("succeeded-run", NOW);
     coordinator.finishIfLive("succeeded-run", RunStatus.SUCCEEDED, 0, null, NOW);
 
-    RunRecoveryService recovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(store, coordinator, metrics);
     recovery.run(null);
 
     for (String recoveredRunId : List.of("queued-run", "starting-run", "running-run")) {
@@ -76,6 +80,8 @@ class RunRecoveryServiceTest {
     Run succeeded = store.findById("succeeded-run").orElseThrow();
     assertThat(succeeded.status()).isEqualTo(RunStatus.SUCCEEDED);
     assertThat(store.readEventsAfter("succeeded-run", 0)).hasSize(3); // QUEUED, STARTED, FINISHED
+
+    assertThat(meterRegistry.find("runner.recovery.recovered").counter().count()).isEqualTo(3.0);
   }
 
   @Test
@@ -83,23 +89,26 @@ class RunRecoveryServiceTest {
     coordinator.queue("running-run", Environment.PUBLIC, Suite.SMOKE, NOW);
     coordinator.markStarting("running-run", NOW);
     coordinator.markRunning("running-run", NOW);
-    RunRecoveryService recovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(store, coordinator, metrics);
     recovery.run(null);
     int eventCountAfterFirstPass = store.readEventsAfter("running-run", 0).size();
 
     // A second pass (modeling a second restart) must find nothing left to do - the run is already
     // terminal, so it no longer matches findNonTerminal() at all, never re-processed.
-    RunRecoveryService secondRecovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService secondRecovery = new RunRecoveryService(store, coordinator, metrics);
     assertThatCode(() -> secondRecovery.run(null)).doesNotThrowAnyException();
 
     Run run = store.findById("running-run").orElseThrow();
     assertThat(run.status()).isEqualTo(RunStatus.ERROR);
     assertThat(store.readEventsAfter("running-run", 0)).hasSize(eventCountAfterFirstPass);
+    // The second pass recovered nothing - the counter must still reflect only the first pass's
+    // one real recovery, not a second, spurious increment for a no-op pass.
+    assertThat(meterRegistry.find("runner.recovery.recovered").counter().count()).isEqualTo(1.0);
   }
 
   @Test
   void requireRecoveryCompleteThrowsBeforeThePassHasRun() {
-    RunRecoveryService recovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(store, coordinator, metrics);
 
     assertThatThrownBy(recovery::requireRecoveryComplete)
         .isInstanceOf(RunnerRecoveringException.class);
@@ -107,7 +116,7 @@ class RunRecoveryServiceTest {
 
   @Test
   void requireRecoveryCompleteDoesNotThrowOnceThePassHasRun() {
-    RunRecoveryService recovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(store, coordinator, metrics);
 
     recovery.run(null);
 
@@ -130,8 +139,9 @@ class RunRecoveryServiceTest {
     coordinator.markStarting("bad-run", NOW);
 
     RunLifecycleStore failingForBadRun = failingTransitionFor(store, "bad-run");
-    RunLifecycleCoordinator failingCoordinator = newCoordinator(failingForBadRun);
-    RunRecoveryService recovery = new RunRecoveryService(failingForBadRun, failingCoordinator);
+    RunLifecycleCoordinator failingCoordinator = newCoordinator(failingForBadRun, metrics);
+    RunRecoveryService recovery =
+        new RunRecoveryService(failingForBadRun, failingCoordinator, metrics);
 
     assertThatThrownBy(() -> recovery.run(null))
         .isInstanceOf(IllegalStateException.class)
@@ -254,7 +264,7 @@ class RunRecoveryServiceTest {
           }
         };
 
-    RunRecoveryService recovery = new RunRecoveryService(brokenLoad, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(brokenLoad, coordinator, metrics);
 
     assertThatThrownBy(() -> recovery.run(null)).isInstanceOf(IllegalStateException.class);
 
@@ -361,12 +371,15 @@ class RunRecoveryServiceTest {
     };
   }
 
-  private static RunLifecycleCoordinator newCoordinator(RunLifecycleStore store) {
+  private static RunLifecycleCoordinator newCoordinator(
+      RunLifecycleStore store, RunnerMetrics metrics) {
     RunnerProperties properties = testProperties();
     ArtifactIngestionService artifactIngestionService =
         new ArtifactIngestionService(new ObjectMapper(), new FakeArtifactRepository(), properties);
-    RunEventBroker broker = new RunEventBroker(store, properties, artifactIngestionService);
-    return new RunLifecycleCoordinator(broker, artifactIngestionService);
+    RunEventBroker broker =
+        new RunEventBroker(
+            store, properties, artifactIngestionService, metrics, new SimpleMeterRegistry());
+    return new RunLifecycleCoordinator(broker, artifactIngestionService, metrics);
   }
 
   private static RunnerProperties testProperties() {
@@ -406,6 +419,7 @@ class RunRecoveryServiceTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        new RateLimitRule(10, Duration.ofHours(1)));
+        new RateLimitRule(10, Duration.ofHours(1)),
+        Duration.ofSeconds(60));
   }
 }

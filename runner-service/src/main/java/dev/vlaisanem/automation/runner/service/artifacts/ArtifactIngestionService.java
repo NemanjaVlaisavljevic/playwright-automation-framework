@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
+import dev.vlaisanem.automation.runner.service.logging.MdcScope;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
@@ -180,14 +181,19 @@ public class ArtifactIngestionService {
       }
       return ArtifactIngestionOutcome.SUCCEEDED;
     } catch (RuntimeException e) {
-      log.warn(
-          "Artifact ingestion failed for run {} (runTerminal={}) - artifacts remain a derived"
-              + " index, so this does not fail the run itself, but its artifact list may be"
-              + " incomplete until a later successful pass: {}",
-          runId,
-          runTerminal,
-          e.getMessage(),
-          e);
+      // D4.3.3 review finding - runId as a real structured/ECS field, not only interpolated into
+      // the message text, so a reconciliation-pass failure (this method's other caller, on its own
+      // dedicated background thread) is just as searchable/correlatable as an incremental-pass
+      // failure on the run's own worker thread.
+      log.atWarn()
+          .addKeyValue("runId", runId)
+          .setCause(e)
+          .log(
+              "Artifact ingestion failed (runTerminal="
+                  + runTerminal
+                  + ") - artifacts remain a derived index, so this does not fail the run itself,"
+                  + " but its artifact list may be incomplete until a later successful pass: "
+                  + e.getMessage());
       if (runTerminal) {
         repository.markIngestionIncomplete(runId);
       }
@@ -212,7 +218,11 @@ public class ArtifactIngestionService {
           continue;
         }
         reconciliationAttempts.put(runId, attemptsSoFar + 1);
-        ingestAvailableEntries(runId, true);
+        // D4.3.3 review finding - this reconciliation pass runs on its own dedicated executor
+        // thread, distinct from any run's own worker thread, so MDC does not carry runId onto it
+        // automatically; without this, a retry's own failure would have runId only interpolated
+        // in the message above, never as a searchable MDC/ECS field.
+        MdcScope.withMdc("runId", runId, () -> ingestAvailableEntries(runId, true));
       }
     } catch (RuntimeException e) {
       // The reconciliation loop itself (e.g. findRunIdsWithIncompleteIngestion failing against a

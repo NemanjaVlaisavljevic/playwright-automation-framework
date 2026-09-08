@@ -16,9 +16,13 @@ import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.FailingRunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -47,8 +51,10 @@ class RunLifecycleCoordinatorTest {
 
   private final FakeRunLifecycleStore store = new FakeRunLifecycleStore();
   private final RunEventBroker broker = newBroker(store);
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+  private final RunnerMetrics metrics = new RunnerMetrics(meterRegistry);
   private final RunLifecycleCoordinator coordinator =
-      new RunLifecycleCoordinator(broker, noopArtifactIngestionService());
+      new RunLifecycleCoordinator(broker, noopArtifactIngestionService(), metrics);
 
   @Test
   void queueSavesTheRunAndEmitsRunQueuedFirst() {
@@ -59,13 +65,16 @@ class RunLifecycleCoordinatorTest {
     assertThat(recorded).hasSize(1);
     assertThat(recorded.getFirst().type()).isEqualTo(EventType.RUN_QUEUED);
     assertThat(recorded.getFirst().sequence()).isEqualTo(1L);
+    assertThat(meterRegistry.find("runner.runs.submitted").tag("suite", "SMOKE").counter().count())
+        .isEqualTo(1.0);
   }
 
   @Test
   void aFailingQueueWriteLeavesNoRunBehind() {
     RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_QUEUED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(newBroker(failingStore), noopArtifactIngestionService());
+        new RunLifecycleCoordinator(
+            newBroker(failingStore), noopArtifactIngestionService(), metrics);
 
     assertThatThrownBy(
             () -> failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW))
@@ -102,6 +111,8 @@ class RunLifecycleCoordinatorTest {
     assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_STARTED);
+    assertThat(meterRegistry.find("runner.runs.started").tag("suite", "SMOKE").counter().count())
+        .isEqualTo(1.0);
   }
 
   /**
@@ -114,7 +125,8 @@ class RunLifecycleCoordinatorTest {
   void aFailingRunStartedWriteLeavesTheRunInStartingUnchanged() {
     RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_STARTED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(newBroker(failingStore), noopArtifactIngestionService());
+        new RunLifecycleCoordinator(
+            newBroker(failingStore), noopArtifactIngestionService(), metrics);
     failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
     failingCoordinator.markStarting("run-1", NOW);
 
@@ -144,6 +156,23 @@ class RunLifecycleCoordinatorTest {
     assertThat(store.readEventsAfter("run-1", 0))
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_FINISHED);
+    assertThat(meterRegistry.find("runner.runs.started").counter()).isNull();
+    assertThat(
+            meterRegistry
+                .find("runner.runs.finished")
+                .tag("suite", "SMOKE")
+                .tag("status", "CANCELLED")
+                .counter()
+                .count())
+        .isEqualTo(1.0);
+    // Cancelled while still STARTING - startedAt is null, so no duration is ever recorded for it.
+    assertThat(
+            meterRegistry
+                .find("runner.runs.duration")
+                .tag("suite", "SMOKE")
+                .tag("status", "CANCELLED")
+                .timer())
+        .isNull();
   }
 
   @Test
@@ -167,6 +196,24 @@ class RunLifecycleCoordinatorTest {
       assertThat(finished.type()).isEqualTo(EventType.RUN_FINISHED);
       assertThat(finished.runOutcome()).isEqualTo(expectedOutcome(status));
       assertThat(finished.detail()).isEqualTo("detail-" + status);
+      assertThat(
+              meterRegistry
+                  .find("runner.runs.finished")
+                  .tag("suite", "SMOKE")
+                  .tag("status", status.name())
+                  .counter()
+                  .count())
+          .isEqualTo(1.0);
+      // markRunning ran before finishIfLive for every status here, so startedAt is always
+      // non-null - a duration is recorded for every one of these terminal statuses.
+      assertThat(
+              meterRegistry
+                  .find("runner.runs.duration")
+                  .tag("suite", "SMOKE")
+                  .tag("status", status.name())
+                  .timer()
+                  .count())
+          .isEqualTo(1L);
     }
   }
 
@@ -189,6 +236,23 @@ class RunLifecycleCoordinatorTest {
         .containsExactly(EventType.RUN_QUEUED, EventType.RUN_FINISHED);
     assertThat(recorded).extracting(RunnerEvent::sequence).containsExactly(1L, 2L);
     assertThat(recorded.getLast().runOutcome()).isEqualTo(RunOutcome.CANCELLED);
+    assertThat(
+            meterRegistry
+                .find("runner.runs.finished")
+                .tag("suite", "SMOKE")
+                .tag("status", "CANCELLED")
+                .counter()
+                .count())
+        .isEqualTo(1.0);
+    // Cancelled straight from QUEUED - never reached RUNNING, so startedAt is null and no
+    // duration is ever recorded for it.
+    assertThat(
+            meterRegistry
+                .find("runner.runs.duration")
+                .tag("suite", "SMOKE")
+                .tag("status", "CANCELLED")
+                .timer())
+        .isNull();
   }
 
   /** Same reasoning as {@link #aFailingRunStartedWriteLeavesTheRunInStartingUnchanged}. */
@@ -196,7 +260,8 @@ class RunLifecycleCoordinatorTest {
   void aFailingRunFinishedWriteLeavesTheRunRunningNeverSucceeded() {
     RunLifecycleStore failingStore = new FailingRunLifecycleStore(store, EventType.RUN_FINISHED);
     RunLifecycleCoordinator failingCoordinator =
-        new RunLifecycleCoordinator(newBroker(failingStore), noopArtifactIngestionService());
+        new RunLifecycleCoordinator(
+            newBroker(failingStore), noopArtifactIngestionService(), metrics);
     failingCoordinator.queue("run-1", Environment.PUBLIC, Suite.SMOKE, NOW);
     failingCoordinator.markStarting("run-1", NOW);
     failingCoordinator.markRunning("run-1", NOW);
@@ -255,6 +320,17 @@ class RunLifecycleCoordinatorTest {
             .filter(event -> event.type() == EventType.RUN_FINISHED)
             .toList();
     assertThat(finished).hasSize(1);
+    // Exactly one of the 16 racing attempts actually won - summed across whichever status tag
+    // (SUCCEEDED or FAILED) that one happened to carry, the metric fired exactly once too, never
+    // once per attempt.
+    double totalFinished =
+        meterRegistry.find("runner.runs.finished").counters().stream()
+            .mapToDouble(Counter::count)
+            .sum();
+    assertThat(totalFinished).isEqualTo(1.0);
+    long totalDurationCount =
+        meterRegistry.find("runner.runs.duration").timers().stream().mapToLong(Timer::count).sum();
+    assertThat(totalDurationCount).isEqualTo(1L);
   }
 
   @Test
@@ -296,7 +372,12 @@ class RunLifecycleCoordinatorTest {
   }
 
   private static RunEventBroker newBroker(RunLifecycleStore store) {
-    return new RunEventBroker(store, testProperties(), noopArtifactIngestionService());
+    return new RunEventBroker(
+        store,
+        testProperties(),
+        noopArtifactIngestionService(),
+        new RunnerMetrics(new SimpleMeterRegistry()),
+        new SimpleMeterRegistry());
   }
 
   /**
@@ -353,6 +434,7 @@ class RunLifecycleCoordinatorTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        new RateLimitRule(10, Duration.ofHours(1)));
+        new RateLimitRule(10, Duration.ofHours(1)),
+        Duration.ofSeconds(60));
   }
 }

@@ -18,6 +18,16 @@ FROM eclipse-temurin:21-jdk-jammy
 
 WORKDIR /app
 
+# D4.3.1 - the base image has neither curl nor wget by default; needed for docker-compose.yml's
+# own healthcheck (a plain HTTP GET against this same container's /actuator/health/readiness). Its
+# own early layer, before the COPY/Gradle-build steps below, so it caches independently of source
+# changes - this image already carries the entire repo checkout, the Gradle wrapper, and a full
+# Chromium install for real test execution, so this small addition changes nothing about its
+# already-not-slim size/security posture.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy everything needed to evaluate the Gradle build (settings.gradle/build.gradle read
 # infra/rbp/upstream.properties unconditionally at configuration time, even though localSut* tasks
 # themselves are never invoked here - see build.gradle's own top-level `file(...).withInputStream`
@@ -95,6 +105,24 @@ ENV RUNNER_DEPLOYMENTPROFILE=PORTFOLIO
 # application.yml, mirroring the SERVER_ADDRESS/RUNNER_DEPLOYMENTPROFILE deployment-only-override
 # pattern already used above.
 ENV SERVER_SERVLET_SESSION_COOKIE_SECURE=true
+
+# D4.3.3 - Elastic Common Schema (ECS) JSON logging, via Spring Boot 4.1.1's own native structured-
+# logging support (no logstash-logback-encoder or custom StructuredLogFormatter needed) - scoped to
+# this real deployment only, the same way RUNNER_DEPLOYMENTPROFILE above is: local `bootRun`/every
+# test never sets these, so Spring Boot's plain default human-readable console pattern applies there
+# unchanged. ECS automatically folds in MDC entries and SLF4J fluent-API key-value pairs (requestId/
+# runId/method/route/status/durationMs all become real JSON fields with no extra wiring needed).
+#
+# ARG must be declared after FROM (an ARG declared before it is only visible to FROM itself) and
+# immediately before the ENV line that references it - only visible within this build stage.
+# docker-compose.yml's own runner-service service passes this through via `build.args.APP_VERSION`
+# - a *runtime* `environment:` override could never retroactively change this value; it is baked
+# into the image at build time via this ARG/ENV substitution, not read fresh at container start.
+ARG APP_VERSION=unknown
+ENV LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+ENV LOGGING_STRUCTURED_ECS_SERVICE_NAME=runner-service
+ENV LOGGING_STRUCTURED_ECS_SERVICE_VERSION=${APP_VERSION}
+ENV LOGGING_STRUCTURED_ECS_SERVICE_ENVIRONMENT=portfolio
 
 EXPOSE 8080
 

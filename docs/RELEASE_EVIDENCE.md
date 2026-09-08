@@ -232,7 +232,8 @@ This closes every remaining item of D3.2's own acceptance checklist. Full Caddy-
 | Public REST GET | `/api/v1/runs`, `/api/v1/runs/*`, `/api/v1/capabilities`, `/api/v1/tests` | 120/min | client IP | `SecurityAccessMatrixTest`: 121st call → `429` |
 | Log/artifact download | `/api/v1/runs/*/log`, `/api/v1/runs/*/artifacts`, `/api/v1/runs/*/artifacts/*` | 30/min | client IP | Same filter/matrix entry as public-read; wiring identical |
 | SSE | `GET /api/v1/runs/*/events` | 3 concurrent connections per IP, on top of the existing global `sseMaxSubscribers` | client IP | `RunEventStreamControllerTest`: 4th concurrent connection from one IP → `429` |
-| Health check | `/actuator/health` | unlimited | — | Not matched by any rule in the filter, by construction |
+| Health check | `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness` (D4.3.1 added the latter two - see that section) | unlimited | — | Not matched by any rule in the filter, by construction |
+| Metrics scrape | `/actuator/prometheus` (D4.3.2 - see that section) | unlimited | — | Same reasoning as health check - proven by `PrometheusEndpointIsNotRateLimitedTest`, not merely assumed |
 
 `runner.queue-capacity` (existing, unchanged) is explicitly documented as *not* a rate limit - it bounds queued runs, never call frequency.
 
@@ -657,3 +658,458 @@ frontend `npm run check` unaffected (no frontend code changed this round). No li
 re-verification was needed this round - every finding here is proven by a real Postgres/real
 concurrent-transaction test, which is the more precise tool for exactly these races than a manual
 click-through would be.
+
+## Faza D4.3.1 - liveness and readiness health probes
+
+**Date:** 2026-09-08. **Scope:** real Kubernetes-style liveness/readiness probe groups
+(`management.endpoint.health.probes.enabled`), so a genuine failure (DB down, disk exhausted,
+stuck D2.5 recovery, a `DEGRADED` runner) actually surfaces as unhealthy - as a real Docker
+healthcheck and an operator-visible signal - without ever restart-looping the JVM over a condition
+a restart can't fix, and without ever blocking the dashboard's own already-proven
+`BackendUnavailableE2eTest` behavior. Plan reviewed and revised once before implementation (Caddy
+must not gate its own startup on backend readiness; the `db` indicator's own worst-case latency
+must be bounded; `show-details`/`show-components` are two separate settings, both `never`; Caddy
+must fail closed on every other `/actuator/*` path) - every correction is reflected below.
+
+### Exposed surface
+
+Exactly three health paths are public, at both the Spring Security layer and the Caddy edge:
+`/actuator/health` (root aggregate), `/actuator/health/liveness` (`livenessState` only), and
+`/actuator/health/readiness` (`readinessState`, `db`, `recovery`, `disk`, `runnerAvailability`).
+Every other `/actuator/*` path - `/actuator/prometheus`, `/actuator/env`, `/actuator/configprops`,
+a typo of one of the three above - gets a real Caddy-side `404` (`@actuatorOther` matcher,
+`deploy/web/Caddyfile`), never the SPA's `index.html`; `/actuator/info` stays permitted at the
+Spring Security layer but is not proxied publicly either way, unchanged from D3.3. `show-details`
+and `show-components` are both `never`, so an anonymous caller only ever sees a bare
+`{"status": "..."}` on any of the three paths - no contributor name, no exception message, no
+file-system path. Three new `HealthIndicator` beans (`RecoveryHealthIndicator`,
+`DiskHealthIndicator`, `RunnerAvailabilityHealthIndicator`) wrap
+`RunRecoveryService`/`DiskUsageService`/`RunService` respectively; `db` is Spring Boot's own
+already-auto-configured indicator, added to the readiness group's `include`, not built here - since
+every custom indicator also registers as a top-level contributor by Spring Boot's own default
+convention, the plain `/actuator/health` aggregate is now a genuinely more honest signal too, not
+just JVM-up.
+
+The status split is deliberate: `db` reports `DOWN` on a genuine Postgres outage - the one failure
+class here that actually needs infra/operator action - while `recovery`/`disk`/`runnerAvailability`
+report `OUT_OF_SERVICE` instead, matching the existing `RunnerRecoveringException` 503 convention -
+temporary, self-resolving conditions, never conflated with `db`'s real failure class.
+`spring.datasource.hikari.connection-timeout`/`validation-timeout` (2000ms/1000ms) bound the `db`
+indicator's own worst-case latency well below the Docker healthcheck's 4-second `curl --max-time`
+bound - HikariCP's own default `connectionTimeout` is 30s, far longer.
+
+### Review round - 3 findings, all fixed and reverified, closed the same session
+
+1. **[P1] The anonymous-access test never exercised the real, OAuth2-configured security chain** -
+   `HealthEndpointAnonymousAccessTest` boots with no OAuth2 credentials configured, so
+   `SecurityConfig`'s *permissive* chain is the one active; it would stay green even if
+   `/actuator/health/liveness`/`/readiness` were accidentally dropped from the real
+   `oauth2SecurityFilterChain`'s own `permitAll()` list, since the permissive chain permits
+   everything regardless. In PORTFOLIO that regression would mean the Docker healthcheck gets a
+   real `401` and the container stays permanently `unhealthy`. Fixed: the identical
+   anonymous-GET/no-leaked-detail assertions now also run against
+   `OAuth2ChainAppliesAbuseRateLimitTest`'s real OAuth2-configured chain
+   (`probeSubPathIsReachableAnonymouslyOnTheOAuth2ChainToo`) - the one every production deployment
+   actually runs under.
+2. **[P2] Readiness's exact-membership proof said nothing about liveness** -
+   `HealthEndpointGroupMembershipTest` locked readiness's five-member set but never locked
+   liveness's own single-member set, leaving no permanent guard against a future
+   `application.yml` edit silently composing `db`/`disk`/`recovery`/`runnerAvailability` into
+   liveness - which would turn a self-resolving condition into a genuine restart-loop. **A real
+   landmine was found while fixing this, not merely a missing assertion**: the first attempt set
+   `management.endpoint.health.group.liveness.show-components=always` as a test property to make
+   liveness's own components visible over HTTP the same way readiness's are - this silently rebound
+   the built-in "liveness" probe group away from its own single-member (`livenessState`-only)
+   definition, reconstituting its membership as *every* registered contributor instead, which then
+   invoked the (deliberately unstubbed, for this test) mocked `DiskUsageService` and blew up with an
+   uncaught `NullPointerException` propagating all the way to a raw `500`. Confirmed empirically -
+   not assumed - that touching *any* per-group property on Spring Boot's auto-configured
+   liveness/readiness groups risks this. Fixed properly: `livenessGroupContainsExactlyLivenessState`
+   instead autowires `HealthEndpointGroups`/`HealthContributorRegistry` directly and asserts
+   `isMember` against every real registered contributor name - never touches a per-group property,
+   never invokes a single indicator's `health()`, so it cannot trigger the same landmine again.
+3. **[P2] Deployment docs still described the pre-D4.3.1 health surface** -
+   `DEPLOYMENT_ARCHITECTURE.md` claimed only `/actuator/health` was public and described root health
+   as "liveness only"; this file listed only one unlimited health endpoint. Both updated to describe
+   the three exact paths, the fail-closed `404` for every other `/actuator/*` path, the new root
+   aggregate semantics, and the `DOWN`/`OUT_OF_SERVICE` split - this section is that update for the
+   release-evidence side.
+
+### Live verification against a real running system
+
+Real `bootRun` + real local Postgres (`localPostgresUp`), no automation run active:
+
+| Scenario | Liveness | Readiness | Notes |
+|---|---|---|---|
+| Everything healthy | `200 UP` | `200 UP` | root `/actuator/health` also `200 UP` |
+| Postgres stopped (`docker stop`) | `200 UP` | `503 DOWN` in ~2.1-2.3s | measured against the literal Docker healthcheck command (`curl --fail --silent --show-error --max-time 4 .../readiness`) - real `curl` exit `22` on the real `503`, well inside the 4s bound; proves the Hikari timeout tuning actually takes effect, not just reasoning that it should |
+| Postgres restored (`docker start`) | `200 UP` | back to `200 UP` on its own | no `runner-service` restart involved |
+| Disk forced below threshold (`RUNNER_DISK_MIN_FREE_BYTES` set absurdly high, non-destructive - no real disk exhaustion needed) | `200 UP` | `503 OUT_OF_SERVICE` | proves the real `DiskUsageService` -> `DiskHealthIndicator` -> readiness-group wiring end to end, not just the mocked unit test |
+
+Recovery-running and runner-`DEGRADED` rows were not independently forced live (both are
+transient/hard-to-safely-reproduce states without real side effects) - covered instead by their
+unit tests' exact status-mapping (`RecoveryHealthIndicatorTest`, `RunnerAvailabilityHealthIndicatorTest`)
+plus `HealthEndpointGroupMembershipTest`'s proof that `recovery`/`runnerAvailability` are genuinely
+registered readiness-group members, not merely assumed ones.
+
+A real `docker compose up` pass (image rebuilt with `curl`, transition `starting` -> `healthy`) and
+the Caddy fail-closed matrix against a live Compose stack are deferred to D4.3.4's consolidated
+acceptance pass - the identical heavier rebuild either way; every Dockerfile/Compose/Caddy change
+needed is already in place.
+
+### Gates
+
+`fullBackendGate` (spotless + every module's `test` + `:runner-service:databaseIntegrationTest`)
+and `dashboardE2eTest` both green after every change, including the review-round fixes above.
+
+## Faza D4.3.2 - Micrometer/Prometheus metrics
+
+**Date:** 2026-09-08. **Scope:** a real `/actuator/prometheus` scrape endpoint plus a focused set of
+domain metrics (run lifecycle, disk rejections, SSE connections, recovery, retention, disk/DB
+size) - deliberately no Prometheus/Grafana container yet (real VPS memory cost too early for this
+phase). A first plan draft was reviewed and found to have real correctness gaps in exactly the
+areas that matter most for metrics that must never lie or crash a real run; every one of that
+review's corrections is reflected in what was actually built, not just planned.
+
+**Locked decision (this session):** `/actuator/prometheus` is `permitAll` on the real OAuth2 chain,
+the same posture as the three health paths - a real Prometheus scraper cannot perform an
+interactive GitHub OAuth2 login, and stronger protection later should be a separate monitoring
+network, not a GitHub session. Still unreachable from outside the Compose network regardless
+(Caddy's own `@actuatorOther` matcher fail-closes it externally; `runner-service` publishes no port
+in the base `docker-compose.yml`).
+
+### Review round - 2 P1 + 3 P2, all fixed before any code was written
+
+1. **[P1] Lifecycle metrics must not be scattered across `RunService` call sites** -
+   `RunEventBroker.transitionIfNonTerminal` can lose its own concurrency race and return empty; a
+   metric recorded unconditionally at every one of `RunService`'s ~10 terminal-transition call
+   sites could double-count a run two callers raced to finish. Separately, `CANCELLED`/`ERROR` can
+   be recorded before a run ever reached `RUNNING` (`startedAt` is `null` then, a real case `Run`'s
+   own compact constructor permits), so a naive `Duration.between(startedAt, finishedAt)` at an
+   arbitrary call site would NPE. Fixed by centralizing every lifecycle metric in
+   `RunLifecycleCoordinator`'s own `queue`/`markRunning`/`finishIfLive` - the one real chokepoint
+   that already captures `Optional<CommittedRunChange>` before deciding whether to emit an event;
+   metrics are recorded from that same `Optional`, never a separately re-derived boolean. Added
+   `runner.runs.submitted` (recorded unconditionally in `queue`, since it never contends) alongside
+   `started`/`finished`/`duration`, since `finished` can legitimately exceed `started` for a run
+   cancelled before ever launching. Proven with genuine concurrency, not sequential calls -
+   `RunLifecycleCoordinatorTest#concurrentFinishAttemptsNeverProduceMoreThanOneRunFinished` (16
+   racing threads) now also asserts the `finished` counter and `duration` timer each moved exactly
+   once, summed across whichever status tag happened to win.
+2. **[P1] A metrics-code error must never change a run's outcome** - `RunnerMetrics` is
+   deliberately best-effort: every `record*` method's actual Micrometer interaction is wrapped in
+   its own try/catch, logged and swallowed, never propagated into lifecycle code. Proven directly
+   (`RunnerMetricsTest#aBrokenRegistryNeverThrowsOutOfAnyRecordCall`) against a `MeterRegistry` mock
+   whose every method throws.
+3. **[P2] Retention metrics were missing the manual sweep and the whole-sweep-failure case** - the
+   first draft recorded metrics only in `RetentionScheduler`, so `POST /api/v1/retention/run`'s
+   identical real sweep would have been completely invisible, and a whole-sweep exception (before
+   any `RetentionReport` could even be built) would have recorded nothing at all. Fixed by
+   instrumenting inside `RetentionService#sweep(false)` itself - the one place both callers
+   converge - wrapping the real-sweep execution in try/catch: success records
+   `runs_deleted`/`bytes_freed`/`item_failures` from the report, a whole-sweep exception increments
+   a separate `sweep_failures` counter and rethrows unchanged, and both the dry-run and
+   lock-contention-skipped branches return before reaching any of it - proven live against a real
+   Postgres (`RetentionServiceTest`, extended): a dry-run preview records nothing, a real sweep
+   records `runs_deleted=1`.
+4. **[P2] The sampler needed defined startup, failure, and scheduling behavior** - `DiskMetricsSampler`
+   runs on its own dedicated single-thread scheduler (never `RetentionScheduler`'s), uses
+   `scheduleWithFixedDelay` (never overlapping), takes its first sample immediately
+   (`initialDelay = 0` - confirmed live below), samples `runnerDataBytes()`/`databaseBytes()`
+   independently so one Postgres hiccup can never block the other refreshing, and its own scheduled
+   task catches `Throwable` as a final backstop - `ScheduledExecutorService` silently cancels all
+   future executions of a periodic task the moment one throws, which would otherwise make one bad
+   sample the last one ever taken. A failed sample leaves the previous cached value in place and
+   increments `runner.metrics.sampler.failures{source}`; paired `*_age_seconds` gauges make
+   staleness visible rather than letting a stale value look permanently fresh. The live
+   `runner.disk.free_bytes` gauge reads `DiskUsageService.snapshot()` fresh on every scrape and
+   returns `NaN` (never propagates the exception into a scrape) when the probe itself fails.
+5. **[P2] String parameters didn't lock cardinality** - `recordDiskRejection`/`recordSseRejection`
+   now take dedicated enums (`DiskRejectionPhase`, `SseRejectionReason`, `SampleSource`), never a
+   free-form `String` - a future caller physically cannot pass a `runId`, an IP, or an exception
+   message as a tag. `recordRunFinished` validates its status is terminal before recording.
+
+Minor fixes also applied: `runner.executor.active`/`runner.executor.queued` (not `runner.runs.*` -
+they reflect the single-worker executor's own state, which includes `STARTING`/cleanup, not only
+`RUNNING`-status runs); the Prometheus dependency is `runtimeOnly` (production code only references
+the neutral `MeterRegistry` interface); the not-rate-limited test overrides
+`runner.public-read-rate-limit` down to 2/min for 4 requests rather than a 121-request burst against
+the real default (its own dedicated context - `PrometheusEndpointIsNotRateLimitedTest` - so it never
+conflicts with `OAuth2ChainAppliesAbuseRateLimitTest`'s own real-120/min assertion in the same
+class); counters are documented as process-lifetime values, reset on every restart (`RunnerMetrics`'s
+own class Javadoc) - a real Prometheus server (not deployed yet - D5) is what retains history.
+
+### Live verification against a real running system
+
+Real `bootRun` + real local Postgres, no authenticated run submitted (out of scope for a quick
+spot-check - covered instead by `RunLifecycleCoordinatorTest`'s real concurrent-race proof and
+`RunnerMetricsTest`'s full unit coverage of every `record*` method). Confirmed via
+`curl /actuator/prometheus` immediately at startup:
+
+- `runner_executor_active`/`runner_executor_queued`/`runner_sse_connections_active` all present at
+  `0.0` - gauges register correctly with no traffic yet.
+- `runner_disk_free_bytes`, `runner_disk_runner_data_bytes`, `runner_disk_database_bytes` all
+  present with real, non-zero values (`~181 GB` free, `~648 MB` runner data, `~7.99 MB` database) -
+  and their paired `*_age_seconds` gauges were already non-null moments after startup, proving the
+  sampler's first sample really does run immediately rather than waiting the configured 60s
+  interval.
+- `runner_retention_runs_deleted_total`/`runner_retention_bytes_freed_total` present at `0.0` -
+  `RetentionScheduler`'s own `initialDelay=0` startup tick (D4.1) already ran a real sweep against
+  the empty fresh database and recorded it, proving the retention-metrics wiring fires on the
+  scheduled path too, not only the manual-trigger path already proven in `RetentionServiceTest`.
+- Re-checked ~20s later: `runner_disk_runner_data_bytes_age_seconds`/
+  `runner_disk_database_bytes_age_seconds` had grown to `44.0`, then reset to `10.0` moments after
+  the 60s interval elapsed and the next real sample fired - the fixed-delay scheduling and
+  age-tracking both behave exactly as designed under a real running system, not just a mocked test.
+
+### Gates
+
+`fullBackendGate` (spotless + every module's `test` + `:runner-service:databaseIntegrationTest`,
+including the real-Postgres `RetentionServiceTest` extensions) green. No frontend changes this
+phase - metrics are a backend-only, ops-facing surface - so `dashboardE2eTest` was not re-run.
+
+## Faza D4.3.3 - structured logging and correlation
+
+**Date:** 2026-09-08. **Scope:** a validated, echoed `X-Request-ID` per HTTP request; MDC-based
+`requestId`/`runId` correlation, with `runId` explicitly propagated across every per-run background
+thread boundary (MDC is thread-local and does not cross threads on its own); a real HTTP access-log
+line (`method`/route template/`status`/`durationMs`) with correct *exactly-once* semantics across
+the synchronous, SSE/async, and exception paths; Elastic Common Schema (ECS) JSON output in the
+real (PORTFOLIO) deployment via Spring Boot 4.1.1's own native structured-logging support; and
+bounded Docker stdout log growth in Compose.
+
+**Locked decision (this session):** ECS via Spring Boot 4.1.1's native structured logging
+(`logging.structured.format.console=ecs` + `logging.structured.ecs.service.*`), scoped only to the
+real deployment via the Dockerfile's own `ENV` lines - never a new Spring profile, never a
+third-party encoder (`logstash-logback-encoder`) or a custom `StructuredLogFormatter`. ECS
+automatically folds in MDC entries and SLF4J fluent-API key-value pairs with no extra wiring.
+
+### Review round - 3 P1 + 4 P2, all fixed before any code was written
+
+1. **[P1] Access-log must correctly handle async SSE** - `chain.doFilter()` returns the instant
+   async processing starts (`RunEventStreamController`'s `SseEmitter`), while the real connection
+   stays open, often for minutes; logging immediately there would report a near-zero duration for a
+   still-live connection. Fixed with a `jakarta.servlet.AsyncListener` registered only when
+   `request.isAsyncStarted()`, logging from `onComplete`/`onError`/`onTimeout` - all three handled,
+   guarded by a single `AtomicBoolean` compare-and-set shared with the synchronous path, since both
+   `onComplete` and `onError` can fire for the same request. The listener's callback may run on a
+   different thread than the original request thread, so it re-establishes `MDC.put("requestId",
+   ...)` for the duration of that one log call rather than assuming the original filter's MDC
+   context is still active there.
+2. **[P1] Access-log must not be skipped when the filter chain throws** - the logging call lives in
+   `doFilterInternal`'s own `finally` block, not a separate `catch`+rethrow, so the original
+   exception always re-propagates unchanged and the line is written exactly once regardless. At that
+   point the container's own eventual error handling has not run yet, so the status is best-effort
+   (`response.isCommitted() ? response.getStatus() : 500`), marked with an explicit
+   `outcome=exception` field so a reader is never misled into thinking it was directly observed.
+3. **[P1] Wrapping only `RunService`'s worker task is insufficient** - three distinct per-run
+   background threads exist, not one: `RunService`'s single-worker executor task,
+   `GradleProcessRunner`'s own output-drainer thread, and `ListenerEventIngestor`'s own dedicated
+   executor (plus the synchronous HTTP-thread cancel path, which previously embedded `runId` only in
+   text). Fixed with a small reusable helper, `MdcScope.withMdc(key, value, action)`, which restores
+   whatever value the key held before (not a blind `remove`) once `action` completes - applied at
+   all four boundaries. Paired with commit-aware lifecycle log lines (`Run queued`/`Run
+   started`/`Run finished`) emitted only from `RunLifecycleCoordinator`'s already-gated
+   `Optional<CommittedRunChange>` (mirroring D4.3.2's own metrics design exactly), so "every run
+   produces at least one real, known log event" is a guarantee, never an assumption a test could
+   pass against vacuously.
+4. **[P2] `durationMs` must use a monotonic clock** - `System.nanoTime()`, never
+   `Duration.between(Instant.now(), Instant.now())`, which a system clock/NTP adjustment mid-request
+   could otherwise turn negative or nonsensical.
+5. **[P2] Successful health-probe requests must not dominate logs** - a real Docker healthcheck
+   polls `/actuator/health/liveness`/`readiness` every 10s (D4.3.1); a successful (2xx) response on
+   either logs at `DEBUG` instead of `INFO`, while a failing probe response (a real signal) and every
+   other route still log at `INFO`.
+6. **[P2] A genuine adversarial secret-leakage test, not just a source-grep** -
+   `RequestLoggingFilterSecretLeakageTest` boots the real Spring context and sends a real request
+   carrying sentinel values in `Authorization`, `Cookie`, an OAuth `code`/`state` query parameter,
+   and the request body, then asserts none of them appear in the captured access-log event.
+7. **[P2] Precision on Docker ARG/ENV/build-args semantics** - `ARG APP_VERSION=unknown` declared
+   after `FROM` and immediately before the `ENV` line referencing it (an `ARG` before `FROM` is only
+   visible to `FROM` itself); `docker-compose.yml`'s `runner-service` service gets a matching
+   `build.args.APP_VERSION` so a real build can pass a real version; documented explicitly that a
+   *runtime* `environment:` override cannot retroactively change a value already baked in at build
+   time via `ARG`/`ENV` substitution.
+
+### A real bug the live acceptance pass caught that the unit tests missed
+
+The first implementation's `isSuccessfulHealthProbe` matched the resolved route *template*
+(`HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE`) against the literal
+`/actuator/health/liveness`/`/readiness` strings. `RequestLoggingFilterTest`'s own mock request set
+both the request URI and that attribute to the identical literal path, so it passed - but a real
+Spring Boot actuator `WebMvcEndpointHandlerMapping` resolves that attribute to the coarse
+`/actuator/health/**` wildcard for every health sub-path, which is never in `HEALTH_PROBE_ROUTES`.
+Confirmed live: hitting `/actuator/health/liveness` and `/readiness` against a real `bootRun`
+produced two `HTTP request completed` lines at `INFO`, not the expected silent `DEBUG` suppression.
+Fixed by matching against `request.getRequestURI()` (the literal path) instead of the route
+template, and the test rewritten to set the two attributes to genuinely different values -
+mirroring the real mismatch - so this exact regression cannot silently reappear. Re-verified live
+after the fix: both probes produced no visible line at the default `INFO` root level, while
+`/api/v1/capabilities` still logged normally.
+
+### Live verification against a real running system
+
+Real `bootRun` + real local Postgres (`localPostgresUp`), first with no ECS env vars set (plain,
+human-readable console output confirmed unaffected), then with
+`LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` + the three `LOGGING_STRUCTURED_ECS_SERVICE_*` vars set:
+
+- Real ECS JSON on stdout, `service.name`/`service.version`/`service.environment` present on every
+  line, `ecs.version` field present.
+- A request with `X-Request-ID: acceptance-test-req-id-001` echoed that exact value back in both the
+  response header and the corresponding real `HTTP request completed` log line; a request with no
+  header got a freshly generated UUID, likewise identical between header and log line.
+- The health-probe DEBUG-vs-INFO bug above was found and fixed during this same pass (see previous
+  section).
+- Adversarial secret-leakage check repeated against real stdout (not just the unit-test capture):
+  sent sentinel values in `Authorization`, `Cookie`, an OAuth `code`/`state` query parameter, and the
+  request body to the real `/api/v1/auth/oauth2/callback/github` endpoint - none of the five
+  sentinels appeared anywhere in the real log output, while the real access-log line for that exact
+  request (`status=403`, blocked by CSRF) was confirmed present.
+- Submitting a real authenticated run was out of scope for this spot-check (anonymous requests are
+  rejected with 403 "authenticated, but do not have permission" - the same admin-gating boundary
+  D4.3.2's own live-verification section already deferred for the identical reason) - `runId`
+  MDC-propagation across `RunService`'s worker thread, `GradleProcessRunner`'s drainer thread, and
+  `ListenerEventIngestor`'s own executor is instead covered by real thread-boundary tests added this
+  phase (`RunServiceTest`'s two new tests, `GradleProcessRunnerTest`'s
+  `theOutputDrainerThreadCarriesTheRealRunIdInItsOwnMdc`,
+  `ListenerEventIngestorTest`'s `theIngestorsOwnThreadCarriesTheRealRunIdInItsOwnMdc`).
+
+**Docker log-rotation acceptance** - a real `docker compose -f deploy/docker-compose.yml --env-file
+deploy/.env up --build` brought up all three containers; `docker inspect` on each confirmed the real
+applied `HostConfig.LogConfig`:
+`{"Type":"json-file","Config":{"compress":"true","max-file":"3","max-size":"10m"}}` on `web`,
+`runner-service`, and `postgres` alike - not just trusted from the Compose YAML. Separately rebuilt
+`runner-service` with `APP_VERSION=2.5.7-acceptance` passed as a real build arg and confirmed the
+real container's stdout carried `"service":{"version":"2.5.7-acceptance",...}` - the ARG/ENV
+build-time substitution genuinely bakes a real version, not just a hardcoded default. Stack torn
+down afterward (`docker compose down`, no `-v` - volumes preserved).
+
+### Review round - 5 findings on the shipped code, all fixed and reverified
+
+A review of the actual shipped `RequestLoggingFilter`/`MdcScope`/background-job code (not the plan)
+found real gaps the live acceptance pass above had not exercised:
+
+1. **[P1] The async cycle can complete between `isAsyncStarted()` and listener registration** (a
+   real race, most realistic for a fast terminal SSE replay) - `getAsyncContext()`/`addListener`
+   then throw `IllegalStateException`, which previously escaped the filter and would have turned a
+   best-effort observability failure into a real request-processing error. Fixed: caught and
+   converted into an immediate best-effort log instead. New test:
+   `anAsyncContextThatAlreadyCompletedBeforeListenerRegistrationStillLogsOnceAndNeverThrows`.
+2. **[P1] A further `startAsync()` restarts the cycle without keeping the listener registered** -
+   the container does not carry a previously-registered `AsyncListener` over to a new async cycle
+   on the same request; a second `startAsync()` would have finished with zero access-log lines at
+   all. Fixed: `onStartAsync` re-registers itself on the new `AsyncContext`. New test:
+   `onStartAsyncReRegistersItselfSoASecondAsyncCycleStillLogsExactlyOnce`.
+3. **[P2] `onComplete`/`onTimeout`/`onError` all logged the same way** - a timed-out or errored SSE
+   connection could read as an ordinary successful completion, often even with a stale `200`. Fixed
+   with a bounded `Outcome` enum (`COMPLETED`/`TIMEOUT`/`ERROR`/`EXCEPTION`), always emitted as a
+   structured field; a non-`COMPLETED` outcome's status is best-effort
+   (`isCommitted() ? getStatus() : 500`), never the real-but-stale value. New tests:
+   `anAsyncTimeoutLogsAsTimeoutNeverAsAnOrdinaryCompletion`,
+   `anAsyncErrorLogsAsErrorNeverAsAnOrdinaryCompletion`.
+4. **[P2] The filter blindly `MDC.remove`d instead of restoring** - a thread that already carried a
+   `requestId` from some outer scope would have that value erased, not restored. Fixed with a new
+   `MdcScope.Handle`/`MdcScope.open()` (a checked-exception-free `AutoCloseable`), used via
+   try-with-resources at both the filter's own outer scope and `logAccessLineOnce`'s independent
+   inner scope. New tests: `restoresTheOuterRequestIdInMdcRatherThanBlindlyClearingIt`,
+   `theAsyncCallbacksOwnLoggingRestoresWhateverRequestIdThatThreadAlreadyHadToo`.
+5. **[P2] `runId` correlation was incomplete for two background jobs** -
+   `ArtifactIngestionService`'s periodic reconciliation pass and `RetentionService`'s per-run sweep
+   errors only interpolated `runId` into the log message text, never as a real structured/ECS
+   field, and the reconciliation pass's own background thread never had `runId` in MDC at all.
+   Fixed: both wrapped in `MdcScope.withMdc`, both failure logs converted to
+   `log.atWarn()/atError().addKeyValue("runId", runId)`.
+
+**[P3, also addressed]**: `RunService`/`ListenerEventIngestor` each carried a test-only mutable
+field (`testObservedRunIdInMdc`) whose sole purpose was letting a test read internal production
+state. Removed from both; the same correlation is now proven through real collaborators already
+invoked on the thread that matters - `FakeProcessLauncher.start()` and `RecordingRunEventAppender
+.append()` (both already test doubles) capture `MDC.get("runId")` at the exact point production
+code already calls them. `GradleProcessRunner`'s own `afterDrainerThreadMdcEstablished()` test seam
+was deliberately left as-is - a stateless protected-method-override hook mirroring this codebase's
+established `RunEventHub` precedent, not a mutable-state leak.
+
+All reverified together: `spotlessCheck`/`fullBackendGate` green, including the 7 new/rewritten
+tests in `RequestLoggingFilterTest` (13 total) plus the updated `ListenerEventIngestorTest`/
+`RunServiceTest` assertions.
+
+### Gates
+
+`fullBackendGate` and `dashboardE2eTest` both green (no frontend changes this phase).
+
+## Faza D4.3.4 - consolidated acceptance (the Definition of Done for all of D4.3)
+
+**Date:** 2026-09-08. **Scope:** one holistic live-verification pass tying together D4.3.1
+(health/readiness), D4.3.2 (metrics), and D4.3.3 (structured logging) against the real production
+Compose topology (`web`/Caddy → `runner-service` → `postgres`), closing every item the plan's own
+Definition-of-Done checklist named - including two items D4.3.1/D4.3.2's own docs explicitly
+deferred here ("Caddy's fail-closed actuator matrix against a live Compose stack" and "a real
+`docker compose up` pass... transition `starting` -> `healthy`"), plus one genuine gap found while
+auditing prior coverage (see below).
+
+### A genuine gap found while auditing what was already proven, closed with a new test
+
+Auditing D4.3.1-D4.3.3's own prior live-verification sections before repeating any of them found
+one real, previously-flagged-but-waived gap: `RunnerAvailabilityHealthIndicator`'s exact status
+mapping was proven at the unit level (`RunnerAvailabilityHealthIndicatorTest`, a mocked
+`RunService`) and its registered readiness-group membership separately
+(`HealthEndpointGroupMembershipTest`), but nothing had ever driven a real `RunService.isDegraded()
+== true` state through to a real, live `/actuator/health/readiness` HTTP response - D4.3.1's own
+live-verification round judged forcing an actual process-kill failure live "hard to safely
+reproduce" and explicitly waived it at the time.
+
+Closed with a new test, `RunnerAvailabilityDegradedReadinessEndToEndTest` (`@SpringBootTest`,
+`WebEnvironment.RANDOM_PORT`, mocking `RunService` directly - the same established pattern
+`HealthEndpointGroupMembershipTest` already uses for `DiskUsageService`): asserts the
+`runnerAvailability` *component's own* status within the readiness response (via
+`show-components=always`), never the top-level aggregate - this context has no real reachable
+Postgres, so the real (unmocked) `db` contributor genuinely reports `DOWN` and would dominate the
+aggregate regardless of `runnerAvailability`'s own status. Proves: `isDegraded()==true` ->
+`runnerAvailability` component reports `OUT_OF_SERVICE`, liveness's own aggregate stays `UP`
+(never a reason to restart the JVM); `isDegraded()==false` -> `runnerAvailability` reports `UP`.
+
+### Live verification against the real Compose stack
+
+Real `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml --env-file
+deploy/.env up --build` (the debug overlay adds loopback-only direct access to `runner-service`,
+bypassing Caddy, for the Prometheus check below - never used in a real deployment):
+
+- **`starting` -> `healthy` transition, with a real timestamped transcript**: container started at
+  `15:06:44.883`; Docker's own first healthcheck attempt ran at `15:06:50.069` (5.2s in, well
+  within the configured 30s `start_period`) and returned `{"status":"UP"}` with exit code `0` ->
+  `docker inspect`'s `.State.Health.Status` immediately read `healthy`. Not just "eventually
+  healthy" - the real Log array with Start/End/ExitCode/Output confirms the actual mechanics.
+- **Caddy's fail-closed actuator matrix, live-curled through the real published port** (not just
+  read from the Caddyfile): `/actuator/health`, `/actuator/health/liveness`,
+  `/actuator/health/readiness` all `200`; `/actuator/prometheus`, `/actuator/env`,
+  `/actuator/configprops`, `/actuator/beans`, and even a bogus `/actuator/health/bogus` sub-path
+  all `404` - the `@actuatorOther` fail-closed matcher works exactly as designed, and a typo'd
+  health sub-path is refused rather than silently falling through to the SPA's own `index.html`.
+- **`requestId` in both the response header and the real ECS log line, through the real stack**: a
+  request with `X-Request-ID: d434-consolidated-check-2` against `/api/v1/capabilities` (through
+  Caddy) echoed that exact value in the response header, and the identical value appeared in the
+  real ECS JSON log line on `runner-service`'s own stdout (`"requestId":"d434-consolidated-check-2"
+  ,"method":"GET","route":"/api/v1/capabilities","status":200,"outcome":"completed"`). A parallel
+  check against `/actuator/health/readiness` produced no log line at all - correctly quiet, D4.3.3's
+  own DEBUG-level health-probe suppression, not a regression.
+- **A real Prometheus scrape, through the debug port, never through Caddy**: `runner_disk_*`,
+  `runner_executor_*`, `runner_sse_connections_active`, `runner_retention_*` all present with real
+  values; confirmed the identical path returns `404` through the public Caddy port, consistent with
+  D4.3.2's own locked decision (reachable only inside the Compose network / via the debug overlay,
+  never publicly).
+- **Postgres stopped -> readiness `503`/`DOWN`, liveness stays `200`/`UP`, through the real
+  Caddy-fronted stack** (not just direct `bootRun`, as D4.3.1's own live check used): `docker stop
+  deploy-postgres-1` -> readiness `503 {"status":"DOWN"}`, liveness stayed `200 {"status":"UP"}`;
+  `docker start deploy-postgres-1` -> readiness self-recovered to `200` within a few seconds with
+  no `runner-service` restart at all.
+- **Log-rotation config re-confirmed** on all three containers in this same pass:
+  `{"Type":"json-file","Config":{"compress":"true","max-file":"3","max-size":"10m"}}`.
+
+Stack torn down afterward (`docker compose down`, no `-v` - volumes preserved).
+
+### Gates
+
+`fullBackendGate` and `dashboardE2eTest` both green.
+
+**D4.3 (D4.3.1-D4.3.4: health/readiness, metrics, structured logging, consolidated acceptance) is
+now fully closed.**

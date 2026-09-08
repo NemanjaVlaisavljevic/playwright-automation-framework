@@ -22,6 +22,28 @@ services:
       dockerfile: deploy/web/Dockerfile
     networks:
       - edge
+    # D4.3.3 - bounds this container's own stdout log growth, currently entirely outside
+    # DiskUsageService's own accounting. `docker inspect` on a real container is the acceptance
+    # check for this, not just trusting this YAML - see docs/RELEASE_EVIDENCE.md's own D4.3.3
+    # section.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    # D4.3.1 - deliberately a plain dependency, not `condition: service_healthy`. runner-service's
+    # own readiness (see its healthcheck below) folds in D4.2's disk-low guard, D2.5's startup
+    # recovery, and a DEGRADED/unkillable-process state - all self-resolving conditions, none fixed
+    # by anything Caddy could do. Gating Caddy's own startup on that readiness would mean, e.g., a
+    # host reboot while disk happens to already be low leaves the entire static dashboard
+    # unreachable - including its own already-proven "backend unavailable" UI and automatic
+    # recovery once the backend comes back (see BackendUnavailableE2eTest, which exists
+    # specifically to prove the dashboard handles a down/unreachable backend gracefully - gating
+    # Caddy's startup on backend health would silently contradict that already-shipped guarantee,
+    # not extend it). Caddy starts regardless of runner-service's health; the API returns a real
+    # 502 until the backend is actually reachable, which the dashboard already knows how to surface
+    # and recover from on its own.
     depends_on:
       - runner-service
     # SITE_ADDRESS names the real domain once one exists (e.g. "example.com") - Caddy then
@@ -59,9 +81,21 @@ services:
     build:
       context: ..
       dockerfile: deploy/runner-service/Dockerfile
+      # D4.3.3 - passed through to the Dockerfile's own ARG APP_VERSION (default "unknown" if
+      # unset here too) - baked into the image at build time via ARG/ENV substitution, becoming
+      # the ECS service.version field on every log line. A *runtime* environment override could
+      # never retroactively change this; only rebuilding with a different build arg can.
+      args:
+        APP_VERSION: ${APP_VERSION:-unknown}
     networks:
       - edge
       - data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
     # Docker's own minimal init (tini) becomes PID 1 instead of java - forwards signals through
     # (docker stop/compose restart still reach the JVM, see the Dockerfile's own CMD comment) and,
     # more importantly here, reaps any orphaned grandchild process (a Gradle --no-daemon build, a
@@ -118,12 +152,33 @@ services:
       - SERVER_SERVLET_SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-true}
     volumes:
       - runner-data:/data
+    # D4.3.1 - a real operational/monitoring signal (and this service's own readiness contract),
+    # not a restart trigger: `restart: unless-stopped` reacts only to the container's own process
+    # *exiting*, never to health status alone - an unhealthy-but-alive runner-service (e.g. disk
+    # still low, or Postgres still unreachable) is never auto-restarted by Compose on account of
+    # this healthcheck by itself. `--max-time 4` bounds curl's own wait below the outer `timeout:
+    # 5s` below it, so the probe fails on its own terms rather than being killed mid-request - see
+    # application.yml's own spring.datasource.hikari comment for why the `db` health indicator
+    # this readiness endpoint calls into is itself bounded well under that same 4s.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "4",
+             "http://127.0.0.1:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   postgres:
     image: postgres:17-alpine
     networks:
       - data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-runner}
       - POSTGRES_USER=${POSTGRES_USER:-runner}

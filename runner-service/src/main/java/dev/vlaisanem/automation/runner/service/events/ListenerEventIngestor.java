@@ -2,6 +2,7 @@ package dev.vlaisanem.automation.runner.service.events;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
+import dev.vlaisanem.automation.runner.service.logging.MdcScope;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
@@ -130,7 +131,11 @@ public final class ListenerEventIngestor {
               thread.setDaemon(true);
               return thread;
             });
-    this.future = executor.submit(this::runLoop);
+    // D4.3.3 - this executor's own worker thread is distinct from whatever thread called this
+    // constructor (RunService's own single-worker executor), so MDC does not carry runId onto it
+    // automatically - explicit here, the same way every other per-run background thread in this
+    // service is.
+    this.future = executor.submit(() -> MdcScope.withMdc("runId", runId, this::runLoop));
   }
 
   /**

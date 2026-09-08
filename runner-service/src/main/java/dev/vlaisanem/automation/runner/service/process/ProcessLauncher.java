@@ -15,9 +15,20 @@ public interface ProcessLauncher {
 
   /**
    * {@code environment} entries are added on top of the launched process's inherited environment.
+   *
+   * @param runId D4.3.3 - never added to {@code environment} itself (that map is for the spawned
+   *     Gradle/test-JVM process's own consumption, e.g. by {@code RunnerEventWriterRegistry} inside
+   *     the forked JUnit worker - mixing in an internal, launcher-side-only concern like this would
+   *     be a real layering violation). Used only so an implementation can correlate its own
+   *     process-lifetime background work (e.g. an output-drainer thread) with the run it belongs to
+   *     in its own logs.
    */
   Process start(
-      List<String> command, Path workingDirectory, Path outputFile, Map<String, String> environment)
+      String runId,
+      List<String> command,
+      Path workingDirectory,
+      Path outputFile,
+      Map<String, String> environment)
       throws IOException;
 
   ProcessOutcome awaitCompletion(Process process, Duration timeout);

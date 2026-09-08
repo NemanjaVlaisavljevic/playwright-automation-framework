@@ -3,6 +3,9 @@ package dev.vlaisanem.automation.runner.service.events;
 import dev.vlaisanem.automation.runner.contract.EventType;
 import dev.vlaisanem.automation.runner.contract.RunnerEvent;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -85,6 +88,7 @@ class RunEventHub {
   private static final int LIVE_QUEUE_CAPACITY = 256;
 
   private final int maxSubscribers;
+  private final RunnerMetrics metrics;
   private final Map<String, List<Subscription>> subscribersByRun = new ConcurrentHashMap<>();
   private final Set<Subscription> allSubscriptions = ConcurrentHashMap.newKeySet();
   private final AtomicInteger subscriberCount = new AtomicInteger();
@@ -98,8 +102,11 @@ class RunEventHub {
             return thread;
           });
 
-  RunEventHub(int maxSubscribers) {
+  RunEventHub(int maxSubscribers, RunnerMetrics metrics, MeterRegistry meterRegistry) {
     this.maxSubscribers = maxSubscribers;
+    this.metrics = metrics;
+    Gauge.builder("runner.sse.connections.active", subscriberCount, AtomicInteger::get)
+        .register(meterRegistry);
   }
 
   /**
@@ -119,6 +126,7 @@ class RunEventHub {
       }
       if (subscriberCount.incrementAndGet() > maxSubscribers) {
         subscriberCount.decrementAndGet();
+        metrics.recordSseRejection(RunnerMetrics.SseRejectionReason.GLOBAL_CAP);
         throw new RunEventSubscriptionRejectedException(
             "Maximum of " + maxSubscribers + " concurrent event subscribers reached");
       }

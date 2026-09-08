@@ -21,6 +21,7 @@ import dev.vlaisanem.automation.runner.service.events.SseConnectionsPerIpTracker
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
 import java.time.Instant;
@@ -58,6 +59,10 @@ class RunEventStreamControllerTest {
   // D2.5 - requireRecoveryComplete() is a no-op on a plain Mockito mock (void method, nothing
   // stubbed), so every test here proceeds exactly as it did before this dependency existed.
   @MockitoBean private RunRecoveryService recoveryService;
+
+  // D4.3.2 - recordSseRejection is void, so an unstubbed mock here is a safe no-op for every
+  // existing test, exactly like recoveryService above.
+  @MockitoBean private RunnerMetrics metrics;
 
   @Test
   void streamReturns404ForAnUnknownRunId() throws Exception {

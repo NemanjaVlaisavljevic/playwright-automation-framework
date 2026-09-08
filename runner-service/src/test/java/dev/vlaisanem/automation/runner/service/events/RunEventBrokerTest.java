@@ -19,9 +19,11 @@ import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.CommittedRunChange;
 import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -50,6 +52,8 @@ import org.junit.jupiter.api.Test;
 class RunEventBrokerTest {
 
   private static final Instant NOW = Instant.parse("2026-08-31T12:00:00Z");
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+  private final RunnerMetrics metrics = new RunnerMetrics(meterRegistry);
 
   @Test
   void appendPublishesToAnAlreadyRegisteredLiveSubscriber() throws Exception {
@@ -315,7 +319,12 @@ class RunEventBrokerTest {
   void appendDoesNotPublishATestFailedEventUntilArtifactIngestionCompletes() throws Exception {
     BlockingArtifactIngestionService blockingIngestion = new BlockingArtifactIngestionService();
     RunEventBroker broker =
-        new RunEventBroker(new FakeRunLifecycleStore(), testProperties(), blockingIngestion);
+        new RunEventBroker(
+            new FakeRunLifecycleStore(),
+            testProperties(),
+            blockingIngestion,
+            metrics,
+            meterRegistry);
     queue(broker, "run-1");
     startRunning(broker, "run-1");
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
@@ -358,7 +367,8 @@ class RunEventBrokerTest {
   }
 
   private RunEventBroker newBroker(RunLifecycleStore store) {
-    return new RunEventBroker(store, testProperties(), noopArtifactIngestionService());
+    return new RunEventBroker(
+        store, testProperties(), noopArtifactIngestionService(), metrics, meterRegistry);
   }
 
   /**
@@ -450,7 +460,8 @@ class RunEventBrokerTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        new RateLimitRule(10, Duration.ofHours(1)));
+        new RateLimitRule(10, Duration.ofHours(1)),
+        Duration.ofSeconds(60));
   }
 
   /**

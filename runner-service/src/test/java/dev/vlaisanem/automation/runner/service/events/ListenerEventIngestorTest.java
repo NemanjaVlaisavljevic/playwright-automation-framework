@@ -61,6 +61,29 @@ class ListenerEventIngestorTest {
   }
 
   /**
+   * D4.3.3 review finding - this ingestor's own background thread is distinct from whichever one
+   * constructed it, so MDC does not carry {@code runId} onto it automatically. Proven through the
+   * real collaborator this thread already invokes for every forwarded event ({@link
+   * RunEventAppender#append}) rather than a test-only field on the production class itself: {@code
+   * RecordingRunEventAppender} (already a test double) captures {@code MDC.get("runId")} at the
+   * exact point its own {@code append} is called.
+   */
+  @Test
+  void theIngestorsOwnThreadCarriesTheRealRunIdInItsOwnMdc(@TempDir Path dir) throws IOException {
+    String runId = "run-carrying-mdc";
+    Path dataFile = dir.resolve(runId + ".tests.jsonl");
+    Path marker = dir.resolve(runId + ".tests.complete");
+    writeLines(dataFile, RunnerEvent.testStarted(runId, 1, NOW, "t1", "test one"));
+    Files.createFile(marker);
+    RecordingRunEventAppender appender = new RecordingRunEventAppender();
+
+    ListenerEventIngestor ingestor = newIngestor(runId, dataFile, marker, appender);
+    ingestor.stopAndAwaitFinished(DRAIN_TIMEOUT);
+
+    assertThat(appender.lastAppendMdcRunId()).isEqualTo(runId);
+  }
+
+  /**
    * Proves event-vocabulary coexistence at the ingestion boundary (Faza B): every event below
    * carries the same {@code schemaVersion} - a run mixing an ordinary test (no steps) with one that
    * used the {@code Steps} API (interleaved {@code STEP_*} events) must ingest both patterns side

@@ -3,6 +3,7 @@ package dev.vlaisanem.automation.runner.service.orchestration;
 import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -83,11 +84,14 @@ public class RunRecoveryService implements ApplicationRunner {
 
   private final RunLifecycleStore store;
   private final RunLifecycleCoordinator lifecycle;
+  private final RunnerMetrics metrics;
   private final AtomicBoolean recoveryComplete = new AtomicBoolean(false);
 
-  public RunRecoveryService(RunLifecycleStore store, RunLifecycleCoordinator lifecycle) {
+  public RunRecoveryService(
+      RunLifecycleStore store, RunLifecycleCoordinator lifecycle, RunnerMetrics metrics) {
     this.store = store;
     this.lifecycle = lifecycle;
+    this.metrics = metrics;
   }
 
   @Override
@@ -124,6 +128,7 @@ public class RunRecoveryService implements ApplicationRunner {
     int recoveredCount = nonTerminalRuns.size() - failures.size();
     if (recoveredCount > 0) {
       log.info("Recovered {} non-terminal run(s) to ERROR on startup", recoveredCount);
+      metrics.recordRunsRecovered(recoveredCount);
     }
     if (!failures.isEmpty()) {
       IllegalStateException aggregate =
@@ -157,8 +162,12 @@ public class RunRecoveryService implements ApplicationRunner {
     }
   }
 
-  /** Test-only visibility - package-private, not part of the public contract. */
-  boolean isRecoveryComplete() {
+  /**
+   * Non-throwing query, unlike {@link #requireRecoveryComplete()} - used by D4.3's {@code
+   * RecoveryHealthIndicator} to report a temporary, self-resolving {@code OUT_OF_SERVICE} rather
+   * than throwing, and by tests that need to observe the flag directly.
+   */
+  public boolean isRecoveryComplete() {
     return recoveryComplete.get();
   }
 }

@@ -32,12 +32,18 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
  * explicit {@code SecurityFilterChain} wiring as the only place either filter ever runs, per-chain,
  * exactly as intended.
  */
+// D4.3.1 - no longer excludes DataSourceAutoConfiguration: application.yml's readiness group now
+// unconditionally includes the `db` contributor, so a full-context test without a real DataSource
+// bean fails to start at all. Flyway stays excluded and hikari.initialization-fail-timeout=-1
+// stops HikariCP's own eager startup connection check from failing context refresh - see
+// HealthEndpointGroupMembershipTest's own Javadoc for the full reasoning.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
-    properties =
-        "spring.autoconfigure.exclude="
-            + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
-            + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration")
+    properties = {
+      "spring.autoconfigure.exclude="
+          + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration",
+      "spring.datasource.hikari.initialization-fail-timeout=-1"
+    })
 class PermissiveChainHasNoAbuseRateLimitTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;

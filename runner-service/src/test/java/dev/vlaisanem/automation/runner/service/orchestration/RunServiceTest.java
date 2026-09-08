@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -33,12 +36,14 @@ import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
 import dev.vlaisanem.automation.runner.service.exception.UnsupportedRunCombinationException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.process.ProcessLauncher;
 import dev.vlaisanem.automation.runner.service.process.ProcessOutcome;
 import dev.vlaisanem.automation.runner.service.repository.FailFirstTransitionStore;
 import dev.vlaisanem.automation.runner.service.repository.FailingRunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.FakeRunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -59,6 +64,8 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * Exercises {@link RunService}'s orchestration - state transitions, cancellation, queue capacity -
@@ -102,8 +109,8 @@ class RunServiceTest {
    * stale runs.
    */
   private static RunRecoveryService recoveryAlreadyComplete(
-      RunLifecycleStore store, RunLifecycleCoordinator lifecycle) {
-    RunRecoveryService recoveryService = new RunRecoveryService(store, lifecycle);
+      RunLifecycleStore store, RunLifecycleCoordinator lifecycle, RunnerMetrics metrics) {
+    RunRecoveryService recoveryService = new RunRecoveryService(store, lifecycle, metrics);
     recoveryService.run(null);
     return recoveryService;
   }
@@ -191,11 +198,14 @@ class RunServiceTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        aRule);
+        aRule,
+        Duration.ofSeconds(60));
   }
 
   private RunService service;
   private FakeRunLifecycleStore store;
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+  private final RunnerMetrics metrics = new RunnerMetrics(meterRegistry);
 
   @AfterEach
   void shutdown() {
@@ -222,6 +232,88 @@ class RunServiceTest {
 
     assertThat(finished.status()).isEqualTo(RunStatus.SUCCEEDED);
     assertThat(finished.exitCode()).isEqualTo(0);
+  }
+
+  /**
+   * D4.3.3 review finding - the first draft's own planned test ("every captured event has {@code
+   * runId}") could have vacuously passed against an empty capture list if {@code RunService}
+   * happened to emit no {@code INFO} line for a given run - this asserts the exact expected *count*
+   * of concrete lifecycle events first ({@code RunLifecycleCoordinator}'s own commit-gated "Run
+   * queued"/"Run started"/"Run finished" lines, D4.3.3), then that every one of them carries the
+   * real {@code runId}.
+   */
+  @Test
+  void everyRunProducesExactlyItsThreeCommitAwareLifecycleLogLinesWithTheRealRunId(
+      @TempDir Path eventsDir) throws Exception {
+    Logger coordinatorLogger = (Logger) LoggerFactory.getLogger(RunLifecycleCoordinator.class);
+    ListAppender<ILoggingEvent> logAppender = new ListAppender<>();
+    logAppender.start();
+    coordinatorLogger.addAppender(logAppender);
+    try {
+      FakeProcessLauncher launcher = new FakeProcessLauncher();
+      service = newService(launcher, eventsDir, 5);
+
+      Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
+      awaitStatus(submitted.runId(), RunStatus.RUNNING);
+      Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.jsonl"));
+      Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.complete"));
+      launcher.lastProcess().exitNow(0);
+      awaitTerminal(submitted.runId());
+
+      List<ILoggingEvent> events = logAppender.list;
+      assertThat(events)
+          .extracting(ILoggingEvent::getFormattedMessage)
+          .containsExactly("Run queued", "Run started", "Run finished");
+      for (ILoggingEvent event : events) {
+        String observedRunId = null;
+        for (var pair : event.getKeyValuePairs()) {
+          if ("runId".equals(pair.key)) {
+            observedRunId = String.valueOf(pair.value);
+          }
+        }
+        assertThat(observedRunId).as(event.getFormattedMessage()).isEqualTo(submitted.runId());
+      }
+    } finally {
+      coordinatorLogger.detachAppender(logAppender);
+    }
+  }
+
+  /**
+   * D4.3.3 review finding - proves the actual regression {@code MdcScope}'s previous-value restore
+   * exists to prevent: this executor is a bounded single-worker pool that reuses its one thread
+   * across every sequential run, so a leaked {@code runId} would otherwise bleed into the next
+   * run's own log lines the moment it starts on that same thread. Proven through the real
+   * collaborator RunService's own worker thread already invokes to launch every run ({@link
+   * ProcessLauncher#start}) rather than a test-only field on RunService itself - {@code
+   * FakeProcessLauncher} (already a test double) captures {@code MDC.get("runId")} at the exact
+   * point its own {@code start} is called.
+   */
+  @Test
+  void theReusedWorkerThreadNeverCarriesAPriorRunsRunIdIntoTheNextRun(@TempDir Path eventsDir)
+      throws Exception {
+    FakeProcessLauncher launcher = new FakeProcessLauncher();
+    service = newService(launcher, eventsDir, 5);
+
+    Run first = service.submit(Environment.PUBLIC, Suite.SMOKE);
+    awaitStatus(first.runId(), RunStatus.RUNNING);
+    Files.createFile(eventsDir.resolve(first.runId() + ".tests.jsonl"));
+    Files.createFile(eventsDir.resolve(first.runId() + ".tests.complete"));
+    launcher.lastProcess().exitNow(0);
+    awaitTerminal(first.runId());
+
+    assertThat(launcher.observedRunIdInMdcDuringStart).isEqualTo(first.runId());
+
+    Run second = service.submit(Environment.PUBLIC, Suite.API);
+    awaitStatus(second.runId(), RunStatus.RUNNING);
+    Files.createFile(eventsDir.resolve(second.runId() + ".tests.jsonl"));
+    Files.createFile(eventsDir.resolve(second.runId() + ".tests.complete"));
+    launcher.lastProcess().exitNow(0);
+    awaitTerminal(second.runId());
+
+    assertThat(launcher.observedRunIdInMdcDuringStart)
+        .as("the reused worker thread must observe the second run's own runId, never the first's")
+        .isEqualTo(second.runId())
+        .isNotEqualTo(first.runId());
   }
 
   /**
@@ -804,12 +896,14 @@ class RunServiceTest {
             2_097_152L,
             2_097_152L,
             104_857_600L,
-            new RateLimitRule(10, Duration.ofHours(1)));
+            new RateLimitRule(10, Duration.ofHours(1)),
+            Duration.ofSeconds(60));
     store = new FakeRunLifecycleStore();
     RunEventBroker broker =
-        new RunEventBroker(store, properties, noopArtifactIngestionService(properties));
+        new RunEventBroker(
+            store, properties, noopArtifactIngestionService(properties), metrics, meterRegistry);
     RunLifecycleCoordinator lifecycle =
-        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties));
+        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties), metrics);
     ListenerEventIngestorFactory blockingIngestorFactory =
         new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties) {
           @Override
@@ -823,8 +917,10 @@ class RunServiceTest {
         new RunService(
             store,
             lifecycle,
-            recoveryAlreadyComplete(store, lifecycle),
+            recoveryAlreadyComplete(store, lifecycle, metrics),
             alwaysAvailableDiskUsageService(),
+            metrics,
+            meterRegistry,
             launcher,
             blockingIngestorFactory,
             new TestCatalogService(properties, OBJECT_MAPPER),
@@ -1093,6 +1189,11 @@ class RunServiceTest {
     awaitStatus(occupying.runId(), RunStatus.RUNNING);
     service.submit(Environment.PUBLIC, Suite.API); // fills the single queue slot
 
+    // D4.3.2 review finding - runner.executor.active/queued must reflect this real
+    // one-running-one-queued state, not just be registered at 0.
+    assertThat(meterRegistry.find("runner.executor.active").gauge().value()).isEqualTo(1.0);
+    assertThat(meterRegistry.find("runner.executor.queued").gauge().value()).isEqualTo(1.0);
+
     assertThatThrownBy(() -> service.submit(Environment.PUBLIC, Suite.UI))
         .isInstanceOf(RunQueueFullException.class);
   }
@@ -1259,11 +1360,17 @@ class RunServiceTest {
             2_097_152L,
             2_097_152L,
             104_857_600L,
-            new RateLimitRule(10, Duration.ofHours(1)));
+            new RateLimitRule(10, Duration.ofHours(1)),
+            Duration.ofSeconds(60));
     RunEventBroker broker =
-        new RunEventBroker(lifecycleStore, properties, noopArtifactIngestionService(properties));
+        new RunEventBroker(
+            lifecycleStore,
+            properties,
+            noopArtifactIngestionService(properties),
+            metrics,
+            meterRegistry);
     RunLifecycleCoordinator lifecycle =
-        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties));
+        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties), metrics);
     ListenerEventIngestorFactory ingestorFactory =
         new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties);
     if (lifecycleStore instanceof FakeRunLifecycleStore fake) {
@@ -1272,8 +1379,10 @@ class RunServiceTest {
     return new RunService(
         lifecycleStore,
         lifecycle,
-        recoveryAlreadyComplete(lifecycleStore, lifecycle),
+        recoveryAlreadyComplete(lifecycleStore, lifecycle, metrics),
         diskUsageService,
+        metrics,
+        meterRegistry,
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
@@ -1331,18 +1440,26 @@ class RunServiceTest {
             2_097_152L,
             2_097_152L,
             104_857_600L,
-            new RateLimitRule(10, Duration.ofHours(1)));
+            new RateLimitRule(10, Duration.ofHours(1)),
+            Duration.ofSeconds(60));
     RunEventBroker broker =
-        new RunEventBroker(fakeStore, properties, noopArtifactIngestionService(properties));
+        new RunEventBroker(
+            fakeStore,
+            properties,
+            noopArtifactIngestionService(properties),
+            metrics,
+            meterRegistry);
     RunLifecycleCoordinator lifecycle =
-        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties));
+        new RunLifecycleCoordinator(broker, noopArtifactIngestionService(properties), metrics);
     ListenerEventIngestorFactory ingestorFactory =
         new ListenerEventIngestorFactory(broker, OBJECT_MAPPER, properties);
     return new RunService(
         fakeStore,
         lifecycle,
-        recoveryAlreadyComplete(fakeStore, lifecycle),
+        recoveryAlreadyComplete(fakeStore, lifecycle, metrics),
         alwaysAvailableDiskUsageService(),
+        metrics,
+        meterRegistry,
         launcher,
         ingestorFactory,
         new TestCatalogService(properties, OBJECT_MAPPER),
@@ -1500,14 +1617,22 @@ class RunServiceTest {
     private final CountDownLatch startEntered = new CountDownLatch(1);
     private final CountDownLatch allowProcessStart = new CountDownLatch(1);
     private final CountDownLatch awaitCompletionFinished = new CountDownLatch(1);
+    // D4.3.3 review finding - captured here rather than via a test-only field on RunService
+    // itself: this is already the real collaborator RunService's own worker thread invokes to
+    // launch every run, so observing MDC at that exact call is proof enough that runId is really
+    // set on the thread that matters, with no test-only mutable state added to any production
+    // object.
+    private volatile String observedRunIdInMdcDuringStart;
 
     @Override
     public Process start(
+        String runId,
         List<String> command,
         Path workingDirectory,
         Path outputFile,
         Map<String, String> environment)
         throws IOException {
+      observedRunIdInMdcDuringStart = MDC.get("runId");
       if (failToStart) {
         throw new IOException("simulated startup failure");
       }

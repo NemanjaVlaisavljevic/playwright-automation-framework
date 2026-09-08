@@ -2,6 +2,8 @@ package dev.vlaisanem.automation.runner.service.retention;
 
 import dev.vlaisanem.automation.runner.service.artifacts.ArtifactRepository;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import dev.vlaisanem.automation.runner.service.logging.MdcScope;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -80,6 +82,7 @@ public class RetentionService {
   private final RunLifecycleStore runStore;
   private final ArtifactRepository artifactRepository;
   private final RunnerProperties properties;
+  private final RunnerMetrics metrics;
   private final Path artifactsDir;
   private final Path logsDir;
   private final Path rawEventsDir;
@@ -93,10 +96,12 @@ public class RetentionService {
   public RetentionService(
       RunLifecycleStore runStore,
       ArtifactRepository artifactRepository,
-      RunnerProperties properties) {
+      RunnerProperties properties,
+      RunnerMetrics metrics) {
     this.runStore = runStore;
     this.artifactRepository = artifactRepository;
     this.properties = properties;
+    this.metrics = metrics;
     this.artifactsDir = Path.of(properties.artifactsDir()).toAbsolutePath().normalize();
     this.logsDir = Path.of(properties.logsDir()).toAbsolutePath().normalize();
     this.rawEventsDir = Path.of(properties.rawEventsDir()).toAbsolutePath().normalize();
@@ -127,7 +132,12 @@ public class RetentionService {
       return new RetentionReport(false, 0, 0, 0, 0, 0, 0, 0, true);
     }
     try {
-      return runRealSweep();
+      RetentionReport report = runRealSweep();
+      metrics.recordRetention(report);
+      return report;
+    } catch (RuntimeException wholeSweepFailure) {
+      metrics.recordRetentionSweepFailure();
+      throw wholeSweepFailure;
     } finally {
       sweepLock.unlock();
     }
@@ -141,13 +151,20 @@ public class RetentionService {
     long bytesFreed = 0;
     for (String runId : candidates.fullCleanupIds) {
       try {
-        long freed = cleanupRun(runId, candidates.pendingCleanup.contains(runId));
+        // D4.3.3 review finding - wrapped so any logging cleanupRun itself performs also carries
+        // runId as a real MDC field, not only the structured addKeyValue below on failure.
+        long freed =
+            MdcScope.withMdc(
+                "runId", runId, () -> cleanupRun(runId, candidates.pendingCleanup.contains(runId)));
         if (freed != CLAIM_LOST) {
           runDeleted++;
           bytesFreed += freed;
         }
       } catch (RuntimeException e) {
-        log.error("Retention: full cleanup failed for run {} - will retry next sweep", runId, e);
+        log.atError()
+            .addKeyValue("runId", runId)
+            .setCause(e)
+            .log("Retention: full cleanup failed - will retry next sweep");
         runFailed++;
       }
     }
@@ -156,13 +173,20 @@ public class RetentionService {
     int purgeFailed = 0;
     for (String runId : candidates.artifactPurgeIds) {
       try {
-        long freed = purgeArtifacts(runId, candidates.pendingPurge.contains(runId));
+        long freed =
+            MdcScope.withMdc(
+                "runId",
+                runId,
+                () -> purgeArtifacts(runId, candidates.pendingPurge.contains(runId)));
         if (freed != CLAIM_LOST) {
           purgeCompleted++;
           bytesFreed += freed;
         }
       } catch (RuntimeException e) {
-        log.error("Retention: artifact purge failed for run {} - will retry next sweep", runId, e);
+        log.atError()
+            .addKeyValue("runId", runId)
+            .setCause(e)
+            .log("Retention: artifact purge failed - will retry next sweep");
         purgeFailed++;
       }
     }

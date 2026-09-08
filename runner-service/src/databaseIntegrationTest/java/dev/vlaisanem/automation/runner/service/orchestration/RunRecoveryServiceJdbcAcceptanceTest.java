@@ -19,8 +19,10 @@ import dev.vlaisanem.automation.runner.service.domain.RunStatus;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.jdbc.JdbcRunStore;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -66,6 +68,7 @@ class RunRecoveryServiceJdbcAcceptanceTest {
 
   private static JdbcRunStore store;
   private static String jdbcUrl;
+  private static final RunnerMetrics METRICS = new RunnerMetrics(new SimpleMeterRegistry());
 
   @BeforeAll
   static void migrateAndBuildStore() {
@@ -112,7 +115,7 @@ class RunRecoveryServiceJdbcAcceptanceTest {
     coordinator.markRunning(succeededRun, NOW);
     coordinator.finishIfLive(succeededRun, RunStatus.SUCCEEDED, 0, null, NOW);
 
-    RunRecoveryService recovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(store, coordinator, METRICS);
     recovery.run(null);
 
     for (String recoveredRunId : List.of(queuedRun, startingRun, runningRun)) {
@@ -141,10 +144,10 @@ class RunRecoveryServiceJdbcAcceptanceTest {
     coordinator.markStarting(runningRun, NOW);
     coordinator.markRunning(runningRun, NOW);
 
-    new RunRecoveryService(store, coordinator).run(null);
+    new RunRecoveryService(store, coordinator, METRICS).run(null);
     int eventCountAfterFirstPass = store.readEventsAfter(runningRun, 0).size();
 
-    new RunRecoveryService(store, coordinator).run(null);
+    new RunRecoveryService(store, coordinator, METRICS).run(null);
 
     Run run = store.findById(runningRun).orElseThrow();
     assertThat(run.status()).isEqualTo(RunStatus.ERROR);
@@ -174,7 +177,7 @@ class RunRecoveryServiceJdbcAcceptanceTest {
     coordinator.queue(badRun, Environment.PUBLIC, Suite.SMOKE, NOW);
     coordinator.markStarting(badRun, NOW);
 
-    RunRecoveryService recovery = new RunRecoveryService(store, coordinator);
+    RunRecoveryService recovery = new RunRecoveryService(store, coordinator, METRICS);
     installFailingRecoveryTrigger(badRun);
     try {
       assertThatThrownBy(() -> recovery.run(null)).isInstanceOf(IllegalStateException.class);
@@ -257,8 +260,10 @@ class RunRecoveryServiceJdbcAcceptanceTest {
     RunnerProperties properties = testProperties();
     ArtifactIngestionService artifactIngestionService =
         new ArtifactIngestionService(new ObjectMapper(), new FakeArtifactRepository(), properties);
-    RunEventBroker broker = new RunEventBroker(store, properties, artifactIngestionService);
-    return new RunLifecycleCoordinator(broker, artifactIngestionService);
+    RunEventBroker broker =
+        new RunEventBroker(
+            store, properties, artifactIngestionService, METRICS, new SimpleMeterRegistry());
+    return new RunLifecycleCoordinator(broker, artifactIngestionService, METRICS);
   }
 
   private static String newRunId() {
@@ -302,6 +307,7 @@ class RunRecoveryServiceJdbcAcceptanceTest {
         2_097_152L,
         2_097_152L,
         104_857_600L,
-        new RateLimitRule(10, Duration.ofHours(1)));
+        new RateLimitRule(10, Duration.ofHours(1)),
+        Duration.ofSeconds(60));
   }
 }

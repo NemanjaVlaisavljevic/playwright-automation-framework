@@ -2,6 +2,7 @@ package dev.vlaisanem.automation.runner.service.process;
 
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.exception.ProcessTerminationException;
+import dev.vlaisanem.automation.runner.service.logging.MdcScope;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -41,7 +42,11 @@ public class GradleProcessRunner implements ProcessLauncher {
 
   @Override
   public Process start(
-      List<String> command, Path workingDirectory, Path outputFile, Map<String, String> environment)
+      String runId,
+      List<String> command,
+      Path workingDirectory,
+      Path outputFile,
+      Map<String, String> environment)
       throws IOException {
     // Built and populated BEFORE the output file is opened below - putAll() can throw (a null map,
     // or - platform-dependently - an invalid variable name/value) and must not leave an open file
@@ -61,7 +66,7 @@ public class GradleProcessRunner implements ProcessLauncher {
             absoluteOutputFile, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
     try {
       Process process = builder.start();
-      drainOutput(process, output, absoluteOutputFile);
+      drainOutput(runId, process, output, absoluteOutputFile);
       return process;
     } catch (IOException | RuntimeException exception) {
       try {
@@ -182,10 +187,17 @@ public class GradleProcessRunner implements ProcessLauncher {
   // Drains combined stdout/stderr for the whole lifetime of the process so its pipe cannot fill.
   // Retention is bounded per run: once the configured byte limit is reached, the thread continues
   // draining but discards the remainder after writing one explicit truncation marker.
-  private void drainOutput(Process process, OutputStream output, Path outputFile) {
+  private void drainOutput(String runId, Process process, OutputStream output, Path outputFile) {
     Thread drainer =
         new Thread(
-            () -> drainToBoundedFile(process, output, outputFile),
+            () ->
+                MdcScope.withMdc(
+                    "runId",
+                    runId,
+                    () -> {
+                      afterDrainerThreadMdcEstablished();
+                      drainToBoundedFile(process, output, outputFile);
+                    }),
             "gradle-process-output-drain-" + process.pid());
     drainer.setDaemon(true);
     outputDrainers.put(process, drainer);
@@ -245,4 +257,13 @@ public class GradleProcessRunner implements ProcessLauncher {
           "Process output drain closed with an I/O error for {}", outputFile, readOrCloseFailure);
     }
   }
+
+  /**
+   * Test seam, mirroring {@code RunEventHubTest}'s own protected-method-override pattern - a
+   * normal, successful drain never itself logs anything observable from the drainer thread (the two
+   * log statements above only fire on an I/O error), so this is the only way to prove {@code runId}
+   * is really set in this thread's own MDC at the point production code relies on it, without
+   * forcing an artificial failure just to manufacture a log line to observe.
+   */
+  void afterDrainerThreadMdcEstablished() {}
 }

@@ -42,6 +42,12 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    // D4.3.2 - registers Spring Boot's own auto-configured PrometheusMeterRegistry (which backs
+    // /actuator/prometheus) at runtime only. Production code (RunnerMetrics et al.) is written
+    // against the neutral io.micrometer.core.instrument.MeterRegistry interface exclusively, never
+    // a Prometheus-specific class - runtimeOnly is enough and keeps the compile classpath honest
+    // about that.
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
     // API docs only (no Swagger UI) - the frontend build pipeline consumes /v3/api-docs to
     // generate a typed client; nothing in this service's own runtime needs an interactive UI.
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-api:3.1.0'

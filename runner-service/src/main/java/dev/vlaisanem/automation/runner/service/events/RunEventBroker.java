@@ -9,9 +9,11 @@ import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.SelectedTestSnapshot;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.exception.InvalidEventResumeSequenceException;
+import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.repository.CommittedRunChange;
 import dev.vlaisanem.automation.runner.service.repository.RunLifecycleStore;
 import dev.vlaisanem.automation.runner.service.repository.RunLockStripes;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.time.Instant;
 import java.util.List;
@@ -64,9 +66,11 @@ public class RunEventBroker implements RunEventAppender {
   public RunEventBroker(
       RunLifecycleStore store,
       RunnerProperties properties,
-      ArtifactIngestionService artifactIngestionService) {
+      ArtifactIngestionService artifactIngestionService,
+      RunnerMetrics metrics,
+      MeterRegistry meterRegistry) {
     this.store = store;
-    this.hub = new RunEventHub(properties.sseMaxSubscribers());
+    this.hub = new RunEventHub(properties.sseMaxSubscribers(), metrics, meterRegistry);
     this.artifactIngestionService = artifactIngestionService;
   }
 

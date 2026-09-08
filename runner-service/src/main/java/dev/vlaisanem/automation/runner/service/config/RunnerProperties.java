@@ -119,6 +119,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param diskUsageRateLimit (D4.2) per-admin (GitHub numeric id) limit on {@code GET
  *     /api/v1/disk/usage} - a filesystem-tree walk plus a live Postgres size query is real work,
  *     the same reasoning {@link #retentionRateLimit} already applies to its own admin-only reads.
+ * @param metricsSampleInterval (D4.3.2) how often {@code DiskMetricsSampler} recomputes {@code
+ *     DiskUsageService#runnerDataBytes()}/{@code #databaseBytes()} in the background and caches the
+ *     result - the same "real work, must not run on every Prometheus scrape" reasoning {@link
+ *     #diskUsageRateLimit} already applies to the admin-only REST reads of the same two figures.
  */
 @ConfigurationProperties(prefix = "runner")
 public record RunnerProperties(
@@ -157,7 +161,8 @@ public record RunnerProperties(
     long manifestMaxBytes,
     long rawEventMaxBytes,
     long managedScratchMaxBytes,
-    RateLimitRule diskUsageRateLimit) {
+    RateLimitRule diskUsageRateLimit,
+    Duration metricsSampleInterval) {
 
   private static final long MANIFEST_MAX_BYTES_CEILING = 104_857_600L; // 100 MiB
 
@@ -326,6 +331,22 @@ public record RunnerProperties(
     }
     if (diskUsageRateLimit == null) {
       throw new IllegalArgumentException("runner.disk-usage-rate-limit must be set");
+    }
+    if (metricsSampleInterval == null
+        || metricsSampleInterval.isZero()
+        || metricsSampleInterval.isNegative()) {
+      throw new IllegalArgumentException("runner.metrics-sample-interval must be positive");
+    }
+    // D4.3.2 review finding - a merely-positive sub-millisecond value (e.g. Duration.ofNanos(1))
+    // would pass the check above yet truncate to 0 via DiskMetricsSampler's own toMillis() call,
+    // which ScheduledExecutorService#scheduleWithFixedDelay then rejects outright (it requires a
+    // strictly positive delay) - failing here instead gives a clear, immediate, property-named
+    // error rather than a confusing IllegalArgumentException surfacing from deep inside
+    // java.util.concurrent during bean creation.
+    if (metricsSampleInterval.toMillis() < 1) {
+      throw new IllegalArgumentException(
+          "runner.metrics-sample-interval must be at least 1ms once rounded down, was: "
+              + metricsSampleInterval);
     }
     try {
       long runMaxDiskBytes = runMaxTotalArtifactBytes;

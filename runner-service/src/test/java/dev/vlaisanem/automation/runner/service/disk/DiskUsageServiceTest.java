@@ -126,7 +126,8 @@ class DiskUsageServiceTest {
             2_097_152L,
             2_097_152L,
             104_857_600L,
-            aRule);
+            aRule,
+            Duration.ofSeconds(60));
     return new DiskUsageService(properties, null);
   }
 }
