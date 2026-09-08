@@ -1,0 +1,155 @@
+# D4.4 performance-baseline overlay - adds the one-shot `performance-seed` service. Always used
+# together with `deploy/performance.env` (never `deploy/.env`, the real deployment's own
+# gitignored secrets file).
+#
+# `name:` below fixes the Compose project name at `runner-performance` declaratively - isolation
+# from the real deployment no longer depends on an operator remembering `-p runner-performance` on
+# every invocation (a review finding); passing `-p runner-performance` explicitly on the command
+# line still works and simply reconfirms the same value. Compose namespaces every volume/network/
+# container by project name, so this alone already gives fully separate, ephemeral storage from the
+# real deployment (a distinct `runner-performance_pgdata`/`runner-performance_runner-data`, never
+# `deploy_pgdata`/`deploy_runner-data`). `deploy/performance.env`'s own
+# `POSTGRES_DB=runner_performance` is a second, independent layer (read by the base
+# `docker-compose.yml`'s existing `${POSTGRES_DB:-runner}` substitution - no override needed here),
+# backed by a third: `performance-seed`'s own fail-closed `current_database()` check
+# (`performance/seed/seed.sh`) refuses to run against anything else. Defense in depth against ever
+# touching the real deployment's data - never reliance on any single one of these three layers
+# alone.
+#
+# Lifecycle is deliberately four separate steps, not one `up --abort-on-container-exit` (a review
+# finding: that flag tears the whole stack down the instant the one-shot seed exits successfully,
+# which is exactly wrong for D4.4.1b onward - k6 needs to run against a stack that is still alive
+# *after* seeding completes):
+#
+#   1. Bring up the long-lived services (omit `performance-seed` here - it is a one-shot job, not
+#      a service to `up`). `runner-service` here is the REAL, unmodified base file's own service -
+#      real `PORTFOLIO` profile, real `Secure` session cookie - deliberately unaffected by
+#      D4.4.1d's OAuth-only override (see docker-compose.performance-auth.yml's own header comment
+#      for why that lives in a separate file, never merged in here):
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env up -d --build postgres runner-service
+#
+#   2. Run the one-shot seed to completion (safe to repeat - see seed.sql's own idempotency
+#      comment):
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env run --rm --build performance-seed
+#
+#   3. Run k6 scenarios against the still-live stack - the real topology (k6 -> Caddy ->
+#      runner-service -> PostgreSQL), so `web` joins the already-running services first (an `up`
+#      naming only the services to add never touches ones already running from step 1):
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env up -d --build web
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env run --rm --build k6 run /scripts/public-read.js
+#
+#   3b. (D4.4.1c) For sse-connection-cap.js specifically: insert the live-run fixture only now (never before step
+#       1 - see performance/seed/seed-live-run.sql's own comment on why), run the SSE scenario with
+#       the custom k6-sse image, then always delete the fixture again afterward - it is never a
+#       real run RunService orchestrated, so nothing else ever cleans it up on its own:
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env run --rm --build performance-seed-live \
+#          ./seed-live-run.sh insert
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env run --rm --build k6-sse run /scripts/sse-connection-cap.js
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          --env-file deploy/performance.env run --rm performance-seed-live \
+#          ./seed-live-run.sh delete
+#
+#   3c. (D4.4.1d) create-run.js runs last - it is the one genuinely admin-gated,
+#       real-process-launching scenario, needing a real GitHub OAuth2 admin login. See
+#       deploy/docker-compose.performance-auth.yml's own header comment for the full recreate/
+#       run/revert sequence this step requires - never just `run --rm k6` against the stack this
+#       file alone describes.
+#
+#   4. Tear down (fully throwaway - volumes intentionally removed), in an exception-safe cleanup
+#      step regardless of how step 3/3b/3c went. Always include
+#      `-f deploy/docker-compose.performance-auth.yml` here too (so Compose still knows about
+#      `wiremock` even though it was only ever brought up via that file during step 3c) and
+#      `--profile tools` - `down` is just as profile-scoped as `up`, so without it any profiled
+#      service still running is silently left behind instead of torn down:
+#        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#          -f deploy/docker-compose.performance-auth.yml --env-file deploy/performance.env \
+#          --profile tools down -v
+#
+# Every service below carries `profiles: ["tools"]` (a review finding) - none of these are meant to
+# ever start from a bare `docker compose ... up`/`up -d` with no service names given (in
+# particular, `performance-seed-live` has no default `command:` at all, so an unnamed `up` would
+# otherwise inherit its base image's own `postgres` ENTRYPOINT/CMD and could attempt to start an
+# unwanted extra Postgres process). `docker compose run <service>` and a `up <service-name>` that
+# names a profiled service explicitly both still work exactly as documented above regardless of
+# this profile - profiles only gate which services an *unnamed* `up`/`up -d` brings up by default.
+name: runner-performance
+services:
+  performance-seed:
+    build:
+      context: ../performance/seed
+    command: ["./seed.sh"]
+    profiles: ["tools"]
+    depends_on:
+      runner-service:
+        condition: service_healthy
+    networks:
+      - data
+    volumes:
+      - runner-data:/data
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${POSTGRES_DB:-runner}
+      - PGUSER=${POSTGRES_USER:-runner}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/performance.env}
+      - ARTIFACTS_DIR=/data/runner-artifacts
+
+  # D4.4.1c - shares performance-seed's own image, but always invoked with an explicit command
+  # (`./seed-live-run.sh insert` or `./seed-live-run.sh delete`) - see that script's own header
+  # comment for why this must stay gated on runner-service's readiness the same way
+  # performance-seed already is. No file writes needed, so no artifacts volume mount.
+  performance-seed-live:
+    build:
+      context: ../performance/seed
+    profiles: ["tools"]
+    depends_on:
+      runner-service:
+        condition: service_healthy
+    networks:
+      - data
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${POSTGRES_DB:-runner}
+      - PGUSER=${POSTGRES_USER:-runner}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/performance.env}
+
+  # D4.4.1b - one-shot load-generation container, `docker compose run --rm k6 run
+  # /scripts/<name>.js`. Pinned to an exact k6 version (not `latest`) - the summary JSON shape
+  # this produces (see performance/k6/lib/summary.js) is locked together with this specific
+  # version, since k6 1.5 introduced a new machine-readable summary format that becomes default in
+  # k6 2. On the `edge` network (the same one `web` is on) so it reaches Caddy by its real service
+  # name - the actual production topology (k6 -> Caddy -> runner-service -> PostgreSQL), never
+  # runner-service directly.
+  k6:
+    image: grafana/k6:1.5.0
+    profiles: ["tools"]
+    networks:
+      - edge
+    volumes:
+      - ../performance/k6:/scripts:ro
+      - ../performance/k6/results:/results
+    environment:
+      - BASE_URL=http://web
+
+  # D4.4.1c - a custom k6 build with the xk6-sse extension (see performance/k6-sse/Dockerfile's own
+  # header comment for the exact pinned versions and why a custom image is used at all, and for
+  # precisely what is and is not offline/reproducible about it). Only for the sse-*.js scenarios -
+  # every other scenario uses the stock `k6` service above.
+  k6-sse:
+    build:
+      context: ../performance/k6-sse
+    profiles: ["tools"]
+    networks:
+      - edge
+    volumes:
+      - ../performance/k6:/scripts:ro
+      - ../performance/k6/results:/results
+    environment:
+      - BASE_URL=http://web

@@ -1113,3 +1113,625 @@ Stack torn down afterward (`docker compose down`, no `-v` - volumes preserved).
 
 **D4.3 (D4.3.1-D4.3.4: health/readiness, metrics, structured logging, consolidated acceptance) is
 now fully closed.**
+
+## Faza D4.4.1a - performance-baseline: isolated Compose project + deterministic seed
+
+**Date:** 2026-09-08. **Scope:** the foundational piece of D4.4 (performance baseline) - an
+isolated Compose project (`-p runner-performance`, a distinct `runner_performance` database) plus a
+one-shot `performance-seed` service that deterministically seeds exactly 500 terminal runs
+(including CUSTOM-suite examples, one ~400-event run for SSE replay, and artifact examples), never
+touching the real deployment's own data. A first-draft plan was reviewed and found to have 5 P1 +
+several P2 gaps before any code was written - see `docs/RELEASE_EVIDENCE.md`'s own memory-linked
+plan file and [[feedback_security_plan_review_style]] for the full list; this sub-phase implements
+the isolation/seeding corrections specifically (#2 and #3 from that review).
+
+**What shipped**: `deploy/docker-compose.performance.yml` (adds the one-shot `performance-seed`
+service only - no `postgres` override needed, since the base `docker-compose.yml` already
+parameterizes `POSTGRES_DB` from the env file for both `postgres`'s own init and
+`runner-service`'s JDBC URL); `deploy/performance.env` (a new, safe-to-commit env file - fake
+OAuth credentials, `POSTGRES_DB=runner_performance`); `performance/seed/` (`Dockerfile` pinned to
+the same `postgres:17-alpine` tag the real `postgres` service uses, `seed.sh` - a fail-closed
+`current_database()` self-check before anything else runs, then `psql -f seed.sql`, then writes
+matching real artifact files onto the mounted `runner-data` volume - `seed.sql` - deterministic,
+`generate_series`-driven SQL: 480 plain terminal runs across 5 suites/5 statuses, 19 CUSTOM-suite
+runs with `run_selected_tests` rows, one `perf-replay-run` with 399 `run_events` rows, 5
+`artifacts` rows).
+
+**A real bug the live verification caught**: the seed used `artifacts.schema_version = '1.0'`;
+`ArtifactManifestEntry`'s own compact constructor only accepts its real `CURRENT_SCHEMA_VERSION`
+(`"1.1"`), so `GET /api/v1/runs/{runId}/artifacts` returned a real `500` (`Unsupported
+ArtifactManifestEntry schemaVersion: 1.0`) the instant it tried to read a seeded row back - caught
+by actually calling the real endpoint against the real seeded data, not by inspecting the SQL.
+Fixed by using `'1.1'`; re-verified live afterward.
+
+**Live verification against a real isolated stack** (`-p runner-performance`, `postgres` +
+`runner-service` + `performance-seed` only - `web`/Caddy omitted, not needed for this sub-phase):
+- Exact row counts confirmed via direct SQL: 500 total runs, 19 CUSTOM, 57 `run_selected_tests`,
+  399 `run_events` for `perf-replay-run` (sequence 1..399, no gaps), 5 `artifacts`, 5 distinct
+  statuses.
+- `GET /api/v1/runs/perf-replay-run`, `GET /api/v1/runs` (list, includes the CUSTOM run's real
+  `selectedTests`), `GET /api/v1/runs/{runId}/artifacts`, and the real artifact **download**
+  (`Content-Length: 68`, matching the real fixture PNG's own measured size - see the review round
+  below for why it's a genuine PNG, not a same-size placeholder) all work against the real
+  application logic, not just structurally-plausible SQL.
+- Real SSE replay of `perf-replay-run` (`GET /api/v1/runs/perf-replay-run/events`) produces
+  correctly-shaped `id:`/`event:`/`data:` frames the dashboard's own `EventSource` client expects,
+  in the right order, starting from `RUN_QUEUED`.
+- **Fail-closed self-check verified for real**: ran the same seed image directly with
+  `PGDATABASE=postgres` (a deliberately wrong database) - aborted immediately
+  (`current_database()=postgres, expected runner_performance`, exit code 1) before touching
+  anything; confirmed the `postgres` database gained no `runs` table at all.
+- Stack torn down afterward (`down -v` - fully ephemeral, nothing left behind).
+
+### Review round - 3 P1 + 3 P2, all fixed and reverified before this sub-phase was closed
+
+A review of the actual shipped D4.4.1a code (not the plan) found real gaps the live verification
+pass above had not exercised:
+
+1. **[P1] The seed was not idempotent/re-runnable** - plain `INSERT`s meant a second run against
+   the same stack failed on primary-key/unique constraints, even though the locked requirement was
+   that the seed can safely repeat between D4.4.2's own 3-5 measurement passes. Fixed:
+   `seed.sql` now opens with `DELETE FROM runs WHERE run_id LIKE 'perf-%'` (never a global
+   `TRUNCATE`, which would also erase anything a concurrent/non-seed process wrote) before
+   re-inserting - `run_selected_tests`/`run_events`/`artifacts` all cascade from that one `DELETE`
+   via their own `ON DELETE CASCADE` constraints. Live-verified: ran the seed twice against the
+   same live stack with no `down -v` in between - first run `DELETE 0` (fresh database), second run
+   `DELETE 500` then identical re-insert counts, no constraint errors either time.
+2. **[P1] The documented Compose command tore the stack down the instant seeding finished** -
+   `up --abort-on-container-exit performance-seed` stops `runner-service`/`postgres` the moment the
+   one-shot seed exits successfully, which is exactly wrong for D4.4.1b onward (k6 needs to run
+   against a stack still alive *after* seeding). Fixed: the overlay's own header comment and
+   `performance/README.md` now document four separate steps - `up -d --build postgres
+   runner-service` (long-lived services only) → `run --rm --build performance-seed` (repeatable) →
+   run scenarios against the still-live stack → `down -v` as an always-run cleanup step.
+3. **[P1] The seeded `perf-replay-run` event timeline was not chronologically valid** - `RUN_STARTED`
+   was timestamped `base + 5s`, but the first `TEST_STARTED`/`TEST_PASSED` events were timestamped
+   `base + 1s`/`base + 2s` - sequence-gapless, but time went *backward* between sequence 2 and 3, a
+   journal the real system could never produce. Fixed: every test-level event is now timestamped
+   strictly at or after `RUN_STARTED`'s own `occurred_at` (`RUN_STARTED + t seconds` for the t-th
+   pair). A runtime acceptance check was added directly inside `seed.sql`'s own transaction (a
+   `lag(occurred_at) OVER (ORDER BY sequence)` comparison, raising an exception and aborting the
+   whole seed if any regression is found) - not just a one-off manual check, so this cannot silently
+   regress again. Live-verified: a direct query for regressions returns `0`, and `RUN_STARTED`
+   (sequence 2) at `+5s` is correctly followed by `TEST_STARTED` (sequence 3) at `+6s`.
+4. **[P2] Artifact metadata was committed before its file was written** - if `psql` succeeded but a
+   file write then failed, a permanent DB row would be left pointing at a nonexistent file.
+   Reordered `seed.sh`: (1) the fail-closed database check, (2) writing/validating the real artifact
+   files, (3) the one SQL transaction that replaces the seed-owned dataset - if step 3 now fails,
+   only a harmless orphan file remains, safely overwritten by the next (idempotent) pass.
+5. **[P2] The "PNG" fixture wasn't a real PNG** - 2048 zero bytes with `media_type: image/png` would
+   download successfully (byte count matched) but break any real image viewer/thumbnail, silently
+   violating the artifact's own claimed content type. Fixed: a genuine, valid 68-byte 1x1
+   transparent PNG (`performance/seed/assets/fixture.png`, verified via `file` - "PNG image data, 1 x
+   1, 8-bit gray+alpha, non-interlaced") copied onto disk for the five seeded runs; `size_bytes` in
+   `seed.sql` now comes from a psql variable populated by `seed.sh`'s own real, measured byte count
+   of that file - never a hardcoded constant.
+6. **[P2] Isolation depended on an operator remembering `-p runner-performance`** - added
+   `name: runner-performance` as `deploy/docker-compose.performance.yml`'s own top-level field, so
+   the project name is fixed declaratively regardless of whether `-p` is passed on the command line
+   (still recommended for explicit confirmation, now redundant-but-harmless rather than
+   load-bearing).
+
+**[P3, also addressed]**: the original "byte-identical between runs" language overclaimed what the
+seed actually guarantees - every timestamp derives from the seeding transaction's own `now()`, so
+re-running produces the same structure/counts/distribution/relationships but not byte-identical
+content. Corrected throughout to "structurally deterministic relative to one transaction's own
+`now()`," not byte-identical.
+
+All three P1s and all three P2s reverified together in one real, corrected run (see the live
+verification bullets above and the idempotency re-run) - not fixed in isolation and assumed to
+still compose correctly.
+
+### Gates
+
+No Java/Gradle source touched this sub-phase (new files live under `performance/`/`deploy/` only,
+outside every Gradle source set) - no `fullBackendGate`/`dashboardE2eTest` re-run needed.
+
+**D4.4.1a is now closed.**
+
+## Faza D4.4.1b - performance-baseline: public-read/artifact-reads/health k6 scenarios
+
+**Date:** 2026-09-08. **Scope:** the first real k6 scenarios, run against the real production
+topology (k6 -> Caddy -> `runner-service` -> PostgreSQL, never `runner-service` directly), with the
+review-locked expected/unexpected `429`/`5xx` classification and per-endpoint tagged sub-metrics.
+
+**What shipped**: `performance/k6/lib/metrics.js` (shared `expected_429`/`unexpected_429`/
+`unexpected_5xx` `Counter`s, an `unexpected_error_rate` `Rate`, and a per-endpoint-tagged
+`success_latency_ms` `Trend` populated only for a genuine `200` - a `429`'s own fast response time
+never contributes to the real success-path latency distribution); `performance/k6/lib/summary.js`
+(one shared `handleSummary()` every scenario uses, no remote `jslib.k6.io` import - offline/
+reproducible, `JSON.stringify`-only on k6's own `data.metrics`); `performance/k6/public-read.js`
+(capabilities/tests/runs-list/run-detail, the real 120/min `public-read` bucket - a `429` here is
+an *expected* signal); `performance/k6/artifact-reads.js` (artifacts-list/artifact-download, the
+real 30/min `download` bucket - deliberately lighter VU profile); `performance/k6/health.js`
+(liveness/readiness - never rate-limited at all, so a `429` there would itself be a bug,
+`rateLimitExpected=false`). `deploy/docker-compose.performance.yml` gained a one-shot `k6` service
+pinned to `grafana/k6:1.5.0` (verified this exact tag exists and pulls cleanly) on the same `edge`
+network `web` is on - the real topology, not a shortcut to `runner-service` directly.
+
+**Live verification against the real isolated stack** (full lifecycle: `postgres`+`runner-service`
+up, `performance-seed` run, `web` joined, then each k6 scenario run via `docker compose run --rm
+k6`):
+
+- **`public-read.js`** (5 VUs, 30s): 600 requests total - 120 genuine `200`s
+  (`success_latency_ms` populated, p95≈60ms) and 480 `expected_429`s (the 120/min bucket
+  overwhelmed by design at this VU count) - `unexpected_429`/`unexpected_5xx` absent (zero),
+  `unexpected_error_rate` = 0. The `"{endpoint}: 429 carries Retry-After"` check passed all 480
+  times (`checks` rate = 1).
+- **`artifact-reads.js`** (2 VUs, 30s): 120 requests - 30 genuine `200`s, 90 `expected_429`s (the
+  much lower 30/min `download` bucket correctly overwhelmed faster), same clean
+  zero-unexpected-anything result, `Retry-After` present on all 90.
+- **`health.js`** (2 VUs, 15s): 60 requests, all genuine `200`s, `success_latency_ms` p95≈5.5ms/
+  p99≈7.5ms - no `429`s at all (correct - health isn't in `AbuseRateLimitFilter`'s covered surface),
+  `unexpected_error_rate` = 0.
+- A Git Bash (MSYS) path-mangling artifact (`/scripts/public-read.js` auto-converted to a Windows
+  path) was hit and worked around with `MSYS_NO_PATHCONV=1` - not a real Compose/k6 issue, noted
+  here only so a future session on the same shell doesn't re-diagnose it from scratch.
+- Stack torn down afterward (`down -v` - fully ephemeral, nothing left behind).
+
+### Review round - 3 P1 + 2 P2, all fixed and reverified before this sub-phase was closed
+
+A review of the actual saved k6 JSON results (not the plan) found real gaps live verification
+above had not caught:
+
+1. **[P1] Expected `429`s still counted as k6's own `http_req_failed`** - k6's built-in classifier
+   treats any non-2xx/3xx as failed by default, so the saved results showed `http_req_failed.rate =
+   0.8` (public-read) / `0.75` (artifact-reads) despite the custom `unexpected_error_rate` correctly
+   staying `0` - directly contradicting the "an expected 429 is never a failure" design intent, and
+   would have corrupted the aggregate status a later published baseline reports. Fixed:
+   `http.setResponseCallback(http.expectedStatuses(200, 429))` for the two rate-limited scenarios
+   (`http.expectedStatuses(200)` only for `health.js`, where a `429` would itself be a bug) - the
+   independent custom classification in `lib/metrics.js` still separately verifies a `429` is
+   genuinely well-formed. Live-verified: `http_req_failed.rate` is now `0` in all three scenarios.
+2. **[P1] Per-endpoint latency sub-metrics were never actually generated** - tagging a `Trend`
+   sample does not by itself make k6 track a separate `success_latency_ms{endpoint:...}` series;
+   only referencing that exact tag combination in `options.thresholds` does, and the first draft
+   never did. Fixed: each scenario's own `options.thresholds` now references
+   `success_latency_ms{endpoint:<name>}` for every endpoint it covers (permissive `p(95)<100000`
+   placeholders - real empirical values come in D4.4.2), and `lib/summary.js`'s `handleSummary` gained
+   a runtime acceptance check that a named endpoint has a real success count > 0, throwing (loudly
+   logged, `hint="script exception"`) otherwise - **live-verified as a genuine, firing check**: a
+   deliberately-broken `capabilities` validator produced exactly the expected thrown error
+   ("summary has no recorded successful responses for: capabilities") and `unexpected_error_rate`
+   correctly rose to 5% (30/600) - then reverted and reconfirmed clean.
+3. **[P1] A `200` with invalid content still counted as success** - `recordOutcome` recorded
+   `success_latency_ms` for any `200` regardless of body, so a misrouted SPA fallback, an empty/
+   wrong runs list, a mismatched run-detail, a non-`UP` health body, missing artifact metadata, or a
+   corrupted download would all have stayed falsely green. Fixed: every call site now passes a real
+   per-endpoint validator (capabilities/tests shape, `runs-list` has exactly 500 entries,
+   `run-detail`'s `runId` matches what was requested, health body has `status:"UP"`, artifacts-list
+   contains the expected `artifactId`, artifact-download checks real `Content-Type` + byte length +
+   PNG magic bytes via a `responseType:'binary'` request) - `success_latency_ms` is only recorded
+   when both the status *and* the validator pass. Live-verified: artifact-download's real PNG
+   magic-byte/size/content-type check passed for all 14 real downloads in one run.
+4. **[P2] The `Retry-After` check didn't affect classification** - a `429` was counted as
+   `expected_429` first, with the `Retry-After` presence check only asserted afterward as an
+   independent `check()` - a missing/malformed header would have failed the check while the
+   response still counted as expected and `unexpected_error_rate` stayed `0`. Fixed: `Retry-After`
+   validity (present, positive, integer) is now part of computing whether a `429` is *actually*
+   expected at all - an invalid one routes to `unexpected_429` and raises
+   `unexpected_error_rate`.
+5. **[P2] `run-detail`/artifact rotation used `__ITER`, a per-VU counter** - all 5 (or 2) VUs
+   independently restarted from the same small subset (`perf-run-0001...`), so 30 seconds mostly
+   re-hit an already-warm handful of rows instead of spreading lookups across the real 480-row/
+   5-artifact dataset - a real risk of unrealistically fast results from DB/filesystem cache
+   warming. Fixed: `exec.scenario.iterationInTest` (`k6/execution`, a globally-unique counter across
+   every VU in the scenario) replaces `__ITER` for the modulo index in both `public-read.js` and
+   `artifact-reads.js`.
+
+**Also fixed (documentation correction, not code)**: the original write-up above compared a k6/ECS
+`429` sample against a Micrometer series filtered to `status="200"` and called it "three angles
+agree" - a real methodological error (neither the same status nor the same individual request).
+Corrected: **Micrometer must be described as a pre/post aggregate delta over the same route/status/
+measurement window, never as proof of one specific request** - only the k6-to-ECS pairing can prove
+the *same individual request*, and only because of the fix below. Every `getAndClassify` call now
+carries a deterministic, `RequestLoggingFilter`-valid `X-Request-ID`
+(`perf-<scenario>-i<globalIter>-<endpoint>`, e.g. `perf-pubread-i0-runs-list`), verified via a
+`check()` that the response actually echoed the same id back. Live-verified: the exact id
+`perf-pubread-i0-runs-list` was found in k6's own request and, byte-for-byte, in the real ECS log
+line on `runner-service`'s own stdout for that same request - genuine same-request proof, not
+inferred from route+status+rough timing.
+
+All five findings reverified together in three full scenario runs (not fixed in isolation and
+assumed to still compose): `http_req_failed = 0` in every scenario, every scenario's `handleSummary`
+produced its full expected set of per-endpoint sub-metrics with no thrown acceptance error, the
+deliberately-broken-validator test proved the acceptance check and content validation both fire for
+real, and the deterministic request-id proved genuine k6-to-ECS correlation.
+
+### Gates
+
+No Java/Gradle source touched this sub-phase - no `fullBackendGate`/`dashboardE2eTest` re-run
+needed.
+
+**D4.4.1b is now closed.**
+
+## Faza D4.4.1c - performance-baseline: two SSE fixtures + the pinned custom xk6-sse image
+
+**Date:** 2026-09-08. **Scope:** the SSE scenarios - replay/time-to-first-event against a terminal
+run, and the real per-IP concurrent-connection cap against a still-live one - requiring a custom k6
+build, since stock k6 has no native SSE support.
+
+**What shipped**: `performance/k6-sse/Dockerfile` - a multi-stage build (`golang:1.25-alpine` ->
+`alpine:3.20`) producing a custom k6 binary via `xk6 build v1.5.0 --with
+github.com/phymbert/xk6-sse@v0.1.12` - every version pinned exactly: k6 v1.5.0 (locked with
+`lib/summary.js`'s own output-format assumptions, same as the stock `k6` service), `xk6` v0.13.4,
+and `xk6-sse` v0.1.12 - a real, verified-existing tagged release (`go get
+github.com/phymbert/xk6-sse@latest` resolves to this exact version), never a floating branch/
+commit, with both base images additionally pinned by their exact content digest (see the review
+round below for why a version tag alone isn't enough, and precisely what is/isn't guaranteed as a
+result). A custom pre-built image is for making the *test-run* step offline/reproducible, not
+because there is no other way to add extensions to k6 - `xk6-sse` is an unaudited-by-Grafana
+community extension, pinned precisely for that reason. `deploy/docker-compose.performance.yml`
+gained the `k6-sse` service (same volume/network
+shape as the stock `k6` service) and a new `performance-seed-live` service sharing
+`performance-seed`'s own image via an explicit `command:` override (`./seed-live-run.sh
+insert|delete`) rather than a fixed `ENTRYPOINT`. `performance/seed/seed-live-run.sql`/`.sh`:
+idempotent insert/delete of `perf-hold-open-run` (a `RUNNING` row), gated on `runner-service:
+condition: service_healthy` - structurally guaranteed to run only after the app's own
+readiness/recovery pass has completed, since `/actuator/health/readiness` cannot report `UP` until
+`RunRecoveryService`'s one-time startup pass finishes. `performance/k6/sse-replay.js` (connection-
+establish time, time-to-first-event, full-replay duration against `perf-replay-run`) and
+`sse-connection-cap.js` (4 concurrent VUs against `perf-hold-open-run`, proving the real
+`SseConnectionsPerIpTracker` cap).
+
+**Real implementation obstacles resolved by actually building and running this, not by assuming**:
+
+- `xk6 build`'s own CLI requires the version positional argument to come *after* every `--with`/
+  `--output` flag - the reverse order fails with a confusing "missing flag" error. Not documented
+  anywhere obvious; found only by trying both orderings against the real tool.
+- k6 v1.5.0 requires Go >= 1.24 (`golang:1.23-alpine` fails outright); `xk6-sse@latest`'s own
+  transitive test dependencies (`onsi/gomega`) then required Go >= 1.25 - settled on
+  `golang:1.25-alpine` as the build stage.
+- **A real timing bug found only by running the connection-cap scenario live**: Go's
+  `http.Client.Timeout` bounds the *entire* request including "awaiting headers," and Spring's
+  `SseEmitter` does not flush real HTTP headers until the first byte actually goes out (an event,
+  or the periodic heartbeat - `runner.sse-heartbeat-interval`, 15s by default). A first attempt used
+  an 8s client-side `timeout` (shorter than that heartbeat interval) to bound the otherwise-
+  never-closing hold-open fixture - every one of the up-to-3 genuinely-accepted connections then
+  timed out waiting for headers that were never going to arrive within 8s, indistinguishable (from
+  k6's own error message) from a connection that was silently rejected. Diagnosed by adding a
+  temporary `console.log` of the real response object, which showed `status: 0` and `"context
+  deadline exceeded (Client.Timeout exceeded while awaiting headers)"` for all three "accepted"
+  attempts. Fixed by raising `HOLD_OPEN_SECONDS` to 20s (comfortably past the 15s heartbeat) -
+  re-verified live with the correct classification.
+
+**Live verification against the real isolated stack** (full lifecycle including `web`):
+
+- **`sse-replay.js`** (1 VU, 5 iterations against `perf-replay-run`): every iteration returned a
+  real `200` and received exactly 399 events (1995 total / 5 = 399, matching the seeded count
+  precisely) - the server correctly completes a terminal run's own SSE subscription on its own, no
+  client-side timeout needed. `sse_connection_establish_ms` (~12-135ms) and
+  `sse_time_to_first_event_ms` (~0-1ms, since replay starts flowing immediately once the connection
+  opens) both populated; `checks` rate = 1 (10/10 - both checks, per iteration, all passed).
+- **`sse-connection-cap.js`** (4 VUs, 1 iteration each against `perf-hold-open-run`, `20s` hold):
+  `sse_accepted_connections = 3`, `sse_rejected_connections = 1`, `sse_unexpected_status` absent
+  (zero) - exactly matching `SseConnectionsPerIpTracker`'s real default cap of 3 concurrent
+  connections per client IP (every VU in this one k6 container genuinely shares the same real
+  client IP on the Docker network - no IP-spoofing needed, this is the real mechanism under real
+  load). The rejected connection's own `429` genuinely carries `Retry-After: "5"` (confirmed via the
+  same debug capture) - `checks` rate = 1.
+- `perf-hold-open-run` confirmed genuinely `RUNNING` (not reclassified to `ERROR` by D2.5's own
+  recovery) immediately after `performance-seed-live`'s insert step, and confirmed fully deleted
+  (`count = 0`) after the connection-cap scenario's own cleanup step.
+- Stack torn down afterward (`down -v` - fully ephemeral, nothing left behind).
+
+### Review round - 3 P1 + 2 P2, all fixed and reverified before this sub-phase was closed
+
+A review of the actual saved k6 output (not the plan) found real gaps in what a "live-verified,
+green" result above actually guaranteed:
+
+1. **[P1] A failed replay still returned a successful k6 exit code** - `check()` alone only
+   records a pass/fail *result*; without a real threshold referencing it, a regression (a wrong
+   HTTP status, an incomplete replay) would still exit `0`. Fixed: a dedicated `sse_replay_correctness`
+   `Rate` (true only when the *whole* replay's contract holds - see finding 2) plus a
+   `sse_transport_errors` `Counter`, both with real failing thresholds (`rate==1`/`count==0`), and
+   `checks: ['rate==1']` as a second, independent gate.
+2. **[P1] The replay only checked a minimum event count** - `eventCount >= 399` would have accepted
+   duplicates, extra events, wrong ordering, or malformed frames. Fixed: `validateReplay` now
+   requires the exact count (`=== 399`, never `>=`), parses every event's own `data` (a JSON parse
+   failure is itself a correctness failure, never silently skipped), and checks strictly
+   consecutive `sequence` values from 1, every event's `runId`/`schemaVersion`, and that the first
+   event is `RUN_QUEUED` and the last is `RUN_FINISHED`.
+3. **[P1] The 3-accepted/1-rejected split was never actually asserted** - the `Counter` metrics
+   only described what happened; a regression letting all 4 connections through (or rejecting more
+   than 1) could still exit `0`, and in some such cases the existing `Retry-After` check would never
+   even run. Fixed: real failing thresholds (`sse_accepted_connections: ['count==3']`,
+   `sse_rejected_connections: ['count==1']`, `sse_unexpected_status: ['count==0']`), plus a
+   dedicated `sse_retry_after_valid` `Rate` (present *and* a positive integer, reusing
+   `lib/metrics.js`'s own `isValidRetryAfter` - exported for exactly this reuse) with its own
+   `rate==1` threshold. **Live-verified as genuinely failing, not just theoretically**: deliberately
+   setting `EXPECTED_ACCEPTED = 4` produced k6 exit code `99` and a real logged threshold-crossed
+   error - reverted, re-confirmed exit `0` on the correct code.
+4. **[P2] The hold-open fixture represented an impossible `RUNNING` state** - a real `RUNNING` run
+   always already has its own `RUN_QUEUED`/`RUN_STARTED` events and `next_event_sequence = 3` by
+   the time anything can observe it; the fixture had empty history and `next_event_sequence = 1`.
+   This was not just a realism gap - it was the actual root cause of the earlier 8s-timeout bug: a
+   real run's SSE subscription replays its buffered events immediately on connect, flushing real
+   response bytes right away, while an empty-history fixture sends nothing until the next periodic
+   heartbeat (15s). Fixed: `seed-live-run.sql` now seeds those same two canonical events and sets
+   `next_event_sequence = 3` - live-verified the fixture now flushes immediately, letting
+   `HOLD_OPEN_SECONDS` drop from the workaround value of 20s to a stable 5s (the real fix, not
+   the earlier symptom-level one).
+5. **[P2] The custom image's reproducibility claim overstated what it actually guaranteed** - Docker
+   tags aren't immutable (`golang:1.25-alpine`/`alpine:3.20` can resolve to different content on a
+   later pull), and `go install`/`xk6 build` fetch dependencies over the network, so the *build*
+   itself is neither offline nor guaranteed byte-identical across rebuilds. Fixed: both base images
+   pinned by their exact content digest (`golang@sha256:1ae0735f...`, `alpine@sha256:d9e853e8...`,
+   captured 2026-09-08) - the strongest practical guarantee available - with the Dockerfile's own
+   comment, this file, and `performance/README.md` all corrected to state precisely what is true:
+   pinning (including by digest) makes *running* the already-built image offline/reproducible; the
+   *build* step still needs network access and has no byte-for-byte guarantee.
+
+All five reverified together: the corrected `sse-replay.js`/`sse-connection-cap.js` both pass
+cleanly against the real stack, the negative test (finding 3) proves the new thresholds genuinely
+gate the exit code, and the corrected fixture (finding 4) is what let the connection-cap timeout
+shrink to a stable, real value instead of a workaround.
+
+### Gates
+
+No Java/Gradle source touched this sub-phase - no `fullBackendGate`/`dashboardE2eTest` re-run
+needed.
+
+**D4.4.1c is now closed.**
+
+**Next**: D4.4.1d (the WireMock OAuth stub + isolated `create-run.js` scenario) - checking in with
+the user before starting, per this sub-phase's own review checkpoint.
+
+## Faza D4.4.1d - performance-baseline: WireMock OAuth stub + isolated create-run.js scenario
+
+**Date:** 2026-09-08. **Scope:** the one genuinely admin-gated, real-process-launching scenario -
+a real GitHub OAuth2 admin login, one real `202 Accepted` latency measurement, the per-minute
+rate-limit proof, and explicit cleanup of the launched run.
+
+**What shipped**: `deploy/docker-compose.performance.yml` gained a `wiremock` service
+(`wiremock/wiremock:3.9.1`, `--global-response-templating`, `profiles: ["tools"]`) standing in for
+github.com, plus a `runner-service` overlay block redirecting the real Spring OAuth2 client's
+provider URIs (`authorization-uri`/`token-uri`/`user-info-uri`/`user-name-attribute`) at it -
+mirrors `OAuthFlowE2eTest`'s own established pattern (stub only the external dependency, keep the
+app's own real `ClientRegistrationRepository`/OAuth2 binding untouched). `performance/wiremock/
+mappings/{authorize,token,user-info}.json` cover the three real server-to-server calls Spring's
+OAuth2 login flow makes: the authorize redirect (templated to echo the real request's own
+`redirect_uri`/`state` back), the token exchange, and the user-info lookup (`id: 999001`, matching
+`deploy/performance.env`'s own `RUNNER_SECURITY_ADMIN_GITHUB_ID`). `performance/k6/create-run.js`:
+performs the real 3-hop OAuth2 redirect chain, confirms a real admin session via
+`/api/v1/auth/me`'s `canManageRuns`, measures one real `202` latency
+(`create_run_success_latency_ms`), consumes the remaining per-minute budget with two deliberately
+Bean-Validation-invalid requests (an oversized `testKeys` list - fails `@Size(max=25)` inside
+Spring's own request binding, before `RunController.create` ever calls `RunService.submit`, so no
+extra real Gradle process launches), confirms a 4th request in the same window is rate-limited
+(`429` with a valid `Retry-After`), and explicitly cancels whatever run it actually launched -
+never left running into teardown. `performance/README.md` and the overlay's own header comment
+updated with the corrected 4-step (+3b/3c) lifecycle.
+
+**Real implementation obstacles resolved by actually building and running this, not by assuming**:
+
+- **WireMock's own healthcheck failed with a genuine `404`** - `wget --spider` (used by every
+  other service's healthcheck in this overlay) defaults to a HEAD-equivalent request, and
+  WireMock's `/__admin/health` endpoint only implements GET. Confirmed live via `docker exec ...
+  wget --spider ...` showing a real `404 Not Found`. Fixed by switching to `curl --fail --silent
+  --show-error` (a real GET) - container then reached `healthy` correctly.
+- **The real admin session was never established, and the one "valid" request also failed** - the
+  3-hop redirect chain all returned the expected `302`s, but `/api/v1/auth/me` never reflected
+  `canManageRuns: true`. Diagnosed by manually tracing the flow with `curl`'s own cookie-jar file
+  against the published host port: the `Set-Cookie` response carried `Secure; HttpOnly;
+  SameSite=Lax`, and the cookie-jar file's own `secure_flag=TRUE` confirmed - empirically, not by
+  assumption - that a standards-compliant client (curl, and k6's cookie jar behaves identically)
+  never sends a `Secure`-flagged cookie back over a subsequent plain-HTTP connection, regardless of
+  same-origin. Since this isolated stack has no real TLS, the session (and the server-side-stored
+  `OAuth2AuthorizationRequest`/`state` it carries) was being silently dropped on every hop. A first
+  attempted fix (only `SERVER_SERVLET_SESSION_COOKIE_SECURE=false`) was caught and reverted before
+  ever running it, upon re-reading `RunnerSecurityEnvironmentPostProcessor`'s own source and
+  confirming it fails closed at startup when `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO` (the base file's
+  unchanged default) is combined with a non-Secure cookie. Fixed correctly by adding *both*
+  `SERVER_SERVLET_SESSION_COOKIE_SECURE=false` and `RUNNER_DEPLOYMENTPROFILE=LOCAL_DEV` -
+  reusing the exact escape hatch `deploy/.env.example`'s own `SESSION_COOKIE_SECURE` comment
+  already documents for precisely this situation (a local, non-TLS Compose run), never a novel
+  weakening. Confirmed this pairing is accepted at startup and does not affect D4.4.1a-c's own
+  scenarios, none of which exercise `Environment.LOCAL` or any other profile-specific behavior.
+- **`down -v` (without `--profile tools`) silently left `wiremock` running** - the first teardown
+  attempt failed with `Network runner-performance_edge Resource is still in use`;
+  `docker ps -a --filter label=com.docker.compose.project=runner-performance` showed
+  `runner-performance-wiremock-1` still `Up (healthy)`. Root cause: `docker compose down` is just
+  as profile-scoped as `up` - without `--profile tools`, Compose never considers a
+  `profiles: ["tools"]` service part of the "current" set to tear down at all. Fixed by re-running
+  with `--profile tools`, which correctly stopped/removed `wiremock` and the `edge` network; the
+  overlay's own header comment and `performance/README.md` both corrected to require it.
+
+**Live verification against the real isolated stack**:
+
+- Full pass: the real 3-hop OAuth2 redirect chain (backend -> WireMock stub -> real callback) all
+  succeeded, CSRF correctly re-primed after the session rotated on login, one real `202`
+  (`create_run_success_latency_ms` ~= 171ms), two real `400`s (oversized `testKeys`), one real
+  `429` with a valid `Retry-After` (confirmed via `isValidRetryAfter`), and a real cleanup `cancel`
+  - confirmed via a direct `GET /api/v1/runs` query that the launched `SMOKE` run's final state was
+  genuinely `CANCELLED` (`exitCode: 143`), not merely assumed from the `200` cancel response. k6
+  exit code `0`; `create_run_correctness: rate=1`; `checks` 11/11.
+- **Negative test**: re-running the scenario within the same 60s rate-limit window against the
+  same admin id correctly produced k6 exit code `99` (the real per-minute budget genuinely
+  exhausted, proving the thresholds actually gate the exit code, not just describe the outcome) -
+  and a follow-up `GET /api/v1/runs` confirmed zero runs were orphaned by the failed attempt
+  (exactly the one prior `CANCELLED` run, no non-terminal runs at all).
+- Stack torn down afterward with `--profile tools down -v` - confirmed clean (no leftover
+  containers/networks/volumes for the `runner-performance` project).
+
+### Gates
+
+No Java/Gradle source touched this sub-phase - no `fullBackendGate`/`dashboardE2eTest` re-run
+needed.
+
+**D4.4.1d is now closed.**
+
+### Addendum - scoping the OAuth override out of the always-applied overlay (2026-09-08)
+
+A design tension was flagged before proceeding to the plan's step-5 checkpoint (rather than decided
+unilaterally): the checkpoint calls for "one production-policy (real, unmodified
+`deploy/docker-compose.yml`) measurement-only pass across every scenario," but the `runner-service`
+overlay block above was unconditional for the whole performance overlay - D4.4.1a-c's own
+scenarios would therefore also have run under `LOCAL_DEV`/non-Secure-cookie instead of the real
+`PORTFOLIO` posture they were originally validated against. **User's resolution**: split the
+OAuth-only override into its own file, `deploy/docker-compose.performance-auth.yml`, applied only
+around `create-run.js` and reverted immediately after - `wiremock` and the
+`SERVER_SERVLET_SESSION_COOKIE_SECURE=false`/`RUNNER_DEPLOYMENTPROFILE=LOCAL_DEV`/provider-URI
+overrides moved there entirely, out of `docker-compose.performance.yml`. `create-run.js`'s own
+results are now documented as an authenticated write-path measurement under an isolated HTTP
+(non-TLS) test override, not a fully production-identical TLS/OAuth result - real Secure-cookie/TLS
+acceptance for the write path is deferred to D5.
+
+**Live-verified, not assumed - all three required states, against the real stack**:
+1. **Base (no override)**: `docker inspect` showed `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO`/
+   `SERVER_SERVLET_SESSION_COOKIE_SECURE=true`; a real `curl` against
+   `/api/v1/auth/oauth2/authorization/github` (through the published `web` port) showed
+   `Set-Cookie: JSESSIONID=...; Path=/; Secure; HttpOnly; SameSite=Lax` and a `Location` pointing at
+   the real `https://github.com/login/oauth/authorize`.
+2. **With the auth override applied** (`up -d --build runner-service wiremock` with all three
+   compose files): Compose logged a real `Recreate`/`Recreated` for `runner-service` (confirming
+   the config change is actually picked up, not silently ignored); `docker inspect` showed
+   `RUNNER_DEPLOYMENTPROFILE=LOCAL_DEV`/`SERVER_SERVLET_SESSION_COOKIE_SECURE=false`; the same curl
+   now showed `Set-Cookie: JSESSIONID=...; Path=/; HttpOnly; SameSite=Lax` (no `Secure`) and a
+   `Location` pointing at `http://wiremock:8080/...`. `create-run.js` re-ran cleanly against this
+   state: exit `0`, `create_run_correctness: rate=1`; an immediate re-run within the same 60s
+   rate-limit window again correctly produced exit `99`, and `GET /api/v1/runs` confirmed zero
+   orphaned/non-terminal runs (exactly one prior run, `CANCELLED`) - the split changed nothing
+   about the scenario's own already-verified correctness.
+3. **Reverted (auth file omitted again)**: Compose again logged a real `Recreate`/`Recreated` (plus
+   a `Found orphan containers (wiremock)` warning - expected and correct, since `wiremock` is now
+   outside this narrower file set until teardown includes it again); `docker inspect` showed
+   `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO`/`SERVER_SERVLET_SESSION_COOKIE_SECURE=true` again; the same
+   curl showed `Secure` restored on `JSESSIONID` and the `Location` pointing at real
+   `https://github.com` again.
+
+Teardown re-verified with all three compose files + `--profile tools`: every container (including
+the "orphaned" `wiremock`), network, and volume for the `runner-performance` project removed
+cleanly - confirmed via `docker ps -a`/`docker network ls`/`docker volume ls` all returning empty
+for that project afterward.
+
+`performance/README.md` and both compose files' own header comments rewritten to describe the
+recreate/run/revert sequence precisely (see `deploy/docker-compose.performance-auth.yml`'s own
+header comment for the canonical version).
+
+**Next**: the plan's step 5 review checkpoint (or D4.4.2), per this engagement's established
+rhythm of confirming before crossing a sub-phase boundary.
+
+## Review checkpoint - one production-policy pass across every D4.4.1 scenario (2026-09-08)
+
+**Scope**: the plan's own step 5 - "one production-policy (real, unmodified
+`deploy/docker-compose.yml`) measurement-only pass across every scenario," run for the first time
+as one continuous, unbroken stack lifecycle (not each scenario tested in isolation the way D4.4.1a-d
+each were individually) - confirms every scenario genuinely works together end to end against the
+real security/recovery machinery before any threshold or CI work begins in D4.4.2.
+
+**Sequence executed exactly as `performance/README.md` documents**: `up -d --build postgres
+runner-service` (real, unmodified `PORTFOLIO`/`Secure`-cookie config) -> `performance-seed` (500
+terminal runs) -> `up -d --build web` -> `public-read.js` -> `artifact-reads.js` -> `health.js` ->
+`performance-seed-live insert` -> `sse-replay.js` -> `sse-connection-cap.js` ->
+`performance-seed-live delete` -> the create-run auth-override recreate/run/revert sequence
+(`docker-compose.performance-auth.yml` applied only around `create-run.js`, then reverted) ->
+teardown (`--profile tools down -v`, all three compose files).
+
+**Results, every scenario green in the same unbroken lifecycle**:
+- `public-read.js`: exit `0`; `checks: rate=1` (1200/1200); `unexpected_error_rate: 0`.
+- `artifact-reads.js`: exit `0`; `checks: rate=1` (240/240); `expected_429: 90` (the 30/min download
+  bucket correctly triggering); `unexpected_error_rate: 0`.
+- `health.js`: exit `0`; 0 failed checks.
+- `sse-replay.js`: exit `0`; `sse_replay_correctness: rate=1` (5/5); `sse_transport_errors: 0`.
+- `sse-connection-cap.js`: exit `0`; `sse_accepted_connections` exactly `3`,
+  `sse_rejected_connections` exactly `1`, `sse_unexpected_status: 0`, `sse_retry_after_valid:
+  rate=1`.
+- `create-run.js` (auth override applied via a real Compose `Recreate`, confirmed live):
+  exit `0`; `create_run_correctness: rate=1`; `checks: rate=1` (11/11); a real ~107ms `202`
+  latency; the launched `SMOKE` run confirmed genuinely `CANCELLED` via a direct
+  `GET /api/v1/runs` query afterward (no orphaned/non-terminal runs) - then a real Compose
+  `Recreate` back to the unmodified config, confirmed via `docker inspect`
+  (`RUNNER_DEPLOYMENTPROFILE=PORTFOLIO`/`SERVER_SERVLET_SESSION_COOKIE_SECURE=true` restored).
+- Teardown (all three compose files + `--profile tools`) confirmed fully clean via
+  `docker ps -a`/`docker network ls`/`docker volume ls` all returning empty for the
+  `runner-performance` project afterward.
+
+Every scenario ran against the real, unmodified `deploy/docker-compose.yml`'s own `runner-service`
+except for the narrow, explicitly-reverted `create-run.js` window - exactly the posture the
+checkpoint's own "real, unmodified" framing requires, now genuinely true rather than assumed
+(see the D4.4.1d addendum above for why this required the auth-override split in the first place).
+No new code changed this checkpoint - a pure verification pass confirming D4.4.1a-d's individually-
+verified scenarios also hold together as one lifecycle, seed-to-teardown, in a single run.
+
+**D4.4's review checkpoint (plan step 5) is now closed.**
+
+## Faza D4.4.2a - performance-baseline: the throughput overlay
+
+**Date:** 2026-09-08. **Scope:** the first slice of D4.4.2 - a genuine throughput measurement pass,
+distinct from the production-policy pass every prior sub-phase validated. Real rate limits stay on
+by default; this slice raises them for `public-read.js`/`artifact-reads.js`/`health.js` only, so the
+*backend*, not `AbuseRateLimitFilter`, is what gets measured.
+
+**Design decision, made with the user before writing code**: heavier concurrency needed both a
+raised-limit Compose overlay AND more VUs/longer duration on the existing scripts - reusing the
+same scripts (env-configurable per-scenario VUs/duration + an explicit `PERFORMANCE_PROFILE` flag
+changing 429 classification), not separate `-throughput.js` scripts, so validation/metrics logic
+never needs to be kept in sync across duplicates. `sse-connection-cap.js` and `create-run.js` were
+deliberately excluded from the throughput profile: the former exists specifically to prove the
+real, fixed per-IP SSE cap (a security mechanism that must never vary by profile), and the latter
+is never load-tested at all per its own D4.4.1d header comment (real Gradle process launches, not
+a read-path endpoint) - raising limits for either would test a fundamentally different thing.
+
+**What shipped**: `performance/k6/lib/profile.js` - `resolveProfile()` (validates
+`PERFORMANCE_PROFILE` is exactly `"production-policy"` or `"throughput"`, defaulting to the former),
+`resolveVus`/`resolveDuration` (strict validation - a positive integer VU count under a sane
+ceiling, a real k6 duration string - failing script load immediately on anything else, per-scenario
+env var names like `PUBLIC_READ_VUS` rather than one shared `VUS` so raising load on one scenario
+can never leak into SSE/create-run, which don't import this module at all).
+`public-read.js`/`artifact-reads.js`/`health.js` updated: VUs/duration now resolved through
+`lib/profile.js`, `rateLimitExpected` now `!THROUGHPUT` at every call site (previously hardcoded
+`true`), and all three gained real, always-enforced thresholds
+(`unexpected_error_rate: rate==0`, `unexpected_429: count==0`, `unexpected_5xx: count==0`) that
+were missing before this sub-phase - a real gap against this project's own established "checks
+alone don't gate exit code" pattern, closed here rather than only for the new throughput path,
+since an unexpected error/429/5xx is equally a bug in the production-policy pass. New
+`deploy/docker-compose.performance-throughput.yml` - raises `public-read-rate-limit`/
+`download-rate-limit` (via `RUNNER_PUBLICREADRATELIMIT_MAXATTEMPTS`/`_WINDOW` and
+`RUNNER_DOWNLOADRATELIMIT_MAXATTEMPTS`/`_WINDOW` - Spring Boot's relaxed environment-variable
+binding for a nested `RateLimitRule` record field, confirmed against the same convention already
+used by `RUNNER_DEPLOYMENTPROFILE`) to 1,000,000/min - no other `RunnerProperties` limit is
+touched. `performance/README.md` gained a full "Throughput profile" section documenting the
+mechanism, the exclusion of SSE/create-run, and the stepped-escalation methodology.
+
+**Live-verified against the real isolated stack, not assumed**:
+- Applied the throughput overlay via the same recreate/revert pattern as the auth overlay: real
+  Compose `Recreate`, confirmed via `docker inspect` (`RUNNER_PUBLICREADRATELIMIT_MAXATTEMPTS=
+  1000000` etc. present); a direct 130-request curl loop against `/api/v1/capabilities` returned
+  `200` all 130 times (would have hit `429` at request 121 under the old ceiling) - the override
+  genuinely took effect, not just present in the container's env.
+- Stepped VU escalation for `public-read.js` (10 -> 20 -> 40 -> 80 VUs, 30s each), checking
+  HikariCP pool state (`hikaricp_connections_active`/`_pending`, read from inside the container -
+  the published `web` port never exposes `/actuator/prometheus`, a deliberate D4.3.2 decision)
+  before and after each step: every step exit `0`, `checks: rate=1` throughout (2320/2320 ->
+  4800/4800 -> 9600/9600 -> 19200/19200), `unexpected_error_rate`/`unexpected_429`/`unexpected_5xx`
+  all `0` at every step, HikariCP pool never left `0` active/`0` pending at any step, per-endpoint
+  p95/p99 degraded gracefully (single-digit ms at 10 VUs up to `runs-list` p95≈35.5ms/p99≈76ms at
+  80 VUs) rather than spiking - no saturation observed through 80 VUs on this dev machine.
+  `artifact-reads.js` also re-verified at 15 VUs (900 requests, 1800/1800 checks, zero unexpected
+  errors) - confirms the same mechanism works for its own, separately-raised `download-rate-limit`.
+- Reverted `runner-service` back to the real base config afterward: `docker inspect` confirmed no
+  `RATELIMIT` override env vars remained; the same 130-request curl loop then correctly showed
+  exactly 120 `200`s + 10 `429`s again - the real 120/min ceiling genuinely restored, not merely
+  assumed from the compose file no longer being included.
+- Full teardown confirmed clean (`docker ps -a`/`network ls`/`volume ls` all empty for the project).
+
+**Explicitly not yet a locked threshold**: 80 VUs showing no saturation on a local dev laptop under
+Docker Desktop says nothing about the real deployment target's own capacity - this project's own
+plan (P1 correction #5) deliberately defers locking real latency thresholds to actual GitHub-hosted
+CI-runner measurements, never a number any single local machine produces. This sub-phase's job was
+only to prove the throughput mechanism itself works end to end, which it does.
+
+### Gates
+
+No Java/Gradle source touched this sub-phase - no `fullBackendGate`/`dashboardE2eTest` re-run
+needed.
+
+**D4.4.2a (the throughput overlay) is now closed.**
+
+**Next**: D4.4.2b - the measurement-only-CI-first calibration order (P1 correction #5): a
+`performance-test.yml` GitHub Actions workflow (`workflow_dispatch`, thresholds reported but never
+enforced yet), run 3-5 times on the real GitHub-hosted runner type, before any threshold gets
+locked. This step structurally requires the user's own GitHub Actions execution (see
+[[feedback_no_github_push_access_this_env]] - no push/workflow-dispatch-trigger access in this
+environment) - flagged to the user before drafting the workflow itself.

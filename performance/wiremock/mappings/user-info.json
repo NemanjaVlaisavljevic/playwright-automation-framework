@@ -1,0 +1,23 @@
+{
+  "priority": 1,
+  "request": {
+    "method": "GET",
+    "urlPath": "/user",
+    "headers": {
+      "Authorization": {
+        "equalTo": "Bearer perf-fake-access-token"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "id": 999001,
+      "login": "perf-admin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/999001"
+    }
+  }
+}

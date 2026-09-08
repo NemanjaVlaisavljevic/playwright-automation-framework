@@ -1,0 +1,33 @@
+# D4.4.2 - throughput override, additional to docker-compose.performance.yml, used ONLY for a
+# throughput measurement pass (never the production-policy pass the plan's own step-5 checkpoint
+# already validated end to end against the real, unmodified limits - see
+# docker-compose.performance-auth.yml's own header comment for the same "keep every profile out of
+# the always-applied overlay" reasoning applied here for a different surface).
+#
+# Raises the two rate-limit buckets public-read.js/artifact-reads.js's own read-path traffic can
+# actually hit (AbuseRateLimitFilter's `public-read`/`download` buckets - see RunnerProperties'
+# own Javadoc) to a ceiling no realistic throughput run gets anywhere near within one scenario's
+# duration - the point is to measure the real backend's own capacity, not the anti-abuse limiter's
+# capacity. Every other RunnerProperties limit (create-run, cancel-run, OAuth, retention, disk,
+# sse-max-connections-per-ip) is deliberately left untouched - create-run.js is never load-tested
+# at all (see its own header comment), and sse-connection-cap.js exists specifically to prove the
+# real, fixed per-IP SSE connection cap, which must never vary by profile.
+#
+# Usage - always with PERFORMANCE_PROFILE=throughput passed to k6 itself (see
+# performance/README.md's own throughput section for the exact commands and the stepped VU
+# escalation methodology, e.g. 10 -> 20 -> 40 VUs, stopping at the first real saturation signal
+# rather than jumping straight to one aggressive run):
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
+#     -f deploy/docker-compose.performance-throughput.yml --env-file deploy/performance.env \
+#     up -d --build runner-service
+#   (recreate + wait healthy, same as docker-compose.performance-auth.yml's own pattern)
+#   docker compose ... run --rm --build k6 run -e PERFORMANCE_PROFILE=throughput \
+#     -e PUBLIC_READ_VUS=10 -e PUBLIC_READ_DURATION=60s /scripts/public-read.js
+#   ... revert runner-service back to the base config afterward (omit this file), same pattern.
+services:
+  runner-service:
+    environment:
+      - RUNNER_PUBLICREADRATELIMIT_MAXATTEMPTS=1000000
+      - RUNNER_PUBLICREADRATELIMIT_WINDOW=PT1M
+      - RUNNER_DOWNLOADRATELIMIT_MAXATTEMPTS=1000000
+      - RUNNER_DOWNLOADRATELIMIT_WINDOW=PT1M
