@@ -1,0 +1,148 @@
+name: Performance Baseline (measurement-only)
+
+# D4.4.2b - runs every k6 scenario against the real, unmodified production-policy topology
+# (deploy/docker-compose.yml + docker-compose.performance.yml), the exact lifecycle
+# performance/README.md documents and the 2026-09-08 review checkpoint already validated locally
+# end to end. This first version is deliberately measurement-only (P1 correction #5 in the
+# approved D4.4 plan, docs/RELEASE_EVIDENCE.md's "Faza D4.4.2a" section): every k6 scenario step
+# below carries `continue-on-error: true` so a threshold - correctness or the still-permissive
+# latency placeholders alike - never fails this job. The point of this workflow, run 3-5 times as
+# a real GitHub-hosted-runner measurement, is only to gather that runner's own latency numbers to
+# compare against the local-machine numbers already in docs/RELEASE_EVIDENCE.md, before locking
+# any real threshold - never to gate anything yet. Once thresholds are locked from this data (a
+# later revision of this same file, once D4.4.2's own calibration step completes),
+# `continue-on-error` comes off the scenario steps and this becomes a real pass/fail gate.
+#
+# workflow_dispatch only, never a push/PR gate this phase - matches local-sut.yml's own reasoning
+# (a full multi-container Compose lifecycle, including two Docker image builds, is too slow/heavy
+# for every push). The throughput overlay (docker-compose.performance-throughput.yml, D4.4.2a) is
+# deliberately not part of this workflow at all - only the production-policy scenarios get their
+# latency thresholds calibrated against real CI-runner numbers; throughput's own local verification
+# already stands on its own (see docs/RELEASE_EVIDENCE.md's "Faza D4.4.2a").
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: performance-test-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  COMPOSE: >-
+    docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml
+    --env-file deploy/performance.env
+  COMPOSE_AUTH: >-
+    docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml
+    -f deploy/docker-compose.performance-auth.yml --env-file deploy/performance.env
+
+jobs:
+  performance-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Bring up postgres + runner-service (real, unmodified PORTFOLIO/Secure-cookie config)
+        run: $COMPOSE up -d --build postgres runner-service
+
+      - name: Wait for runner-service healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' runner-performance-runner-service-1 2>/dev/null || echo missing)
+            echo "check $i: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "runner-service never became healthy" >&2
+          exit 1
+
+      - name: Seed the database (500 terminal runs, incl. perf-replay-run/artifact examples)
+        run: $COMPOSE run --rm --build performance-seed
+
+      - name: Bring up web
+        run: $COMPOSE up -d --build web
+
+      - name: Run public-read.js (production-policy)
+        continue-on-error: true
+        run: $COMPOSE run --rm --build k6 run /scripts/public-read.js
+
+      - name: Run artifact-reads.js (production-policy)
+        continue-on-error: true
+        run: $COMPOSE run --rm --build k6 run /scripts/artifact-reads.js
+
+      - name: Run health.js
+        continue-on-error: true
+        run: $COMPOSE run --rm --build k6 run /scripts/health.js
+
+      - name: Insert the SSE hold-open fixture (perf-hold-open-run)
+        run: $COMPOSE run --rm --build performance-seed-live ./seed-live-run.sh insert
+
+      - name: Run sse-replay.js
+        continue-on-error: true
+        run: $COMPOSE run --rm --build k6-sse run /scripts/sse-replay.js
+
+      - name: Run sse-connection-cap.js
+        continue-on-error: true
+        run: $COMPOSE run --rm --build k6-sse run /scripts/sse-connection-cap.js
+
+      - name: Delete the SSE hold-open fixture
+        if: always()
+        run: $COMPOSE run --rm performance-seed-live ./seed-live-run.sh delete
+
+      - name: Apply the auth override for create-run.js (wiremock + LOCAL_DEV/non-Secure cookie)
+        run: $COMPOSE_AUTH up -d --build runner-service wiremock
+
+      - name: Wait for runner-service healthy (auth override applied)
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' runner-performance-runner-service-1 2>/dev/null || echo missing)
+            echo "check $i: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "runner-service never became healthy after the auth override" >&2
+          exit 1
+
+      - name: Run create-run.js
+        continue-on-error: true
+        run: $COMPOSE_AUTH run --rm --build k6 run /scripts/create-run.js
+
+      - name: Revert runner-service back to the real, unmodified config
+        if: always()
+        run: $COMPOSE up -d --build runner-service
+
+      - name: Wait for runner-service healthy (reverted)
+        if: always()
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' runner-performance-runner-service-1 2>/dev/null || echo missing)
+            echo "check $i: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "runner-service never became healthy after reverting the auth override" >&2
+          exit 1
+
+      - name: Dump container logs
+        if: failure()
+        run: $COMPOSE_AUTH logs --no-color > compose-logs.txt
+
+      - name: Upload k6 results + diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            performance/k6/results/
+            compose-logs.txt
+
+      - name: Tear down (fully throwaway - volumes intentionally removed)
+        if: always()
+        continue-on-error: true
+        run: $COMPOSE_AUTH --profile tools down -v

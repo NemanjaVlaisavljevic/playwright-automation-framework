@@ -1735,3 +1735,60 @@ enforced yet), run 3-5 times on the real GitHub-hosted runner type, before any t
 locked. This step structurally requires the user's own GitHub Actions execution (see
 [[feedback_no_github_push_access_this_env]] - no push/workflow-dispatch-trigger access in this
 environment) - flagged to the user before drafting the workflow itself.
+
+## Faza D4.4.2b - performance-baseline: measurement-only CI workflow (drafted, awaiting real runs)
+
+**Date:** 2026-09-08. **Scope:** P1 correction #5's revised calibration order - a measurement-only
+GitHub Actions workflow first, run 3-5 times on the real GitHub-hosted runner type, before any
+latency threshold is locked (never the first-draft order of measuring locally then building CI
+around it, which risks flaky CI thresholds calibrated on a machine CI never runs on).
+
+**What shipped**: `.github/workflows/performance-test.yml` - `workflow_dispatch`-only (never a
+push/PR gate, matching `local-sut.yml`'s own reasoning: a full multi-container Compose lifecycle
+with two image builds is too slow/heavy for every push), pinned-SHA actions
+(`actions/checkout@d23441a4`/`actions/upload-artifact@043fb46d`, the same versions
+`local-sut.yml` already uses), a `concurrency` group, `permissions: contents: read`,
+`timeout-minutes: 45`. Runs the exact lifecycle `performance/README.md` documents and the
+2026-09-08 review checkpoint already validated locally: bring up postgres/runner-service (real,
+unmodified config) -> seed -> web -> `public-read.js`/`artifact-reads.js`/`health.js` -> SSE
+fixture insert -> `sse-replay.js`/`sse-connection-cap.js` -> SSE fixture delete -> the auth-override
+recreate/run/revert sequence for `create-run.js` -> upload `performance/k6/results/` (and container
+logs on failure) as a build artifact (14-day retention) -> teardown (`--profile tools down -v`,
+always run, `continue-on-error`). No repository secrets needed at all - `deploy/performance.env`'s
+committed fake OAuth credentials plus the WireMock stub are exactly what D4.4.1d already made
+self-contained.
+
+**Deliberately measurement-only, not yet enforcing**: every k6 scenario step carries
+`continue-on-error: true` - a threshold failure (correctness or the still-permissive latency
+placeholders) is reported in that step's own status but never fails the job. This matches the
+plan's own step 1 ("k6 runs, thresholds are reported but never block/fail the job") literally, for
+every threshold, not only the latency ones - since a threshold failure and a genuine correctness
+regression are currently indistinguishable from the job's exit status alone. Setup/teardown steps
+(bringing the stack up, seeding, waiting for health, reverting the auth override) are NOT
+`continue-on-error` - a real infrastructure failure there should still fail the job; only the
+scenario measurements themselves are non-blocking this round.
+
+**Not yet done - requires the user's own execution**: this environment has no push or
+`workflow_dispatch`-trigger access (see [[feedback_no_github_push_access_this_env]]), so the
+remaining steps of P1 correction #5's calibration order structurally need the user:
+1. Push this workflow, then dispatch it manually 3-5 times via the GitHub Actions UI (or `gh
+   workflow run performance-test.yml`).
+2. Download each run's `performance-results-*` artifact and share the `performance/k6/results/*.json`
+   contents (or the run URLs) back for comparison against this session's own local-machine numbers
+   (`docs/RELEASE_EVIDENCE.md`'s D4.4.2a section) - expect real, unsurprising divergence between a
+   GitHub-hosted runner and a local dev laptop.
+3. Once compared, lock real per-endpoint `success_latency_ms{endpoint:...}` thresholds from the
+   CI-runner numbers (deliberately wide enough to absorb that runner's own noise, never the
+   tightest number a single good run produced) and remove `continue-on-error` from the scenario
+   steps.
+4. Re-run the workflow once more with thresholds now active/enforcing, confirming it genuinely
+   passes - and, ideally, a deliberate one-off negative test (temporarily tighten one threshold
+   impossibly) confirming it genuinely fails - before calling D4.4.2 closed.
+
+### Gates
+
+No Java/Gradle source touched this sub-phase - no `fullBackendGate`/`dashboardE2eTest` re-run
+needed. The new workflow YAML was validated for syntactic correctness only (parsed via `js-yaml`
+locally) - it has not yet actually executed in GitHub Actions.
+
+**D4.4.2b is drafted, not yet closed** - blocked on the user running it for real.
