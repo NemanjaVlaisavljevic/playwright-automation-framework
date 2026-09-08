@@ -1792,3 +1792,59 @@ needed. The new workflow YAML was validated for syntactic correctness only (pars
 locally) - it has not yet actually executed in GitHub Actions.
 
 **D4.4.2b is drafted, not yet closed** - blocked on the user running it for real.
+
+### Run #1 (2026-09-08, GitHub Actions run 34263760241) - a real bug found and fixed
+
+The user pushed the workflow and dispatched it once. Every step reported `success` and the whole
+job completed in ~399s (~6.6 min) - but that green result was misleading for four of the six
+scenarios, caught only by reading the actual raw step logs (not just the job/step conclusions from
+the Actions API), the same "verify against the real running system, not the green checkmark alone"
+discipline this project applies throughout.
+
+**[P1] The stock `grafana/k6:1.5.0` image could not write its own machine-readable summary file on
+this runner** - `public-read.js`/`artifact-reads.js`/`health.js`/`create-run.js` (every scenario
+using the stock `k6` service) each logged a real `time="..." level=error msg="failed to handle the
+end-of-test summary" error="Could not save some summary information:\n\t- could not open
+'/results/<name>.json': open /results/<name>.json: permission denied"` - and the resulting artifact
+upload only ever contained 2 of the expected 6 files (`sse-replay.json`/`sse-connection-cap.json`,
+the two scenarios using the custom `k6-sse` image instead). **Root cause**: the stock `grafana/k6`
+image runs its process as a non-root user; on this GitHub-hosted runner, Docker auto-created the
+missing bind-mount host directory (`performance/k6/results/`) as root with no write access for
+that non-root user - unlike this project's own local Docker Desktop dev machines, which never
+surfaced this (every local verification pass earlier in D4.4.1a-d/D4.4.2a wrote its result files
+successfully). The custom `k6-sse` image was unaffected only because its own Dockerfile has no
+`USER` directive at all (runs as root) - not because anything about its own volume/write logic
+differs. **Fixed**: a new early workflow step, `mkdir -p performance/k6/results && chmod 777
+performance/k6/results`, right after checkout and before any container touches that path - creates
+the directory owned by the runner's own user first (so Docker never has to auto-create it as root)
+and makes it world-writable regardless of which UID a given k6 image's process runs as. A
+throwaway, single-job CI VM, so `777` here poses no real risk. **Not yet re-verified against a real
+run** - this environment's own Windows/Docker Desktop bind-mount behavior does not enforce Unix
+permission bits the same way a Linux host does, so this fix cannot be locally reproduced/confirmed
+the way every other fix in this project has been; a second real GitHub Actions run is the only way
+to confirm it - flagged to the user as the immediate next step.
+
+**Genuinely good news underneath the bug**: the actual k6 process itself was never affected by the
+failed file write - `stdout` still printed the full summary in every case (the file write and the
+`stdout` print are two independent entries in `handleSummary`'s own returned map), so the real
+CI-runner numbers were fully recoverable by reading the raw step logs directly, and every
+scenario's own **correctness** signal was already genuinely green on real GitHub Actions
+infrastructure, not just locally:
+- `public-read.js`: `checks: rate=1` (1200/1200), `unexpected_error_rate`/`unexpected_429`/
+  `unexpected_5xx` all `0`. Per-endpoint (5 VUs/30s, the production-policy default):
+  `capabilities` p95≈76ms/p99≈77ms, `tests` p95≈71ms/p99≈75ms, `runs-list` p95≈166ms/p99≈166ms,
+  `run-detail` p95≈27ms/p99≈34ms.
+- `artifact-reads.js`: `checks: rate=1` (240/240), zero unexpected errors. `artifacts-list`
+  p95≈20ms/p99≈21ms, `artifact-download` p95≈13ms/p99≈13ms.
+- `health.js`: `checks: rate=1` (120/120), zero unexpected errors. `liveness` p95≈5.1ms/p99≈5.5ms,
+  `readiness` p95≈4.8ms/p99≈5.9ms.
+- `create-run.js`: `checks: rate=1` (11/11), `create_run_correctness: rate=1`, a real ~150ms `202`
+  latency on this GitHub-hosted runner (vs. ~107-171ms across this session's own local runs -
+  same order of magnitude, genuine machine-to-machine divergence, exactly as the plan's own
+  calibration order anticipated).
+- SSE scenarios (unaffected by the bug, their own result files uploaded correctly):
+  `sse-replay.js`/`sse-connection-cap.js` both green - full detail in the downloaded artifact.
+
+**Next, still requires the user**: push this fix, dispatch the workflow again (run #2) to confirm
+all 6 result files now upload correctly, then continue to 2-4 more runs (3-5 total, per the plan)
+before comparing CI-runner numbers against local ones in aggregate and locking real thresholds.

@@ -46,6 +46,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
+      # A real bug found on run #1 (2026-09-08): the stock grafana/k6 image runs its process as a
+      # non-root user, but Docker auto-creates a missing bind-mount host directory as root - on
+      # this GitHub-hosted runner (unlike this project's own local Docker Desktop dev machines,
+      # which never showed this), that left `performance/k6/results/` owned by root with no
+      # write access for k6's own non-root user, so every stock-`k6`-image scenario
+      # (public-read/artifact-reads/health/create-run) logged a real
+      # `could not open '/results/<name>.json': permission denied` and silently lost its own
+      # machine-readable summary file, despite the step itself still reporting success (only the
+      # file write failed, not the k6 process). The custom k6-sse image was unaffected only because
+      # its own Dockerfile has no USER directive at all (runs as root). Creating the directory here
+      # first (owned by the runner's own user, not Docker) and making it world-writable fixes this
+      # for every k6 image regardless of which user it runs as - a throwaway CI VM, so 777 here
+      # poses no real risk.
+      - name: Ensure the k6 results directory is writable by every k6 container image
+        run: |
+          mkdir -p performance/k6/results
+          chmod 777 performance/k6/results
+
       - name: Bring up postgres + runner-service (real, unmodified PORTFOLIO/Secure-cookie config)
         run: $COMPOSE up -d --build postgres runner-service
 
