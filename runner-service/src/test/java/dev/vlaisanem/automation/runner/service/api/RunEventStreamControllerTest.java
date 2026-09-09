@@ -5,6 +5,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -17,6 +19,7 @@ import dev.vlaisanem.automation.runner.service.domain.Run;
 import dev.vlaisanem.automation.runner.service.domain.Suite;
 import dev.vlaisanem.automation.runner.service.events.RunEventBroker;
 import dev.vlaisanem.automation.runner.service.events.RunEventSubscriber;
+import dev.vlaisanem.automation.runner.service.events.RunEventSubscription;
 import dev.vlaisanem.automation.runner.service.events.SseConnectionsPerIpTracker;
 import dev.vlaisanem.automation.runner.service.exception.RunEventSubscriptionRejectedException;
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
@@ -24,12 +27,16 @@ import dev.vlaisanem.automation.runner.service.exception.RunnerRecoveringExcepti
 import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService;
 import dev.vlaisanem.automation.runner.service.orchestration.RunService;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -46,8 +53,13 @@ import org.springframework.test.web.servlet.MockMvc;
 // D3.3 - a real instance, not a MockitoBean: SseConnectionsPerIpTracker#tryAcquire is boolean, and
 // a Mockito mock would default it to false, silently rejecting every existing test here unless
 // explicitly stubbed true everywhere. The real component (only depends on the already-real
-// RunnerProperties bean above) behaves exactly as production does, with no such pitfall.
-@Import(SseConnectionsPerIpTracker.class)
+// RunnerProperties bean above, plus a plain MeterRegistry for its D4.4.2b active-slots gauge -
+// see the nested TestMeterRegistryConfig below) behaves exactly as production does, with no such
+// pitfall.
+@Import({
+  SseConnectionsPerIpTracker.class,
+  RunEventStreamControllerTest.TestMeterRegistryConfig.class
+})
 class RunEventStreamControllerTest {
 
   @Autowired private MockMvc mockMvc;
@@ -174,5 +186,104 @@ class RunEventStreamControllerTest {
     verify(broker)
         .replayAndSubscribe(eq("run-1"), afterSequence.capture(), any(RunEventSubscriber.class));
     assertThat(afterSequence.getValue()).isEqualTo(5L);
+  }
+
+  /**
+   * D4.4.2b - regression test for the real CI finding: a terminal run's own broker-side {@code
+   * onComplete} must release the per-IP slot immediately, without needing Spring's async servlet
+   * context to separately notice the emitter completed and invoke {@code onCompletion} - see {@code
+   * RunEventStreamController.SseRunEventSubscriber}'s own Javadoc for the full story. This test
+   * never triggers any servlet-level completion callback at all (MockMvc's {@code asyncStarted()}
+   * leaves the request genuinely still open) - the only thing that ever runs is the captured {@link
+   * RunEventSubscriber#onComplete()} itself, exactly mirroring what {@code RunEventHub}'s {@code
+   * Subscription.deliverLoop} calls once it delivers a run's final event.
+   */
+  @Test
+  void aBrokerSideOnCompleteReleasesThePerIpSlotImmediately() throws Exception {
+    Run run =
+        Run.queued("run-1", Environment.PUBLIC, Suite.API, Instant.parse("2026-08-31T00:00:00Z"));
+    when(runService.find("run-1")).thenReturn(run);
+    // A real replayAndSubscribe never returns null (see RunEventBroker's own contract) - stub it
+    // realistically so the DeferredSubscriptionHandle this test exercises actually has a
+    // subscription to close, exactly like production.
+    when(broker.replayAndSubscribe(eq("run-1"), anyLong(), any()))
+        .thenReturn(mock(RunEventSubscription.class));
+
+    for (int i = 0; i < 3; i++) {
+      mockMvc
+          .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
+          .andExpect(request().asyncStarted());
+    }
+
+    // The cap is now full - a 4th connection from the same IP is rejected, exactly as the
+    // sibling "theFourthConcurrentSseConnectionFromTheSameIpIsRejected" test already proves.
+    mockMvc
+        .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
+        .andExpect(status().isTooManyRequests());
+
+    ArgumentCaptor<RunEventSubscriber> subscribers =
+        ArgumentCaptor.forClass(RunEventSubscriber.class);
+    verify(broker, times(3)).replayAndSubscribe(eq("run-1"), anyLong(), subscribers.capture());
+    RunEventSubscriber firstSubscriber = subscribers.getAllValues().get(0);
+
+    // The broker decides this run's timeline is done and notifies the subscriber directly - no
+    // emitter/servlet callback is ever exercised by this test.
+    firstSubscriber.onComplete();
+    // Idempotency: a second terminal notification (e.g. a real onError racing a real onComplete)
+    // must never free a second slot on top of the one already released above.
+    firstSubscriber.onComplete();
+
+    // Exactly one slot was released - one new connection from the same IP now succeeds...
+    mockMvc
+        .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
+        .andExpect(request().asyncStarted());
+    // ...but the cap is full again immediately after, proving the double onComplete() above
+    // never released a second slot.
+    mockMvc
+        .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
+        .andExpect(status().isTooManyRequests());
+  }
+
+  /** Mirrors {@link #aBrokerSideOnCompleteReleasesThePerIpSlotImmediately} for the error path. */
+  @Test
+  void aBrokerSideOnErrorReleasesThePerIpSlotImmediately() throws Exception {
+    Run run =
+        Run.queued("run-1", Environment.PUBLIC, Suite.API, Instant.parse("2026-08-31T00:00:00Z"));
+    when(runService.find("run-1")).thenReturn(run);
+    when(broker.replayAndSubscribe(eq("run-1"), anyLong(), any()))
+        .thenReturn(mock(RunEventSubscription.class));
+
+    for (int i = 0; i < 3; i++) {
+      mockMvc
+          .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("198.51.100.42")))
+          .andExpect(request().asyncStarted());
+    }
+
+    ArgumentCaptor<RunEventSubscriber> subscribers =
+        ArgumentCaptor.forClass(RunEventSubscriber.class);
+    verify(broker, times(3)).replayAndSubscribe(eq("run-1"), anyLong(), subscribers.capture());
+    subscribers.getAllValues().get(0).onError(new RuntimeException("simulated transport failure"));
+
+    mockMvc
+        .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("198.51.100.42")))
+        .andExpect(request().asyncStarted());
+  }
+
+  /**
+   * Provides the plain {@link MeterRegistry} {@link SseConnectionsPerIpTracker} now needs for its
+   * {@code runner.sse.client_slots.active} gauge (D4.4.2b) - {@code @WebMvcTest} does not
+   * auto-configure Micrometer, and this slice has no need to assert on the metric itself (that is
+   * covered by {@code SseConnectionsPerIpTrackerTest}). {@code @TestConfiguration}, not a plain
+   * {@code @Configuration}: the latter gets misdetected as the slice's primary user configuration
+   * and silently suppresses {@code @WebMvcTest}'s own controller registration entirely - a real
+   * gotcha hit while writing this test (every request fell through to the default static-resource
+   * handler with no controller mapped at all, despite the context reporting a clean startup).
+   */
+  @TestConfiguration
+  static class TestMeterRegistryConfig {
+    @Bean
+    MeterRegistry meterRegistry() {
+      return new SimpleMeterRegistry();
+    }
   }
 }

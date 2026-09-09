@@ -1,7 +1,10 @@
 package dev.vlaisanem.automation.runner.service.events;
 
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.stereotype.Component;
 
 /**
@@ -15,15 +18,25 @@ import org.springframework.stereotype.Component;
  * later {@link #release} call once that specific connection actually ends (see {@code
  * RunEventStreamController#stream}, which composes this into the same {@code onClose} callback
  * already used to cancel that connection's heartbeat).
+ *
+ * <p>{@code runner.sse.client_slots.active} exposes the same total this class enforces against -
+ * deliberately without a {@code clientIp} tag (unbounded cardinality) - so it can be watched
+ * independently of {@link RunEventHub}'s own {@code runner.sse.connections.active}: a D4.4.2b CI
+ * investigation found the two can legitimately disagree for a real window (this one nonzero while
+ * the hub's own subscription count has already dropped to zero), which is exactly the gap that let
+ * a stale per-IP slot outlive its subscription and starve the next connection from the same IP.
  */
 @Component
 public class SseConnectionsPerIpTracker {
 
   private final int maxConnectionsPerIp;
   private final ConcurrentHashMap<String, Integer> activeCounts = new ConcurrentHashMap<>();
+  private final AtomicInteger totalActiveSlots = new AtomicInteger();
 
-  public SseConnectionsPerIpTracker(RunnerProperties properties) {
+  public SseConnectionsPerIpTracker(RunnerProperties properties, MeterRegistry meterRegistry) {
     this.maxConnectionsPerIp = properties.sseMaxConnectionsPerIp();
+    Gauge.builder("runner.sse.client_slots.active", totalActiveSlots, AtomicInteger::get)
+        .register(meterRegistry);
   }
 
   /**
@@ -42,12 +55,23 @@ public class SseConnectionsPerIpTracker {
           acquired[0] = true;
           return existing + 1;
         });
+    if (acquired[0]) {
+      totalActiveSlots.incrementAndGet();
+    }
     return acquired[0];
   }
 
   /** Releases one previously-{@link #tryAcquire}d slot for this IP - removes the entry at zero. */
   public void release(String clientIp) {
+    boolean[] released = {false};
     activeCounts.computeIfPresent(
-        clientIp, (ignored, current) -> current <= 1 ? null : current - 1);
+        clientIp,
+        (ignored, current) -> {
+          released[0] = true;
+          return current <= 1 ? null : current - 1;
+        });
+    if (released[0]) {
+      totalActiveSlots.decrementAndGet();
+    }
   }
 }

@@ -4,10 +4,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.vlaisanem.automation.runner.service.config.RateLimitRule;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 class SseConnectionsPerIpTrackerTest {
+
+  private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
+  private SseConnectionsPerIpTracker tracker(int sseMaxConnectionsPerIp) {
+    return new SseConnectionsPerIpTracker(properties(sseMaxConnectionsPerIp), meterRegistry);
+  }
+
+  private double activeSlotsGaugeValue() {
+    return meterRegistry.get("runner.sse.client_slots.active").gauge().value();
+  }
 
   private static RunnerProperties properties(int sseMaxConnectionsPerIp) {
     RateLimitRule aRule = new RateLimitRule(5, Duration.ofMinutes(1));
@@ -53,7 +64,7 @@ class SseConnectionsPerIpTrackerTest {
 
   @Test
   void allowsUpToTheConfiguredCapThenRejectsTheNextOne() {
-    SseConnectionsPerIpTracker tracker = new SseConnectionsPerIpTracker(properties(2));
+    SseConnectionsPerIpTracker tracker = tracker(2);
 
     assertThat(tracker.tryAcquire("1.2.3.4")).isTrue();
     assertThat(tracker.tryAcquire("1.2.3.4")).isTrue();
@@ -62,7 +73,7 @@ class SseConnectionsPerIpTrackerTest {
 
   @Test
   void releasingASlotAllowsAnotherAcquisition() {
-    SseConnectionsPerIpTracker tracker = new SseConnectionsPerIpTracker(properties(1));
+    SseConnectionsPerIpTracker tracker = tracker(1);
 
     assertThat(tracker.tryAcquire("1.2.3.4")).isTrue();
     assertThat(tracker.tryAcquire("1.2.3.4")).isFalse();
@@ -74,7 +85,7 @@ class SseConnectionsPerIpTrackerTest {
 
   @Test
   void tracksEachClientIpIndependently() {
-    SseConnectionsPerIpTracker tracker = new SseConnectionsPerIpTracker(properties(1));
+    SseConnectionsPerIpTracker tracker = tracker(1);
 
     assertThat(tracker.tryAcquire("1.2.3.4")).isTrue();
     assertThat(tracker.tryAcquire("5.6.7.8")).isTrue();
@@ -84,10 +95,46 @@ class SseConnectionsPerIpTrackerTest {
 
   @Test
   void releasingAnUnknownIpIsANoOp() {
-    SseConnectionsPerIpTracker tracker = new SseConnectionsPerIpTracker(properties(1));
+    SseConnectionsPerIpTracker tracker = tracker(1);
 
     tracker.release("never-acquired");
 
     assertThat(tracker.tryAcquire("never-acquired")).isTrue();
+  }
+
+  /**
+   * D4.4.2b - the metric this class registers to make the exact gap that caused the CI SSE-cap
+   * flakiness observable: {@code runner.sse.client_slots.active} must track every real acquire/
+   * release, across multiple IPs, never double-counting a no-op release (an unknown IP, or one
+   * already fully released).
+   */
+  @Test
+  void theActiveSlotsGaugeTracksRealAcquiresAndReleasesAcrossMultipleIps() {
+    SseConnectionsPerIpTracker tracker = tracker(2);
+    assertThat(activeSlotsGaugeValue()).isZero();
+
+    assertThat(tracker.tryAcquire("1.2.3.4")).isTrue();
+    assertThat(activeSlotsGaugeValue()).isEqualTo(1);
+
+    assertThat(tracker.tryAcquire("5.6.7.8")).isTrue();
+    assertThat(activeSlotsGaugeValue()).isEqualTo(2);
+
+    assertThat(tracker.tryAcquire("1.2.3.4")).isTrue();
+    assertThat(activeSlotsGaugeValue()).isEqualTo(3);
+
+    // A rejected acquire (over the cap) must never move the gauge.
+    assertThat(tracker.tryAcquire("1.2.3.4")).isFalse();
+    assertThat(activeSlotsGaugeValue()).isEqualTo(3);
+
+    // A no-op release (nothing acquired for this IP) must never move the gauge either.
+    tracker.release("never-acquired");
+    assertThat(activeSlotsGaugeValue()).isEqualTo(3);
+
+    tracker.release("1.2.3.4");
+    assertThat(activeSlotsGaugeValue()).isEqualTo(2);
+
+    tracker.release("1.2.3.4");
+    tracker.release("5.6.7.8");
+    assertThat(activeSlotsGaugeValue()).isZero();
   }
 }

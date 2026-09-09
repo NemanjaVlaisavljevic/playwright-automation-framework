@@ -24,6 +24,21 @@ name: Performance Baseline (measurement-only)
 # `if: always()` instead, so one scenario's real failure never prevents the remaining scenarios,
 # the artifact upload, or teardown from still running.
 #
+# Root cause found after run #4 (2026-09-09, run 34327622491) produced a third, inverted split
+# (1 accepted/3 rejected) - real raw-log timestamps proved sse-replay.js's actual k6 execution and
+# sse-connection-cap.js's actual k6 execution are only ~0.9s apart (the 87s that looked like a gap
+# in run #4's own docker-group timestamps was BuildKit/registry-metadata overhead, not test time).
+# RunEventStreamController.SseRunEventSubscriber.onComplete()/onError() only called
+# guard.complete()/completeWithError() and relied entirely on Spring's async servlet container to
+# separately notice and invoke its own onCompletion/onError listener before the per-IP slot was
+# ever released - a real, variable-length gap under CI load. Fixed at the source (both terminal
+# callbacks now also call DeferredSubscriptionHandle#requestClose directly, releasing the slot the
+# instant the broker itself knows a subscription is done). The "Wait for the per-IP SSE slot count
+# to drain" step below is this workflow's own belt-and-suspenders proof of that fix, using the new
+# runner.sse.client_slots.active gauge (SseConnectionsPerIpTracker) - a bounded poll, not a fixed
+# sleep, so it fails fast with a precise message instead of masking a future regression the way a
+# blind delay would.
+#
 # workflow_dispatch only, never a push/PR gate this phase - matches local-sut.yml's own reasoning
 # (a full multi-container Compose lifecycle, including two Docker image builds, is too slow/heavy
 # for every push). The throughput overlay (docker-compose.performance-throughput.yml, D4.4.2a) is
@@ -113,6 +128,25 @@ jobs:
       - name: Run sse-replay.js
         if: always()
         run: $COMPOSE run --rm --build k6-sse run /scripts/sse-replay.js
+
+      # D4.4.2b - a real CI finding (run #2/#4): sse-replay.js's own terminal-run connections can
+      # still be counted against the per-IP cap for a short window after the broker itself already
+      # considers them done, and sse-connection-cap.js starts under a second later, reusing the
+      # same client IP (both are ephemeral `docker compose run` containers on the same network).
+      # A bounded poll on the new runner.sse.client_slots.active gauge, not a fixed sleep - passes
+      # instantly once genuinely drained, and fails fast with a precise message instead of silently
+      # letting sse-connection-cap.js start from a non-zero baseline the way run #2/#4 did.
+      - name: Wait for the per-IP SSE slot count to drain after the terminal replay
+        if: always()
+        run: |
+          for i in $(seq 1 20); do
+            value=$(docker exec runner-performance-runner-service-1 curl -fsS http://127.0.0.1:8080/actuator/prometheus | awk '/^runner_sse_client_slots_active / {print $2}')
+            echo "check $i: runner_sse_client_slots_active=$value"
+            if [ "$value" = "0.0" ]; then exit 0; fi
+            sleep 1
+          done
+          echo "SSE per-IP slots did not drain after terminal replay" >&2
+          exit 1
 
       - name: Run sse-connection-cap.js
         if: always()

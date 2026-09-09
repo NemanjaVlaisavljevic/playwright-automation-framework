@@ -137,7 +137,7 @@ public class RunEventStreamController {
 
     try {
       RunEventSubscription subscription =
-          broker.replayAndSubscribe(runId, afterSequence, new SseRunEventSubscriber(guard));
+          broker.replayAndSubscribe(runId, afterSequence, new SseRunEventSubscriber(guard, handle));
       handle.set(subscription);
     } catch (RuntimeException subscribeFailure) {
       heartbeat.cancel(false);
@@ -179,13 +179,30 @@ public class RunEventStreamController {
    * Translates canonical {@link RunnerEvent}s into SSE frames. All completion is routed through
    * {@link EmitterGuard} so it is never attempted twice - once for whichever of "the hub closed
    * this subscription" or "the container/client ended the connection" happens to notice first.
+   *
+   * <p>{@link #onComplete}/{@link #onError} also call {@link
+   * DeferredSubscriptionHandle#requestClose} directly, rather than relying solely on {@code
+   * emitter.complete()}/{@code completeWithError()} to eventually trigger the servlet container's
+   * own {@code onCompletion}/{@code onError} listeners (registered in {@link #stream}). Live
+   * D4.4.2b CI evidence found that gap real: those listeners fire asynchronously, and under
+   * back-to-back SSE scenarios reusing the same client IP (two `docker compose run` k6 containers
+   * on the same network, seconds apart) the next connection can arrive - and call {@link
+   * SseConnectionsPerIpTracker#tryAcquire} - before the previous one's servlet-level callback has
+   * run, so the per-IP slot still reads as held even though the broker already knows the
+   * subscription is done. Calling {@code requestClose} here releases it the instant the application
+   * logically completes, with no wait on servlet plumbing; it is safe precisely because {@link
+   * DeferredSubscriptionHandle#requestClose} is idempotent and defers correctly if {@link
+   * DeferredSubscriptionHandle#set} has not run yet - whichever of this call and the later servlet
+   * callback lands first performs the actual release, the other is a no-op.
    */
   private static final class SseRunEventSubscriber implements RunEventSubscriber {
 
     private final EmitterGuard guard;
+    private final DeferredSubscriptionHandle handle;
 
-    private SseRunEventSubscriber(EmitterGuard guard) {
+    private SseRunEventSubscriber(EmitterGuard guard, DeferredSubscriptionHandle handle) {
       this.guard = guard;
+      this.handle = handle;
     }
 
     @Override
@@ -201,12 +218,20 @@ public class RunEventStreamController {
 
     @Override
     public void onError(Throwable cause) {
-      guard.completeWithError(cause);
+      try {
+        guard.completeWithError(cause);
+      } finally {
+        handle.requestClose();
+      }
     }
 
     @Override
     public void onComplete() {
-      guard.complete();
+      try {
+        guard.complete();
+      } finally {
+        handle.requestClose();
+      }
     }
   }
 
