@@ -3,15 +3,26 @@ name: Performance Baseline (measurement-only)
 # D4.4.2b - runs every k6 scenario against the real, unmodified production-policy topology
 # (deploy/docker-compose.yml + docker-compose.performance.yml), the exact lifecycle
 # performance/README.md documents and the 2026-09-08 review checkpoint already validated locally
-# end to end. This first version is deliberately measurement-only (P1 correction #5 in the
-# approved D4.4 plan, docs/RELEASE_EVIDENCE.md's "Faza D4.4.2a" section): every k6 scenario step
-# below carries `continue-on-error: true` so a threshold - correctness or the still-permissive
-# latency placeholders alike - never fails this job. The point of this workflow, run 3-5 times as
-# a real GitHub-hosted-runner measurement, is only to gather that runner's own latency numbers to
-# compare against the local-machine numbers already in docs/RELEASE_EVIDENCE.md, before locking
-# any real threshold - never to gate anything yet. Once thresholds are locked from this data (a
-# later revision of this same file, once D4.4.2's own calibration step completes),
-# `continue-on-error` comes off the scenario steps and this becomes a real pass/fail gate.
+# end to end. Measurement-only in intent (P1 correction #5 in the approved D4.4 plan,
+# docs/RELEASE_EVIDENCE.md's "Faza D4.4.2a" section): the per-endpoint `success_latency_ms{...}`
+# thresholds are still permissive placeholders (`p(95)<100000`, i.e. 100s - cannot realistically
+# fail), so nothing here blocks the job on a not-yet-calibrated latency number. Every OTHER
+# threshold in every scenario (correctness Rates/Counters like `unexpected_error_rate`,
+# `create_run_correctness`, `sse_accepted_connections`, etc.) is already a locked, real invariant -
+# these are deliberately left BLOCKING, never wrapped in `continue-on-error`.
+#
+# This was a genuine, real correction, not a design choice made up front: run #2 (2026-09-08,
+# GitHub Actions run 34278044784) originally had `continue-on-error: true` on every scenario step,
+# and it silently masked a real threshold crossing in `sse-connection-cap.js` (`sse_accepted_
+# connections`/`sse_rejected_connections` both failed - 2 accepted/2 rejected instead of the real
+# per-IP cap's expected 3/1 - k6 itself exited 99) behind a job that still showed all-green. See
+# docs/RELEASE_EVIDENCE.md's D4.4.2b "Run #2" subsection for the full investigation (the tracker's
+# own code was reviewed and is provably race-free in isolation - the exact cause was not
+# conclusively established from logs alone). `continue-on-error` removed from every scenario step
+# as a direct result - a correctness regression must always turn this job red, never be silently
+# swallowed the way run #2 first did. Every step from the first scenario onward now carries
+# `if: always()` instead, so one scenario's real failure never prevents the remaining scenarios,
+# the artifact upload, or teardown from still running.
 #
 # workflow_dispatch only, never a push/PR gate this phase - matches local-sut.yml's own reasoning
 # (a full multi-container Compose lifecycle, including two Docker image builds, is too slow/heavy
@@ -85,26 +96,26 @@ jobs:
         run: $COMPOSE up -d --build web
 
       - name: Run public-read.js (production-policy)
-        continue-on-error: true
         run: $COMPOSE run --rm --build k6 run /scripts/public-read.js
 
       - name: Run artifact-reads.js (production-policy)
-        continue-on-error: true
+        if: always()
         run: $COMPOSE run --rm --build k6 run /scripts/artifact-reads.js
 
       - name: Run health.js
-        continue-on-error: true
+        if: always()
         run: $COMPOSE run --rm --build k6 run /scripts/health.js
 
       - name: Insert the SSE hold-open fixture (perf-hold-open-run)
+        if: always()
         run: $COMPOSE run --rm --build performance-seed-live ./seed-live-run.sh insert
 
       - name: Run sse-replay.js
-        continue-on-error: true
+        if: always()
         run: $COMPOSE run --rm --build k6-sse run /scripts/sse-replay.js
 
       - name: Run sse-connection-cap.js
-        continue-on-error: true
+        if: always()
         run: $COMPOSE run --rm --build k6-sse run /scripts/sse-connection-cap.js
 
       - name: Delete the SSE hold-open fixture
@@ -112,9 +123,11 @@ jobs:
         run: $COMPOSE run --rm performance-seed-live ./seed-live-run.sh delete
 
       - name: Apply the auth override for create-run.js (wiremock + LOCAL_DEV/non-Secure cookie)
+        if: always()
         run: $COMPOSE_AUTH up -d --build runner-service wiremock
 
       - name: Wait for runner-service healthy (auth override applied)
+        if: always()
         run: |
           for i in $(seq 1 30); do
             status=$(docker inspect --format='{{.State.Health.Status}}' runner-performance-runner-service-1 2>/dev/null || echo missing)
@@ -126,7 +139,7 @@ jobs:
           exit 1
 
       - name: Run create-run.js
-        continue-on-error: true
+        if: always()
         run: $COMPOSE_AUTH run --rm --build k6 run /scripts/create-run.js
 
       - name: Revert runner-service back to the real, unmodified config

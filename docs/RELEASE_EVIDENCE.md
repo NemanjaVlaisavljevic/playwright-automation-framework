@@ -1848,3 +1848,74 @@ infrastructure, not just locally:
 **Next, still requires the user**: push this fix, dispatch the workflow again (run #2) to confirm
 all 6 result files now upload correctly, then continue to 2-4 more runs (3-5 total, per the plan)
 before comparing CI-runner numbers against local ones in aggregate and locking real thresholds.
+
+### Run #2 (2026-09-08, GitHub Actions run 34278044784) - the file-write fix confirmed, but a real correctness regression was found masked by `continue-on-error`
+
+All 22 steps reported `success` (~382s total) - and this time genuinely all 6 result files
+uploaded correctly (`artifact-reads.json`/`create-run.json`/`health.json`/`public-read.json`/
+`sse-connection-cap.json`/`sse-replay.json`), confirming the permission-directory fix from run #1
+works. `public-read.js`/`artifact-reads.js`/`health.js`/`create-run.js` all showed `checks: rate=1`
+and zero unexpected errors/429s/5xx, matching run #1's own already-clean correctness signal (real
+per-endpoint p95/p99 numbers recorded in each JSON file for later CI-runner-vs-local comparison).
+
+**But reading the raw `sse-connection-cap.js` step log (not just its "success" conclusion) found a
+real threshold crossing that the job's own green status had silently hidden**:
+```
+"sse_accepted_connections": { "values": { "count": 2 }, "thresholds": { "count==3": { "ok": false } } }
+"sse_rejected_connections": { "values": { "count": 2 }, "thresholds": { "count==1": { "ok": false } } }
+time="..." level=error msg="thresholds on metrics 'sse_accepted_connections, sse_rejected_connections' have been crossed"
+##[error]Process completed with exit code 99.
+```
+2 of the 4 VUs were accepted (held open ~5000ms, matching `HOLD_OPEN_SECONDS=5`) and 2 were
+rejected (~36ms, a real `429` - `sse_unexpected_status: 0`, so both rejections were genuinely the
+expected status code, just one too many of them) - instead of the real per-IP cap's own expected
+3 accepted / 1 rejected split, that D4.4.1c's own review round already locked and live-verified
+repeatedly on the local dev machine. This is exactly the kind of regression `continue-on-error:
+true` was designed to keep from blocking the job during calibration - and it worked exactly as
+told, which is precisely the problem: a genuine correctness signal (not a latency-calibration
+number) got masked.
+
+**Investigated, not yet conclusively root-caused**: reviewed `SseConnectionsPerIpTracker.tryAcquire`
+(`runner-service/.../events/SseConnectionsPerIpTracker.java`) directly - its accounting uses
+`ConcurrentHashMap.compute`, which the JDK guarantees applies atomically per key; in isolation this
+can never let fewer than min(concurrent-attempts, cap) requests through regardless of arrival
+order, so the tracker's own counting logic is not itself provably racy. Also reviewed
+`RunEventStreamController#stream`'s own acquire/release wiring - `tryAcquire` is followed by
+`onCompletion`/`onTimeout`/`onError` registration and a `DeferredSubscriptionHandle` guaranteeing
+`release()` fires exactly once per successful call, with no unguarded exception window found
+between acquiring the slot and registering that guarantee under normal (non-shutdown) conditions.
+The `sse-replay.js` step immediately before this one in the same job completed cleanly with zero
+transport errors, giving no direct log evidence of a leaked/unreleased connection carrying a stale
+count into the connection-cap test - but a silent release-miss would not necessarily produce any
+error message at all, so this is not a confirmed exoneration either. Two live hypotheses remain
+open: (a) a stale per-IP count genuinely carried over from an earlier connection in the same job
+(would require a real, currently-unidentified gap in the release-guarantee code above), or (b) a
+request-arrival/dispatch timing artifact specific to this one CI run (a genuinely different
+network/scheduling environment than every local verification this scenario has otherwise passed
+on) - neither is yet confirmed or ruled out from the logs available.
+
+**Fixed regardless of root cause - the masking problem itself**: `continue-on-error: true` removed
+from every scenario step in `.github/workflows/performance-test.yml`. This is safe to do now
+without risking a false-positive block from an uncalibrated *latency* number - every per-endpoint
+`success_latency_ms{endpoint:...}` threshold is still a permissive `p(95)<100000` (100s) placeholder
+that cannot realistically fail - so today, the *only* thing that can fail any of these steps is a
+genuine correctness regression exactly like the one just found. Every step from the first scenario
+onward gained `if: always()` so one scenario's real failure can never prevent the remaining
+scenarios, the results upload, or teardown from still running - only the job's own final
+conclusion should ever turn red now, which is the entire point.
+
+### Gates
+
+No Java/Gradle source touched by this masking fix - `SseConnectionsPerIpTracker`/
+`RunEventStreamController` were read, not modified, since the code review did not find a
+conclusive, fixable defect - only two open hypotheses.
+
+**Next, still requires the user**: push this masking fix, then dispatch the workflow again (run #3)
+specifically to see whether `sse-connection-cap.js`'s 3-accepted/1-rejected split reproduces
+correctly now that a genuine failure there will make the job visibly red instead of silently
+passing. If run #3 reproduces the 2/2 split again, that is strong evidence toward a real,
+reproducible defect worth deeper investigation (e.g. temporary diagnostic logging in the tracker,
+or auditing every one of `sse-replay.js`'s own 5 connections for a release guarantee gap); if run #3
+comes back clean (3/1, matching every local verification), that points toward hypothesis (b) - a
+one-off environmental artifact of that specific run - though even then, worth keeping an eye on
+across the remaining calibration runs rather than dismissing outright after just one clean rerun.
