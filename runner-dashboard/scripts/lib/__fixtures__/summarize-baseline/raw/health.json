@@ -1,0 +1,71 @@
+{
+  "scenario": "health",
+  "metrics": {
+    "success_latency_ms{endpoint:liveness}": {
+      "type": "trend",
+      "contains": "time",
+      "thresholds": {
+        "p(95)<50": { "ok": true }
+      },
+      "values": {
+        "count": 30,
+        "p(50)": 3.5,
+        "p(95)": 5.0,
+        "p(99)": 6.0,
+        "avg": 3.8,
+        "min": 3.0,
+        "max": 6.2
+      }
+    },
+    "success_latency_ms{endpoint:readiness}": {
+      "type": "trend",
+      "contains": "time",
+      "thresholds": {
+        "p(95)<50": { "ok": true }
+      },
+      "values": {
+        "count": 30,
+        "p(50)": 3.4,
+        "p(95)": 4.8,
+        "p(99)": 5.9,
+        "avg": 3.6,
+        "min": 2.8,
+        "max": 6.0
+      }
+    },
+    "unexpected_429": {
+      "type": "counter",
+      "contains": "default",
+      "thresholds": {
+        "count==0": { "ok": true }
+      },
+      "values": {
+        "count": 0,
+        "rate": 0
+      }
+    },
+    "unexpected_5xx": {
+      "type": "counter",
+      "contains": "default",
+      "thresholds": {
+        "count==0": { "ok": true }
+      },
+      "values": {
+        "count": 0,
+        "rate": 0
+      }
+    },
+    "unexpected_error_rate": {
+      "type": "rate",
+      "contains": "default",
+      "thresholds": {
+        "rate==0": { "ok": true }
+      },
+      "values": {
+        "rate": 0,
+        "passes": 0,
+        "fails": 30
+      }
+    }
+  }
+}

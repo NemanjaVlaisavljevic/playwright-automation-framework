@@ -1,0 +1,14 @@
+{
+  "measuredAt": "2026-01-01T00:00:00Z",
+  "commitSha": "000000000000000000000000000000000000dead",
+  "profile": "production-policy",
+  "executionMode": "cold",
+  "repetitions": 1,
+  "runnerImage": "ubuntu-latest",
+  "k6Version": "1.5.0",
+  "workflowRun": {
+    "id": 1,
+    "attempt": 1,
+    "url": "https://github.com/example/example/actions/runs/1"
+  }
+}

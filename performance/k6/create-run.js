@@ -3,7 +3,7 @@ import { check } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import { getHeader } from './lib/headers.js';
 import { isValidRetryAfter } from './lib/metrics.js';
-import { handleSummary as sharedHandleSummary } from './lib/summary.js';
+import { handleSummary as sharedHandleSummary, SUMMARY_TREND_STATS } from './lib/summary.js';
 
 // D4.4.1d - create-run.js: the one genuinely admin-gated, real-process-launching scenario. Never
 // load-tested like a read-path endpoint - `POST /api/v1/runs` is deliberately single-worker,
@@ -36,6 +36,7 @@ export const createRunCorrectness = new Rate('create_run_correctness');
 export const options = {
   vus: 1,
   iterations: 1,
+  summaryTrendStats: SUMMARY_TREND_STATS,
   thresholds: {
     create_run_correctness: ['rate==1'],
     create_run_unexpected_error_rate: ['rate==0'],

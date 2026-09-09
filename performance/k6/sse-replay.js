@@ -1,7 +1,7 @@
 import sse from 'k6/x/sse';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import { check } from 'k6';
-import { handleSummary as sharedHandleSummary } from './lib/summary.js';
+import { handleSummary as sharedHandleSummary, SUMMARY_TREND_STATS } from './lib/summary.js';
 
 // D4.4.1c - sse-replay.js: connection-establishment time, time-to-first-event, and full-replay
 // duration/correctness against `perf-replay-run` (a terminal, SUCCEEDED run with 399 seeded
@@ -33,6 +33,7 @@ export const sseReplayCorrectness = new Rate('sse_replay_correctness');
 export const options = {
   vus: 1,
   iterations: 5,
+  summaryTrendStats: SUMMARY_TREND_STATS,
   thresholds: {
     // D4.4.2 - real, locked latency gates, ~3x the highest p95 observed across four consecutive
     // clean GitHub Actions runs (see public-read.js's own comment for the full methodology and

@@ -2,7 +2,7 @@ import http from 'k6/http';
 import { sleep } from 'k6';
 import exec from 'k6/execution';
 import { getAndClassify } from './lib/http.js';
-import { handleSummary as sharedHandleSummary } from './lib/summary.js';
+import { handleSummary as sharedHandleSummary, SUMMARY_TREND_STATS } from './lib/summary.js';
 import { resolveProfile, resolveVus, resolveDuration } from './lib/profile.js';
 
 // D4.4.1b - public-read.js: capabilities/tests/runs-list/run-detail, the four endpoints sharing
@@ -40,7 +40,7 @@ const PLAIN_RUN_COUNT = 480;
 export const options = {
   vus: VUS,
   duration: DURATION,
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
+  summaryTrendStats: SUMMARY_TREND_STATS,
   thresholds: {
     // D4.4.2 - real, locked per-endpoint latency gates, calibrated from four consecutive clean
     // GitHub Actions runs against the exact production-policy lifecycle this workflow runs

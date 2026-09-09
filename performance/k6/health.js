@@ -1,7 +1,7 @@
 import http from 'k6/http';
 import { sleep } from 'k6';
 import { getAndClassify } from './lib/http.js';
-import { handleSummary as sharedHandleSummary } from './lib/summary.js';
+import { handleSummary as sharedHandleSummary, SUMMARY_TREND_STATS } from './lib/summary.js';
 import { resolveProfile, resolveVus, resolveDuration } from './lib/profile.js';
 
 // D4.4.1b - health.js: liveness/readiness, measured separately from the read-path scenarios - a
@@ -27,7 +27,7 @@ const BASE_URL = __ENV.BASE_URL || 'http://web';
 export const options = {
   vus: VUS,
   duration: DURATION,
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
+  summaryTrendStats: SUMMARY_TREND_STATS,
   thresholds: {
     // D4.4.2 - real, locked latency gates, floored at 50ms rather than a strict 3x multiple of the
     // ~5-6ms observed p95 - these actuator probes are already so fast that 3x would be a

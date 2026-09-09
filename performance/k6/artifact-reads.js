@@ -3,7 +3,7 @@ import { sleep } from 'k6';
 import exec from 'k6/execution';
 import { getAndClassify } from './lib/http.js';
 import { getHeader } from './lib/headers.js';
-import { handleSummary as sharedHandleSummary } from './lib/summary.js';
+import { handleSummary as sharedHandleSummary, SUMMARY_TREND_STATS } from './lib/summary.js';
 import { resolveProfile, resolveVus, resolveDuration } from './lib/profile.js';
 
 // D4.4.1b - artifact-reads.js: the artifacts-list and artifact-download endpoints, which share
@@ -35,7 +35,7 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 export const options = {
   vus: VUS,
   duration: DURATION,
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
+  summaryTrendStats: SUMMARY_TREND_STATS,
   thresholds: {
     // D4.4.2 - real, locked latency gates, ~3x the highest p95 observed for each endpoint across
     // four consecutive clean GitHub Actions runs (see public-read.js's own comment for the full

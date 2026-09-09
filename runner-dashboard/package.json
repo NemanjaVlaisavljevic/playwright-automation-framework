@@ -22,6 +22,8 @@
     "api:check:snapshot": "npm run api:generate && node scripts/check-git-clean.mjs src/api/generated",
     "api:check:contract": "npm run api:export && npm run api:generate && node scripts/check-git-clean.mjs openapi/runner-api.json src/api/generated",
     "check:boundaries": "node scripts/check-import-boundaries.mjs",
+    "baseline:summarize": "node scripts/summarize-baseline.mjs",
+    "baseline:check": "node scripts/check-baseline.mjs",
     "check": "npm run format:check && npm run lint && npm run check:boundaries && npm run typecheck && npm run test:coverage && npm run build",
     "preview": "vite preview"
   },

@@ -6,6 +6,16 @@
 // not worth trading away offline/reproducible CI for) - only `JSON.stringify` on k6's own already-
 // computed `data.metrics`, which already reflects each script's own `summaryTrendStats` choice.
 //
+// D4.4.3a - a real gap found only by trying to actually consume every scenario's raw output for the
+// baseline summarizer: `sse-replay.js`/`sse-connection-cap.js`/`create-run.js` never set
+// `summaryTrendStats` at all, so k6's own default (`avg,min,med,max,p(90),p(95)` - no `count`, no
+// `p(50)`, no `p(99)`) silently diverged from `public-read.js`/`artifact-reads.js`/`health.js`'s own
+// explicit choice, even though this file's own header already claimed the whole point of one shared
+// `handleSummary()` was a single locked output shape. `SUMMARY_TREND_STATS` is now the one place
+// that shape is declared - every scenario script's own `options.summaryTrendStats` must reference
+// this constant, never repeat or diverge from it.
+export const SUMMARY_TREND_STATS = ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'];
+//
 // A review finding: tagging a Trend sample does not by itself make k6 track a separate
 // `success_latency_ms{endpoint:...}` sub-metric - only referencing that exact tag combination in
 // `options.thresholds` does. `expectedEndpoints` is this scenario's own declared list of endpoints

@@ -3,7 +3,7 @@ import { Counter, Rate } from 'k6/metrics';
 import { check } from 'k6';
 import { getHeader } from './lib/headers.js';
 import { isValidRetryAfter } from './lib/metrics.js';
-import { handleSummary as sharedHandleSummary } from './lib/summary.js';
+import { handleSummary as sharedHandleSummary, SUMMARY_TREND_STATS } from './lib/summary.js';
 
 // D4.4.1c - sse-connection-cap.js: proves the real per-IP concurrent-connection cap
 // (SseConnectionsPerIpTracker, default 3 - D3.3) against `perf-hold-open-run` (a still-`RUNNING`
@@ -46,6 +46,7 @@ export const options = {
       maxDuration: '30s',
     },
   },
+  summaryTrendStats: SUMMARY_TREND_STATS,
   thresholds: {
     // Real, failing gates on the exact accepted/rejected split - a review finding: Counter
     // metrics alone only describe what happened; without a referencing threshold, a regression

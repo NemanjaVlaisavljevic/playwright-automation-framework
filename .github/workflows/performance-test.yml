@@ -194,6 +194,34 @@ jobs:
           echo "runner-service never became healthy after reverting the auth override" >&2
           exit 1
 
+      # D4.4.3a - the summarizer (runner-dashboard/scripts/summarize-baseline.mjs) requires this
+      # sidecar alongside the six raw results below; it never guesses provenance from its own
+      # environment (a review finding - reconstructing this after the fact from Actions API/log
+      # scraping would be strictly weaker and error-prone). k6Version is read from the same
+      # docker-compose.performance.yml pin the k6 service itself uses, not hand-duplicated, so a
+      # future version bump can never leave this sidecar silently stale.
+      - name: Generate the metadata.json sidecar for the baseline summarizer
+        if: always()
+        run: |
+          k6_version=$(grep -oE 'grafana/k6:[0-9]+\.[0-9]+\.[0-9]+' deploy/docker-compose.performance.yml | head -1 | cut -d: -f2)
+          cat > performance/k6/results/metadata.json <<EOF
+          {
+            "measuredAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commitSha": "${{ github.sha }}",
+            "profile": "production-policy",
+            "executionMode": "cold",
+            "repetitions": 1,
+            "runnerImage": "ubuntu-latest",
+            "k6Version": "$k6_version",
+            "workflowRun": {
+              "id": ${{ github.run_id }},
+              "attempt": ${{ github.run_attempt }},
+              "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+          }
+          EOF
+          cat performance/k6/results/metadata.json
+
       - name: Dump container logs
         if: failure()
         run: $COMPOSE_AUTH logs --no-color > compose-logs.txt
