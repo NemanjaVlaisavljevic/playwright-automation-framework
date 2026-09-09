@@ -24,7 +24,7 @@
     "check:boundaries": "node scripts/check-import-boundaries.mjs",
     "baseline:summarize": "node scripts/summarize-baseline.mjs",
     "baseline:check": "node scripts/check-baseline.mjs",
-    "check": "npm run format:check && npm run lint && npm run check:boundaries && npm run typecheck && npm run test:coverage && npm run build",
+    "check": "npm run format:check && npm run lint && npm run check:boundaries && npm run baseline:check && npm run typecheck && npm run test:coverage && npm run build",
     "preview": "vite preview"
   },
   "dependencies": {

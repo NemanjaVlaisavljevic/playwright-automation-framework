@@ -7,6 +7,10 @@
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
+    /* D4.4.3b - the one, deliberately committed, non-generated static asset the app itself ever
+       imports as data: public/performance/baseline.json, read directly by its own contract-
+       validation test (see src/domain/performance-baseline.test.ts). */
+    "resolveJsonModule": true,
 
     /* Bundler mode */
     "moduleResolution": "bundler",

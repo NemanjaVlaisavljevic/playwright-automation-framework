@@ -66,6 +66,16 @@ export function AppShell({
           >
             Runs
           </NavLink>
+          <NavLink
+            to="/performance"
+            className={({ isActive }) =>
+              isActive
+                ? `${styles.navLink} ${styles.navLinkActive}`
+                : styles.navLink
+            }
+          >
+            Performance
+          </NavLink>
         </nav>
         <main className={styles.content}>
           <Outlet />

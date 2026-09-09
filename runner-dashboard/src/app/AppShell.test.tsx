@@ -79,4 +79,12 @@ describe("AppShell", () => {
       "page",
     );
   });
+
+  it("renders a Performance nav link, not marked current while on another route", () => {
+    renderShell();
+
+    const performanceLink = screen.getByRole("link", { name: "Performance" });
+    expect(performanceLink).toHaveAttribute("href", "/performance");
+    expect(performanceLink).not.toHaveAttribute("aria-current");
+  });
 });

@@ -1919,3 +1919,332 @@ or auditing every one of `sse-replay.js`'s own 5 connections for a release guara
 comes back clean (3/1, matching every local verification), that points toward hypothesis (b) - a
 one-off environmental artifact of that specific run - though even then, worth keeping an eye on
 across the remaining calibration runs rather than dismissing outright after just one clean rerun.
+
+### Root cause found and fixed (2026-09-09)
+
+The user re-read run #4's raw log timestamps precisely (not the docker-build-group start time
+mistakenly used above) and found `sse-replay.js`'s real k6 execution and `sse-connection-cap.js`'s
+real k6 execution are only ~0.9s apart, not the 87s this section originally reasoned from - that 87s
+was BuildKit/registry-metadata overhead for the `k6-sse` custom image, never test time. With the real
+gap that tight, the actual defect became visible:
+`RunEventStreamController.SseRunEventSubscriber.onComplete()`/`onError()` only called
+`guard.complete()`/`completeWithError()`, relying entirely on Spring's async servlet container to
+separately notice the emitter finished and invoke its own `onCompletion`/`onError` listener before
+`SseConnectionsPerIpTracker.release()` ever ran - a real, variable-length async gap under CI load,
+absent locally where the two k6 scenarios run seconds apart with headroom to spare. This precisely
+explains every prior split as 0/1/2 stale slots still held when `sse-connection-cap.js`'s 4
+concurrent VUs fired: 3/1 (0 stale), 2/2 (1 stale), 1/3 (2 stale).
+
+**Fixed**: `onComplete()`/`onError()` now also call `DeferredSubscriptionHandle#requestClose()`
+directly in a `finally`, alongside the existing `guard` call - releases the per-IP slot the instant
+the broker itself knows a subscription is done, not just once servlet plumbing eventually notices.
+Safe because `requestClose()` is already idempotent and correctly defers if `handle.set()` hasn't run
+yet (whichever of the two ever-firing paths - this new direct call, or the pre-existing servlet
+`onCompletion`/`onError` listener - lands first performs the actual release, the other is a no-op).
+Also added: a `runner.sse.client_slots.active` gauge on `SseConnectionsPerIpTracker` (mirrors
+`RunEventHub`'s own `runner.sse.connections.active` gauge pattern, no `clientIp` tag - unbounded
+cardinality); a bounded-poll "drain checkpoint" workflow step in `.github/workflows/performance-test.yml`
+between `sse-replay.js` and `sse-connection-cap.js` that polls this gauge via
+`docker exec ... curl .../actuator/prometheus` (20 tries, 1s apart) and fails fast with "SSE per-IP
+slots did not drain after terminal replay" if it never reaches `0.0` - proof the fix actually works,
+never a blind `sleep`. Two new regression tests in `RunEventStreamControllerTest` prove the slot
+releases from the broker-side callback alone, with no servlet completion callback ever exercised by
+MockMvc, including idempotency (a doubled `onComplete()` never double-releases); a new
+gauge-tracking test in `SseConnectionsPerIpTrackerTest`.
+
+### Runs #5-#8 (2026-09-09) - four consecutive clean CI runs with the real fix in place
+
+Run #5 (GitHub Actions run `34335917122`): all 22 steps `success`; the new drain-checkpoint step
+passed on its very first check (`runner_sse_client_slots_active=0.0` immediately, no retries);
+`sse-connection-cap.js` gave the correct `sse_accepted_connections.count==3`/
+`sse_rejected_connections.count==1`, both thresholds `ok: true` - the first result obtained with the
+real fix in place rather than by chance timing. Runs #6 (`34336865449`) and #7 (`34337509597`) both
+repeated the identical clean 3/1 split with an immediate drain-checkpoint pass, verified via a raw-log
+check against the GitHub REST API (`GH_TOKEN`-authenticated). Zero `level=error`/"thresholds crossed"
+anywhere in any of the three raw logs.
+
+### Latency thresholds locked (2026-09-09)
+
+Extracted real p95 latency per metric from the four clean runs (`34326415182`/`34335917122`/
+`34336865449`/`34337509597`) via raw-log grep/sed, presented the aggregated table to the user for
+sign-off before touching any file, then implemented once approved. Locked value = ~3x the highest
+observed p95 across the four runs, rounded to a clean number, with two documented exceptions:
+`runs-list` got extra headroom (750ms, its own p95 already swung 147-216ms/~47% even across clean
+runs); the near-zero-latency metrics (`liveness`/`readiness`/`sse_time_to_first_event_ms`, all under
+~6ms observed) got a 50-100ms floor instead of a literal 3x of a few milliseconds, since a threshold
+that tight would just measure CI noise, not signal.
+
+| Metric | Observed p95 range (4 runs) | Locked threshold |
+|---|---|---|
+| `capabilities` | 66-80ms | 250ms |
+| `tests` | 77-92ms | 300ms |
+| `runs-list` | 147-216ms | 750ms |
+| `run-detail` | 25-33ms | 100ms |
+| `artifacts-list` | 17.5-17.7ms | 75ms |
+| `artifact-download` | 12-14ms | 50ms |
+| `liveness` | 4.7-5.7ms | 50ms |
+| `readiness` | 4.2-6.2ms | 50ms |
+| `sse_connection_establish_ms` | 74-83ms | 300ms |
+| `sse_time_to_first_event_ms` | 0-0.8ms | 100ms |
+| `sse_replay_duration_ms` | 97-122ms | 500ms |
+
+Files touched: `performance/k6/public-read.js`, `artifact-reads.js`, `health.js`, `sse-replay.js`
+(each threshold's own comment cites the calibration methodology and exact run ids), plus
+`.github/workflows/performance-test.yml`'s top-of-file comment corrected to no longer claim these are
+unfailable placeholders. `create-run.js`'s own `create_run_success_latency_ms` was deliberately left
+without a threshold - single-sample (1 VU/1 iteration), a p95 of n=1 isn't meaningful.
+
+Real-verified locally against the actual isolated performance Compose stack (all four newly-thresholded
+scenarios rerun for real, all exit `0`, zero `"ok": false` anywhere - local numbers came back far below
+even the new tighter thresholds, e.g. `capabilities` p95≈6ms vs. the 250ms limit, as expected with no
+GitHub-runner network/scheduling overhead). Pushed by the user (commit `a90e498`) and confirmed on
+**run #8** (GitHub Actions run `34340787074`) - fully clean, all 22 steps `success`, all 11 newly-locked
+thresholds passed comfortably (max observed utilization only ~37% of its limit - `run-detail`:
+37.0ms observed vs. 100ms limit), SSE-cap split 3/1 again (5th consecutive clean split across runs
+#3/#5/#6/#7/#8), drain checkpoint passed on its first check again.
+
+### Deliberate negative test (2026-09-09) - proving the threshold mechanism can actually fail
+
+Done as a local exercise rather than a disposable CI dispatch-and-revert commit: temporarily set
+`health.js`'s `success_latency_ms{endpoint:liveness}` threshold to an impossible `p(95)<1` (real
+observed values are always 4-8ms), ran it against the same real local performance Compose stack used
+for the threshold-locking verification above. Result: **k6 exited 99** (not 0), the real JSON summary
+showed `"p(95)<1": { "ok": false }` for liveness, and the log carried
+`level=error msg="thresholds on metrics 'success_latency_ms{endpoint:liveness}' have been crossed"` -
+the same failure shape D4.4.2b's own run #2 investigation had already established as "exit 99 +
+`ok: false` = a real, unmasked failure." Clean isolation confirmed too: `readiness`'s own untouched
+`p(95)<50` threshold stayed `ok: true` in the same run. Reverted the one-line change immediately after
+(`git diff` empty), stack torn down cleanly, no leftover containers.
+
+### Gates
+
+Full backend `spotlessCheck test` (every module) green throughout the root-cause fix. No frontend
+code touched by D4.4.2b itself.
+
+**D4.4.2/D4.4.2b is now fully closed** - real defect root-caused and fixed (not worked around),
+observability added (`runner.sse.client_slots.active` gauge + CI drain checkpoint), real latency
+thresholds locked from real CI-runner data and reconfirmed on a fifth clean run, and the threshold
+*mechanism itself* proven capable of actually failing, not just always passing.
+
+**Next**: D4.4.3 - a machine-readable, versioned `baseline.json` summarizing every scenario's
+performance-test.yml. `performance/k6/lib/summary.js`'s own `handleSummary()` - the same GitHub
+Actions run this section's own run #8 already exercised - as the canonical source for a committed,
+dashboard-rendered performance baseline.
+
+## Faza D4.4.3a - performance-baseline: `baseline.json` summarizer + golden test
+
+**Date:** 2026-09-09. **Scope:** turn one archived CI run's six raw k6 JSON summaries + a provenance
+sidecar into one committed, machine-typed `baseline.json` - the source of truth the D4.4.3c dashboard
+page renders and D4.4.3b's Zod contract validates.
+
+**Design, reviewed and corrected by the user before any code was written**: a nested
+`scenarios[].{latencies[],signals[]}` shape (not endpoint/scenario fields flattened together - a
+shared scenario-level counter must never look like it belongs to one endpoint); an explicit
+`metadata.json` sidecar for provenance the summarizer must never guess from its own environment
+(`measuredAt`/`commitSha`/`profile`/`executionMode`/`repetitions`/`runnerImage`/`k6Version`/
+`workflowRun`); raw CI results permanently archived under `performance/baselines/<run-id>/
+{metadata.json,raw/*.json}` rather than trusting GitHub's own expiring workflow-artifact retention;
+`sampleCount` in place of a non-decomposable `requestsPerSecond`; fail-closed generation on missing/
+extra scenario, duplicate scenarioId/metricId, zero samples, non-finite/negative values, p50>p95>p99
+ordering violations, any threshold not `ok:true`, and a scenario-name/file mismatch.
+
+**What shipped**: `runner-dashboard/scripts/lib/summarize-baseline-core.mjs` (pure, filesystem-free -
+`summarizeBaseline({metadata, rawByScenario, scenarioConfigs, now})`, throws `SummarizeBaselineError`
+on any violation above); `runner-dashboard/scripts/lib/scenario-configs.mjs` (the real 6-scenario/
+metric mapping, shared between generation and the drift check); `runner-dashboard/scripts/
+summarize-baseline.mjs` (CLI: `--input <archived-dir> --output <path>`); `runner-dashboard/scripts/
+check-baseline.mjs` (a drift check mirroring `api:check:contract`'s own precedent - reads which
+archived run backs the *currently committed* `baseline.json` from its own `source.workflowRun.id`,
+regenerates reusing the committed file's own `generatedAt` as the injected clock); `npm run
+baseline:summarize`/`npm run baseline:check` added to `runner-dashboard/package.json`. Golden-output
+test (`summarize-baseline-core.test.mjs`) - one golden-fixture happy path plus one focused test per
+fail-closed validation branch.
+
+**Review round - 1 P1 + 3 P2, all fixed before any push.** (1) [P1] A metric with no threshold at all
+was silently treated as passing - `requireEveryThresholdOk` only checked thresholds that existed, so
+`passed: null` never failed `allPassed`. Fixed with an explicit `thresholdRequired` flag per metric
+config (defaults `true`; only genuinely informational/single-sample metrics are `false`), plus a
+second, independent check scanning the *entire* raw JSON (not just scenario-config-selected metrics)
+for any failing threshold. (2) [P2] The CI workflow never generated the `metadata.json` sidecar -
+added a step to `.github/workflows/performance-test.yml` that writes it from `github.sha`/
+`github.run_id`/`github.run_attempt`, a real UTC timestamp, and `k6Version` read live from
+`deploy/docker-compose.performance.yml`'s own image pin. (3) [P2] Metadata fields were copied into
+`source` with zero validation - added `validateMetadata()` (ISO-8601 timestamps, 40-hex commit SHA,
+locked enums, positive integers, a real `workflowRun.url` cross-checked against `workflowRun.id`).
+(4) [P2] The CLI only ever looked for six hardcoded scenario filenames, so an extra/stale raw file in
+a mixed archive directory was silently ignored - extracted `load-archived-baseline.mjs` to `readdir`
+the archive for real, shared by both generation and the drift check.
+
+**Real CI provenance**: run #9 (GitHub Actions run `34350297733`) failed on a transient
+`proxy.golang.org` Go module proxy error building the `k6-sse` image - confirmed non-systemic (a
+later, separate build of the same image in the same job succeeded) by downloading and inspecting the
+artifact directly rather than trusting the red X alone. Run #10 (GitHub Actions run `34351594770`,
+commit `f38cd49`) was fully clean - all 6 scenarios green, all 22 steps `success`. Archived
+permanently at `performance/baselines/34351594770/` (`metadata.json` + `raw/*.json`) - **this is the
+canonical source `runner-dashboard/public/performance/baseline.json` is generated from**:
+`node scripts/summarize-baseline.mjs --input ../performance/baselines/34351594770 --output
+public/performance/baseline.json`, run from `runner-dashboard/`. Output: all 6 scenarios `PASSED`, 12
+latency metrics + 23 signal metrics, zero validation failures; `npm run baseline:check` confirms the
+committed output still matches regeneration exactly.
+
+### Gates
+
+`summarize-baseline-core.test.mjs`: 24/24 green (13 -> 24 across the review round). Full pipeline
+re-verified end to end against real local data (all six scenarios rerun for real, including the SSE
+hold-open fixture and the create-run auth-override recreate/run/revert sequence) - zero validation
+failures; `check-baseline.mjs` confirmed clean, then a deliberately mutated value was confirmed to
+correctly fail the drift check. `npx prettier --check`/`oxlint --deny-warnings`/`check:boundaries`
+clean.
+
+**D4.4.3a is closed.**
+
+## Faza D4.4.3b - performance-baseline: Zod contract schema
+
+**Date:** 2026-09-09. **Scope:** a strict, fail-closed Zod schema over the committed `baseline.json`
+- the dashboard's own client-side guarantee that a hand-edited or drifted file is rejected, never
+silently rendered as if valid.
+
+**What shipped**: `runner-dashboard/src/domain/performance-baseline.ts`, mirroring `runner-event.ts`'s
+own established style (`.strict()` everywhere, locked enums, no bare `z.string()` where a real shape
+is known): `Profile`/`ExecutionMode`/`ScenarioStatus`/`MetricUnit` enums; `commitSha` regex'd to
+exactly 40 lowercase hex chars; `k6Version` regex'd to plain semver; two `.superRefine()` blocks
+covering invariants checkable purely from the committed JSON itself (percentile ordering, a
+`rate`-unit signal's value within `[0, 1]`, no duplicate `scenarioId`/`metricId`).
+
+**Review round - 1 P1 + 3 P2, all fixed.** (1) [P1] `baseline:check` existed but `npm run check`
+never called it - the contract test only proved the file's *shape* was valid, never that its
+*content* actually derives from the archived raw CI data. Fixed: `baseline:check` now runs inside the
+main `check` chain in `runner-dashboard/package.json`. (2) [P2] `workflowRun.url` validation was too
+loose (`z.url()` + a suffix regex would accept `https://evil.example/actions/runs/123`) - replaced
+with a real `new URL()`-based `parseGithubActionsRunUrl()` (protocol must be `https:`, hostname
+exactly `github.com`, no credentials, no search/hash, path shape matched, parsed id cross-checked
+against `workflowRun.id`). (3) [P2] The contract allowed internally contradictory data - `p95LimitMs`/
+`passed` could disagree, `passed:true` could coexist with `p95Ms >= p95LimitMs`, a scenario's own
+`status` could disagree with its metrics. Fixed with `.superRefine()` layers deriving each of those
+values from the real underlying numbers instead of trusting them independently. (4) [P2]
+`SignalMetric`'s count/rate distinction wasn't real, and a scenario with zero metrics at all parsed
+fine - `SignalMetric` is now `z.discriminatedUnion("unit", [CountSignalMetric, RateSignalMetric])`,
+`Scenario` gained a `latencies.length + signals.length >= 1` check. Also added, the reviewer's own
+suggestion: `generatedAt >= source.measuredAt`.
+
+### Gates
+
+`performance-baseline.test.ts` grew 16 -> 29 tests (one new test per finding, plus the pre-existing
+golden-fixture/duplicate/percentile-ordering set) - all green, including 3 tests parsing the real,
+currently-committed `baseline.json` directly (not a fixture). Full `npm run check` green end to end:
+27 test files, 343 tests, coverage 97.31%/94.65%/97.63%/97.58% (`performance-baseline.ts` itself
+98.52%/95.45%/100%/100%), build succeeds, `baseline:check` now a real gate step.
+
+**D4.4.3b is closed.**
+
+## Faza D4.4.3c - performance-baseline: the `/performance` dashboard page
+
+**Date:** 2026-09-09. **Scope:** a single, tab-free, chart-free, accordion-free `/performance` page
+(the user's own explicit constraint) rendering the committed `baseline.json` - built by mirroring this
+codebase's own established conventions throughout, not inventing new ones.
+
+**What shipped**: `getPerformanceBaseline()` in `src/api/performance-baseline-api.ts` follows
+`runner-api.ts`'s own `getHealth()` pattern exactly - a real runtime `fetch("/performance/baseline.json")`
+(deliberately not the bundled `import` the contract test uses, so a newly-published baseline becomes
+visible without rebuilding the JS bundle), normalized into the same `RunnerApiError` shape every other
+API failure in this app produces. `PerformancePage.tsx` follows `RunDetailsPage.tsx`'s own
+`isPending`/`isError`/`isSuccess` `useQuery` branching. Source provenance uses a `<dl>` (mirrors
+`RunSummary.tsx`'s own key-value convention); per-scenario latencies render as a real `<table>`
+(`formatUtilization`/`formatMs` in a new `features/performance/format.ts`), a `null` `p95LimitMs`
+renders as "—" (the project's own established "never coerce null" convention). `StatusBadge` gained a
+`REGRESSION` status/tone. Router/sidebar wiring is the exact same `NavLink`/`RouteObject` shape
+`/runs` already uses - `aria-current="page"` comes free from React Router's own `NavLink` behavior.
+
+New tests: `performance-baseline-api.test.ts` (5, MSW-mocked), `format.test.ts` (4),
+`PerformancePage.test.tsx` (4), `ScenarioSection.test.tsx` (2), `StatusBadge.test.tsx` (+1),
+`AppShell.test.tsx` (+1). Full `npm run check` green: 31 test files, 360 tests, coverage
+97.29%/94.39%/97.73%/97.56%.
+
+**Review round - 1 P1 + 2 P2 + 2 P3, all fixed.** User confirmed the architecture/page-count decision
+explicitly - `/performance` stays one page, no tabs/charts/accordions; this round was visual/semantic
+polish only, never new structure. (1) [P1] A regressed row was signaled by red background alone - the
+scenario-level `StatusBadge` said *that* something regressed, never *which* metric, and the signals
+table had no limit column to infer it from at all. Added a real **Result** column to both the latency
+and signal tables, a `StatusBadge` per row via a new `resultStatus(passed): BadgeStatus` helper
+(`true`->`PASSED`, `false`->`REGRESSION`, `null`-> a new `"OBSERVED ONLY"` status). (2) [P2] The
+permanent disclaimer used `Alert` (`role="alert"`) - an assertive live region wrong for static
+present-since-first-render text. Replaced with a plain `<aside>` styled the same way but with no
+live-region role. (3) [P3] The runtime-`fetch()` doc comment overclaimed "no rebuild/redeploy
+needed" - checked `deploy/web/Dockerfile` directly (`COPY --from=build /app/dist /srv`, and Vite folds
+`public/` into `dist/` at build time), corrected the comment to the real, narrower benefit. (4) [P3]
+The `.disclaimer` CSS class was dead code (`Alert` takes no `className`) - fixed as a side effect of
+the `<aside>` swap, plus real visual polish (bordered/rounded/padded scenario cards, a lighter
+top-border separator for the Source block, `Published`/`Repetitions` added to the provenance `<dl>`,
+"Regressions" renamed to "Regressed scenarios").
+
+### Live verification against a real running system
+
+Ran the real Vite dev server and drove `/performance` in a real Chrome tab end to end, both before and
+after the review-round polish: all six scenarios rendered with real numbers matching the committed
+baseline (including `create-run`'s own "—" for its genuinely-ungated limit, and
+`sse-connection-cap`'s table correctly showing only its signals section), the sidebar `Performance`
+link highlighted correctly, zero console errors on load both times. Confirmed the page's own data is
+fully independent of `runner-service`/`AppShell`'s health indicator (backend intentionally not running
+for one check - the page still rendered correctly, health indicator correctly showed "unavailable").
+
+### Gates
+
+Full `npm run check` green end to end after the review round: 31 test files, **363 tests** (360 -> 363:
++1 `StatusBadge` OBSERVED ONLY case, +1 `resultStatus` unit test, existing `ScenarioSection`/
+`PerformancePage` tests rewritten rather than just added-to), coverage 97.31%/94.53%/97.74%/97.57%,
+`baseline:check` still clean (this round only touched page/component code, never the committed
+`baseline.json` itself), build succeeds.
+
+**D4.4.3c is closed.**
+
+## Faza D4.4.3d - performance-baseline: `dashboardE2eTest` coverage for `/performance`
+
+**Date:** 2026-09-09. **Scope:** the real-browser E2E value-add not already proven at the unit/
+component level in D4.4.3c - a direct `/performance` deep link, known provenance/metric values
+rendering correctly, sidebar navigation + `aria-current`, and a real axe-core accessibility audit.
+Matches exactly the four items the user's own D4.4.3c closing note named ("direct deep link, poznat
+provenance/metric, aria-current i axe provera"); the controlled-error-display E2E check was
+deliberately left out - already proven at the Vitest level in D4.4.3c and not named in that final
+scope list.
+
+**What shipped**: `src/dashboardE2eTest/java/dev/vlaisanem/automation/dashboarde2e/
+PerformancePageE2eTest.java`, following `AccessibilityE2eTest`/`DeepLinkE2eTest`'s established
+conventions (`@ExtendWith(DashboardE2eEnvironment.class)`, no new Java page object - judged
+unwarranted for a page this simple, single-table/`<dl>` markup, no multi-step workflow to reuse). Two
+tests:
+1. `directDeepLinkRendersKnownProvenanceAndMetricsWithNoAxeViolations` - navigates straight to
+   `/performance` (no click-through), then asserts against values read **live from the real committed
+   `runner-dashboard/public/performance/baseline.json`** via Jackson (`dashboardE2e.dashboardDir`
+   system property) rather than a second hardcoded copy that could silently drift from it on a future
+   baseline republish: short commit SHA, the Actions run link's name+href, a known scenario's heading,
+   and a known metric's row showing the correctly-formatted p95 value. Also runs a real
+   `AccessibilityAudit.run(page)` and asserts zero violations.
+2. `sidebarNavigationToPerformanceSetsAriaCurrentOnlyOnThatLink` - starts at `/runs`, confirms
+   `aria-current="page"` sits on "Runs" and not "Performance", clicks the sidebar "Performance" link,
+   waits for the real URL+heading change, confirms `aria-current` flipped to exactly the other link.
+
+**Review round - 2 P2 + 2 P3, all fixed.** (1) [P2] The test read `scenarios[0].latencies[0]` -
+positional indexing into an array the contract explicitly permits to contain a scenario with zero
+latency metrics (`sse-connection-cap` is exactly that today), so a reorder or shape change could
+silently break the test or make it assert against the wrong scenario. Fixed: looks up the stable
+`scenarioId="public-read"`/`metricId="capabilities"` pair instead via a small `findByField()` helper -
+the asserted *values* still come from the real JSON, never duplicated as a hardcoded copy. (2) [P2]
+D4.4.3 (3a-3d) - including this sub-phase - was undocumented in this repository's own
+`RELEASE_EVIDENCE.md`, existing only in session/project memory; this section (and the D4.4.3a-c
+sections above it) close that gap. (3) [P3] `metricRow()` scoped only via the metric's own `<td>`, not
+the scenario - the contract allows two scenarios to share a metric name, which would have resolved as
+a strict-mode-violating multi-element locator the moment that happened. Fixed: a new
+`scenarioLatencyTable()` scopes first via the `<caption>` `ScenarioSection.tsx` renders on its own
+latency table ("Latency metrics for {scenario.displayName}", visually hidden but still in the DOM/a11y
+tree), then `metricRow()` searches only within that already-scenario-scoped table. (4) [P3] The
+originally-reported test count (27/27) was wrong - independently reverified against the real JUnit XML
+(`build/test-results/dashboardE2eTest/*.xml`): 20 test classes, 26 tests total (24 pre-existing + this
+sub-phase's 2 new ones), 0 failures/errors/skipped.
+
+### Gates
+
+Ran the new class alone first (both tests `PASSED`), then the full `dashboardE2eTest` suite for
+regression proof - **26/26 green** (24 existing + 2 new), no side effects on any other class. Re-run
+after the review-round fixes: both tests `PASSED` again.
+
+**D4.4.3d is closed. D4.4.3 (3a/3b/3c/3d) as a whole is now fully closed.**

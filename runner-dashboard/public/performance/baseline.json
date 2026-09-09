@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-09T12:41:02.226Z",
+  "source": {
+    "measuredAt": "2026-09-09T12:38:42Z",
+    "commitSha": "f38cd49ff84bc25340998bbaae1efc4a7299c50a",
+    "profile": "production-policy",
+    "executionMode": "cold",
+    "repetitions": 1,
+    "runnerImage": "ubuntu-latest",
+    "k6Version": "1.5.0",
+    "workflowRun": {
+      "id": 34351594770,
+      "attempt": 1,
+      "url": "https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/34351594770"
+    }
+  },
+  "scenarios": [
+    {
+      "scenarioId": "public-read",
+      "displayName": "Public read endpoints",
+      "status": "PASSED",
+      "latencies": [
+        {
+          "metricId": "capabilities",
+          "displayName": "Capabilities",
+          "sampleCount": 30,
+          "p50Ms": 9.052336,
+          "p95Ms": 66.71606225000001,
+          "p99Ms": 69.31015575,
+          "p95LimitMs": 250,
+          "passed": true
+        },
+        {
+          "metricId": "tests",
+          "displayName": "Test catalog",
+          "sampleCount": 30,
+          "p50Ms": 11.7719935,
+          "p95Ms": 71.56558895,
+          "p99Ms": 72.13536302,
+          "p95LimitMs": 300,
+          "passed": true
+        },
+        {
+          "metricId": "runs-list",
+          "displayName": "Runs list",
+          "sampleCount": 30,
+          "p50Ms": 31.8545095,
+          "p95Ms": 227.27416639999998,
+          "p99Ms": 231.89308689,
+          "p95LimitMs": 750,
+          "passed": true
+        },
+        {
+          "metricId": "run-detail",
+          "displayName": "Run detail",
+          "sampleCount": 30,
+          "p50Ms": 11.2543825,
+          "p95Ms": 33.86705704999999,
+          "p99Ms": 35.910085439999996,
+          "p95LimitMs": 100,
+          "passed": true
+        }
+      ],
+      "signals": [
+        {
+          "metricId": "expected-429",
+          "displayName": "Expected throttled responses",
+          "unit": "count",
+          "value": 480,
+          "passed": null
+        },
+        {
+          "metricId": "unexpected-429",
+          "displayName": "Unexpected throttled responses",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-5xx",
+          "displayName": "Unexpected server errors",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-error-rate",
+          "displayName": "Unexpected error rate",
+          "unit": "rate",
+          "value": 0,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "scenarioId": "artifact-reads",
+      "displayName": "Artifact reads",
+      "status": "PASSED",
+      "latencies": [
+        {
+          "metricId": "artifacts-list",
+          "displayName": "Artifacts list",
+          "sampleCount": 16,
+          "p50Ms": 6.752632999999999,
+          "p95Ms": 18.93156625,
+          "p99Ms": 20.704168449999997,
+          "p95LimitMs": 75,
+          "passed": true
+        },
+        {
+          "metricId": "artifact-download",
+          "displayName": "Artifact download",
+          "sampleCount": 14,
+          "p50Ms": 4.685473,
+          "p95Ms": 18.042544099999997,
+          "p99Ms": 19.374964019999997,
+          "p95LimitMs": 50,
+          "passed": true
+        }
+      ],
+      "signals": [
+        {
+          "metricId": "expected-429",
+          "displayName": "Expected throttled responses",
+          "unit": "count",
+          "value": 90,
+          "passed": null
+        },
+        {
+          "metricId": "unexpected-429",
+          "displayName": "Unexpected throttled responses",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-5xx",
+          "displayName": "Unexpected server errors",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-error-rate",
+          "displayName": "Unexpected error rate",
+          "unit": "rate",
+          "value": 0,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "scenarioId": "health",
+      "displayName": "Health checks",
+      "status": "PASSED",
+      "latencies": [
+        {
+          "metricId": "liveness",
+          "displayName": "Liveness",
+          "sampleCount": 30,
+          "p50Ms": 3.6473495,
+          "p95Ms": 6.407443,
+          "p99Ms": 6.47064999,
+          "p95LimitMs": 50,
+          "passed": true
+        },
+        {
+          "metricId": "readiness",
+          "displayName": "Readiness",
+          "sampleCount": 30,
+          "p50Ms": 4.6811810000000005,
+          "p95Ms": 5.53135605,
+          "p99Ms": 6.590343200000001,
+          "p95LimitMs": 50,
+          "passed": true
+        }
+      ],
+      "signals": [
+        {
+          "metricId": "unexpected-429",
+          "displayName": "Unexpected throttled responses",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-5xx",
+          "displayName": "Unexpected server errors",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-error-rate",
+          "displayName": "Unexpected error rate",
+          "unit": "rate",
+          "value": 0,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "scenarioId": "sse-replay",
+      "displayName": "SSE replay",
+      "status": "PASSED",
+      "latencies": [
+        {
+          "metricId": "connection-establish",
+          "displayName": "Connection establish",
+          "sampleCount": 5,
+          "p50Ms": 30,
+          "p95Ms": 84.99999999999999,
+          "p99Ms": 94.6,
+          "p95LimitMs": 300,
+          "passed": true
+        },
+        {
+          "metricId": "time-to-first-event",
+          "displayName": "Time to first event",
+          "sampleCount": 5,
+          "p50Ms": 0,
+          "p95Ms": 4.199999999999999,
+          "p99Ms": 4.84,
+          "p95LimitMs": 100,
+          "passed": true
+        },
+        {
+          "metricId": "replay-duration",
+          "displayName": "Full replay duration",
+          "sampleCount": 5,
+          "p50Ms": 109,
+          "p95Ms": 128.4,
+          "p99Ms": 130.48,
+          "p95LimitMs": 500,
+          "passed": true
+        }
+      ],
+      "signals": [
+        {
+          "metricId": "events-received",
+          "displayName": "Events replayed",
+          "unit": "count",
+          "value": 1995,
+          "passed": null
+        },
+        {
+          "metricId": "transport-errors",
+          "displayName": "Transport errors",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "replay-correctness",
+          "displayName": "Replay correctness",
+          "unit": "rate",
+          "value": 1,
+          "passed": true
+        },
+        {
+          "metricId": "checks",
+          "displayName": "k6 checks",
+          "unit": "rate",
+          "value": 1,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "scenarioId": "sse-connection-cap",
+      "displayName": "SSE per-IP connection cap",
+      "status": "PASSED",
+      "latencies": [],
+      "signals": [
+        {
+          "metricId": "accepted-connections",
+          "displayName": "Accepted connections",
+          "unit": "count",
+          "value": 3,
+          "passed": true
+        },
+        {
+          "metricId": "rejected-connections",
+          "displayName": "Rejected connections",
+          "unit": "count",
+          "value": 1,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-status",
+          "displayName": "Unexpected status codes",
+          "unit": "count",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "retry-after-valid",
+          "displayName": "Valid Retry-After rate",
+          "unit": "rate",
+          "value": 1,
+          "passed": true
+        },
+        {
+          "metricId": "checks",
+          "displayName": "k6 checks",
+          "unit": "rate",
+          "value": 1,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "scenarioId": "create-run",
+      "displayName": "Create run (admin)",
+      "status": "PASSED",
+      "latencies": [
+        {
+          "metricId": "create-run",
+          "displayName": "Create run (202 Accepted)",
+          "sampleCount": 1,
+          "p50Ms": 147.959409,
+          "p95Ms": 147.959409,
+          "p99Ms": 147.959409,
+          "p95LimitMs": null,
+          "passed": null
+        }
+      ],
+      "signals": [
+        {
+          "metricId": "correctness",
+          "displayName": "End-to-end correctness",
+          "unit": "rate",
+          "value": 1,
+          "passed": true
+        },
+        {
+          "metricId": "unexpected-error-rate",
+          "displayName": "Unexpected error rate",
+          "unit": "rate",
+          "value": 0,
+          "passed": true
+        },
+        {
+          "metricId": "checks",
+          "displayName": "k6 checks",
+          "unit": "rate",
+          "value": 1,
+          "passed": true
+        }
+      ]
+    }
+  ]
+}

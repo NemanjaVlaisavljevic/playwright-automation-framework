@@ -12,6 +12,8 @@ describe("StatusBadge", () => {
     "CANCELLED",
     "ABORTED",
     "SKIPPED",
+    "REGRESSION",
+    "OBSERVED ONLY",
   ] as const)(
     "always renders the status name as visible text (%s), never color alone",
     (status) => {
