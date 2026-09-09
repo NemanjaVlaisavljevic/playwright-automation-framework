@@ -34,10 +34,15 @@ export const options = {
   vus: 1,
   iterations: 5,
   thresholds: {
-    // Permissive placeholders only - real empirical latency thresholds are locked in D4.4.2.
-    sse_connection_establish_ms: ['p(95)<100000'],
-    sse_time_to_first_event_ms: ['p(95)<100000'],
-    sse_replay_duration_ms: ['p(95)<100000'],
+    // D4.4.2 - real, locked latency gates, ~3x the highest p95 observed across four consecutive
+    // clean GitHub Actions runs (see public-read.js's own comment for the full methodology and
+    // exact run ids). sse_time_to_first_event_ms is floored at 100ms rather than a strict multiple
+    // of its own near-zero (0-0.8ms) observed p95 - the two seeded RUN_QUEUED/RUN_STARTED events
+    // arrive essentially instantly on connect, so any tight bound here would be measuring noise,
+    // not a real regression.
+    sse_connection_establish_ms: ['p(95)<300'],
+    sse_time_to_first_event_ms: ['p(95)<100'],
+    sse_replay_duration_ms: ['p(95)<500'],
     // Real, failing correctness gates - never just a reported check.
     sse_replay_correctness: ['rate==1'],
     sse_transport_errors: ['count==0'],

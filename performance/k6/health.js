@@ -29,8 +29,12 @@ export const options = {
   duration: DURATION,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
   thresholds: {
-    'success_latency_ms{endpoint:liveness}': ['p(95)<100000'],
-    'success_latency_ms{endpoint:readiness}': ['p(95)<100000'],
+    // D4.4.2 - real, locked latency gates, floored at 50ms rather than a strict 3x multiple of the
+    // ~5-6ms observed p95 - these actuator probes are already so fast that 3x would be a
+    // single-digit-ms threshold, too tight to survive normal GitHub-hosted-runner noise (see
+    // public-read.js's own comment for the full calibration methodology and exact run ids).
+    'success_latency_ms{endpoint:liveness}': ['p(95)<50'],
+    'success_latency_ms{endpoint:readiness}': ['p(95)<50'],
     unexpected_error_rate: ['rate==0'],
     unexpected_429: ['count==0'],
     unexpected_5xx: ['count==0'],

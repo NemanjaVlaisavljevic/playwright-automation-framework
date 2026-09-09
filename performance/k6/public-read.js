@@ -42,14 +42,18 @@ export const options = {
   duration: DURATION,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
   thresholds: {
-    // Permissive placeholders only - real empirical per-endpoint latency numbers are locked from
-    // CI-runner calibration data later in D4.4.2. Their real purpose right now is forcing k6 to
-    // actually track success_latency_ms{endpoint:...} as its own sub-metric per endpoint (see
-    // lib/summary.js's own acceptance check).
-    'success_latency_ms{endpoint:capabilities}': ['p(95)<100000'],
-    'success_latency_ms{endpoint:tests}': ['p(95)<100000'],
-    'success_latency_ms{endpoint:runs-list}': ['p(95)<100000'],
-    'success_latency_ms{endpoint:run-detail}': ['p(95)<100000'],
+    // D4.4.2 - real, locked per-endpoint latency gates, calibrated from four consecutive clean
+    // GitHub Actions runs against the exact production-policy lifecycle this workflow runs
+    // (34326415182, 34335917122, 34336865449, 34337509597 - see docs/RELEASE_EVIDENCE.md's D4.4.2b
+    // section). Each threshold is ~3x the highest p95 actually observed for that endpoint across
+    // those four runs, rounded to a clean number - loose enough to absorb normal GitHub-hosted-
+    // runner variance without flaking, tight enough to still catch a real regression (a 5-10x
+    // slowdown), never the old unfailable `p(95)<100000` placeholder. `runs-list` gets extra
+    // headroom (147-216ms observed, the widest run-to-run swing of this scenario's four endpoints).
+    'success_latency_ms{endpoint:capabilities}': ['p(95)<250'],
+    'success_latency_ms{endpoint:tests}': ['p(95)<300'],
+    'success_latency_ms{endpoint:runs-list}': ['p(95)<750'],
+    'success_latency_ms{endpoint:run-detail}': ['p(95)<100'],
     // Real, always-enforced correctness gates, in both profiles - an unexpected error is a bug
     // regardless of which profile is running; in throughput mode this is also the primary
     // saturation-detection signal (see recordOutcome: with rateLimitExpected=false, ANY 429 here

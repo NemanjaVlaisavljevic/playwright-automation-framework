@@ -37,9 +37,11 @@ export const options = {
   duration: DURATION,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
   thresholds: {
-    // Permissive placeholders - real numbers locked from CI-runner calibration later in D4.4.2.
-    'success_latency_ms{endpoint:artifacts-list}': ['p(95)<100000'],
-    'success_latency_ms{endpoint:artifact-download}': ['p(95)<100000'],
+    // D4.4.2 - real, locked latency gates, ~3x the highest p95 observed for each endpoint across
+    // four consecutive clean GitHub Actions runs (see public-read.js's own comment for the full
+    // calibration methodology and the exact run ids).
+    'success_latency_ms{endpoint:artifacts-list}': ['p(95)<75'],
+    'success_latency_ms{endpoint:artifact-download}': ['p(95)<50'],
     // Real, always-enforced correctness gates - see public-read.js's own comment on why these hold
     // in both profiles, and why unexpected_429 doubles as the primary throughput-mode saturation
     // signal.

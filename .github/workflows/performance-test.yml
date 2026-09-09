@@ -3,13 +3,15 @@ name: Performance Baseline (measurement-only)
 # D4.4.2b - runs every k6 scenario against the real, unmodified production-policy topology
 # (deploy/docker-compose.yml + docker-compose.performance.yml), the exact lifecycle
 # performance/README.md documents and the 2026-09-08 review checkpoint already validated locally
-# end to end. Measurement-only in intent (P1 correction #5 in the approved D4.4 plan,
-# docs/RELEASE_EVIDENCE.md's "Faza D4.4.2a" section): the per-endpoint `success_latency_ms{...}`
-# thresholds are still permissive placeholders (`p(95)<100000`, i.e. 100s - cannot realistically
-# fail), so nothing here blocks the job on a not-yet-calibrated latency number. Every OTHER
-# threshold in every scenario (correctness Rates/Counters like `unexpected_error_rate`,
-# `create_run_correctness`, `sse_accepted_connections`, etc.) is already a locked, real invariant -
-# these are deliberately left BLOCKING, never wrapped in `continue-on-error`.
+# end to end. Originally measurement-only in intent for the per-endpoint `success_latency_ms{...}`
+# thresholds (P1 correction #5 in the approved D4.4 plan, docs/RELEASE_EVIDENCE.md's "Faza D4.4.2a"
+# section) - as of 2026-09-09 those are real, locked gates too (see public-read.js/artifact-reads.js/
+# health.js/sse-replay.js's own comments), calibrated from four consecutive clean runs
+# (34326415182, 34335917122, 34336865449, 34337509597) once the D4.4.2b root-cause fix below made
+# "clean" mean something real. Every scenario's own correctness Rates/Counters
+# (`unexpected_error_rate`, `create_run_correctness`, `sse_accepted_connections`, etc.) were already
+# locked, real invariants from the start - all of it is deliberately BLOCKING now, never wrapped in
+# `continue-on-error`.
 #
 # This was a genuine, real correction, not a design choice made up front: run #2 (2026-09-08,
 # GitHub Actions run 34278044784) originally had `continue-on-error: true` on every scenario step,
