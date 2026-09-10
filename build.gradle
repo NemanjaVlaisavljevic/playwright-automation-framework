@@ -28,7 +28,7 @@ ext {
 }
 
 dependencies {
-    testImplementation platform('org.junit:junit-bom:6.0.1')
+    testImplementation platform('org.junit:junit-bom:6.1.3')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     // testImplementation, not testRuntimeOnly: TestCatalogGenerator (tooling/) needs compile-time
     // access to the Launcher API to discover the CUSTOM-suite catalog - see that class's Javadoc.
@@ -52,7 +52,7 @@ dependencies {
     testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
     testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.22.2'
     testImplementation 'com.networknt:json-schema-validator:2.0.4'
-    testImplementation 'io.qameta.allure:allure-jupiter:2.35.4'
+    testImplementation 'io.qameta.allure:allure-jupiter:2.35.5'
     testImplementation 'org.slf4j:slf4j-api:2.0.18'
     // Playwright's Page/BrowserContext/Tracing are interfaces specifically to allow this - used
     // only to unit-test TestFixture's independent-artifact-capture failure handling (TestFixtureTest)
