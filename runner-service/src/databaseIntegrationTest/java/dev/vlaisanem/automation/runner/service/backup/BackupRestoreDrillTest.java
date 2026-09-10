@@ -104,12 +104,12 @@ class BackupRestoreDrillTest {
    * {@code postgresql://user:password@host:port/dbname} connection string and parsed it with a
    * hand-rolled regex - a raw {@code @}, {@code :}, {@code /}, or {@code %} in the password broke
    * that parser outright (e.g. {@code p@ssword} was misparsed as password {@code p} and host {@code
-   * ssword@postgres}, and percent-encoded forms were never decoded at all), which could have silently
-   * disabled the very first production backup the moment a normally-generated strong password was
-   * used. {@code PGHOST}/{@code PGPORT}/{@code PGDATABASE}/{@code PGUSER}/{@code PGPASSWORD} are now
-   * passed as separate, literal environment variables with no URL syntax to disambiguate - this
-   * proves a password containing every one of those characters at once round-trips through a real
-   * dump, encrypt, upload, download, decrypt, and restore unchanged.
+   * ssword@postgres}, and percent-encoded forms were never decoded at all), which could have
+   * silently disabled the very first production backup the moment a normally-generated strong
+   * password was used. {@code PGHOST}/{@code PGPORT}/{@code PGDATABASE}/{@code PGUSER}/{@code
+   * PGPASSWORD} are now passed as separate, literal environment variables with no URL syntax to
+   * disambiguate - this proves a password containing every one of those characters at once
+   * round-trips through a real dump, encrypt, upload, download, decrypt, and restore unchanged.
    */
   @Test
   @Timeout(180)
@@ -297,7 +297,6 @@ class BackupRestoreDrillTest {
       RemoteBucket bucket = prepareLocalRcloneRemote(tempDir);
       Path localBackupsDir = tempDir.resolve("local-backups");
       Files.createDirectories(localBackupsDir);
-      Files.createDirectories(bucket.bucketDir().resolve("runner-backups"));
 
       DockerResult result =
           docker(
@@ -329,7 +328,6 @@ class BackupRestoreDrillTest {
       RemoteBucket bucket = prepareLocalRcloneRemote(tempDir);
       Path localBackupsDir = tempDir.resolve("local-backups");
       Files.createDirectories(localBackupsDir);
-      Files.createDirectories(bucket.bucketDir().resolve("runner-backups"));
 
       DockerResult firstRun =
           docker(
@@ -492,12 +490,36 @@ class BackupRestoreDrillTest {
     return new TestKeypair(recipient, identityFile);
   }
 
-  /** rclone's own {@code local} backend, standing in for the real S3-compatible bucket. */
+  /**
+   * rclone's own {@code local} backend, standing in for the real S3-compatible bucket.
+   *
+   * <p>A CI finding: the {@code backup}/{@code restore} image runs as root (the base {@code
+   * postgres:17-alpine} image sets no {@code USER}, confirmed via {@code docker inspect}), so on a
+   * real Linux Docker host - unlike this project's own Windows/Docker-Desktop dev machine, where a
+   * bind-mounted directory's ownership is transparently translated to the host user - a file {@code
+   * rclone copyto} writes into a bind-mounted host directory is genuinely owned by {@code root} on
+   * the host side. If the {@code runner-backups} prefix subdirectory itself does not already exist
+   * before the first container write, the container (running as root) creates it too, so the
+   * directory ends up root-owned with default permissions that the CI runner's own non-root user
+   * cannot write to - and deleting a directory entry requires write permission on its *parent*, not
+   * ownership of the entry itself, so JUnit's own {@code @TempDir} cleanup then fails outright
+   * ({@code Failed to delete temp directory ... Permission denied}), even though the files inside
+   * are otherwise perfectly readable. Pre-creating {@code runner-backups} here, before any
+   * container ever runs, makes the CI runner's own user its owner instead - later root-owned files
+   * written *inside* it are still deletable, since Unix directory-entry deletion is governed by the
+   * parent directory's own permissions, not the individual file's owner. Verified for real against
+   * a Linux container/volume (not just reasoned about): reproduced the exact CI failure with a
+   * container-root-created subdirectory (a non-root cleanup `rm -rf` failed with `Permission
+   * denied`), then confirmed a subdirectory pre-created by the non-root identity itself remains
+   * fully deletable by that same identity afterward, even after a root-owned file is written into
+   * it and a second root process reads it back - the exact sequence this test class's own
+   * backup-then-restore scenarios exercise.
+   */
   private static RemoteBucket prepareLocalRcloneRemote(Path tempDir) throws IOException {
     Path rcloneConfig = tempDir.resolve("rclone.conf");
     Files.writeString(rcloneConfig, "[testlocal]\ntype = local\n");
     Path bucketDir = tempDir.resolve("remote-bucket");
-    Files.createDirectories(bucketDir);
+    Files.createDirectories(bucketDir.resolve("runner-backups"));
     return new RemoteBucket(rcloneConfig, bucketDir);
   }
 

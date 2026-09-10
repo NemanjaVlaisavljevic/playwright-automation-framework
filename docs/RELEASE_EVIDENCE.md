@@ -2900,15 +2900,72 @@ Documentation-only round (`docs/RUNBOOK.md`/`docs/RELEASE_EVIDENCE.md`) - no app
 code changed, so no Gradle gate reruns anything new. The real verification is the standalone signal-
 handling proof above, run directly against the same shell construct the runbook now documents.
 
+**Post-close CI finding (2026-09-10) - 1 spotless violation + 1 real CI-only test-infra bug, both
+fixed and reverified.** D4.6/round 6 was committed and pushed; the real GitHub Actions run (Linux, not
+this project's own Windows/Docker-Desktop dev machine) surfaced two failures neither prior local
+verification could have caught:
+1. **`spotlessJavaCheck` failed** on `BackupRestoreDrillTest.java`'s own new javadoc (the special-
+   character-password test added in round 5) - a line-wrapping difference Google Java Format wanted
+   that the local edit hadn't run through `spotlessApply`. Fixed by running
+   `./gradlew.bat :runner-service:spotlessApply`; `spotlessCheck` now passes.
+2. **Three `BackupRestoreDrillTest` scenarios failed in CI** (`aRealDumpEncryptUploadDownloadDecryptRestoreRoundTripPreservesRealData`,
+   `decryptionFailsWithTheWrongIdentityKey`, and round 5's own
+   `aPasswordContainingUrlSpecialCharactersRoundTripsCorrectly`) with `Failed to delete temp directory
+   ... Permission denied` on the JUnit `@TempDir` teardown - never reproduced locally. Root-caused, not
+   assumed: the `backup`/`restore` image runs as **root** (the base `postgres:17-alpine` image sets no
+   `USER`, confirmed via `docker inspect postgres:17-alpine --format '{{.Config.User}}'` returning
+   empty). On a real Linux Docker host, a file `rclone copyto` writes into a bind-mounted host
+   directory is genuinely root-owned on the host side - unlike this project's own Windows/Docker-Desktop
+   dev machine, where bind-mount ownership is transparently translated to the host user, silently
+   masking the issue for every prior local verification pass across all six review rounds. When the
+   `runner-backups` prefix subdirectory did not already exist before the first container write, the
+   root-running container created it too, leaving it root-owned with default permissions the CI
+   runner's own non-root user cannot write to - and Unix directory-entry deletion is governed by the
+   *parent* directory's own write permission, not the individual file's owner, so JUnit's `@TempDir`
+   cleanup failed outright even though the files themselves were perfectly readable throughout the
+   test. The three failing scenarios were exactly the ones that never pre-created that subdirectory
+   (two other, unaffected tests already worked around this ad hoc, coincidentally, by pre-creating it
+   themselves for an unrelated reason). Fixed centrally in `prepareLocalRcloneRemote()`: pre-creates
+   `remote-bucket/runner-backups` itself (not just `remote-bucket`) before any container ever runs, so
+   the CI runner's own user owns that directory from the start - a root-owned file written *inside* it
+   later is still deletable, since deletion permission comes from the parent directory, not the file's
+   owner. The two now-redundant ad hoc `Files.createDirectories(...)` calls in the tests that had
+   worked around this by coincidence were removed as dead duplication.
+
+**Live-verified against a real Linux container/volume, not just reasoned about** (Windows Docker
+Desktop's own bind-mount translation makes this specific bug unreproducible on this project's normal
+dev machine, so a Docker named volume - real Linux ext4 semantics inside the Docker Desktop VM, no
+translation layer - stood in for it). Reproduced the exact CI failure first: a `runner-backups`
+subdirectory created by a root container, then a cleanup attempt as a non-root uid, failed with `rm:
+can't remove '.../runner-backup-fake.dump.age': Permission denied` - the identical error CI reported.
+Then confirmed the fix for real: a `runner-backups` subdirectory pre-created by the non-root uid
+(matching what `prepareLocalRcloneRemote()` now does), with a root-owned file written into it
+afterward *and* a second root process reading it back (mirroring this test class's own backup-then-
+restore sequence), remained fully deletable by that same non-root uid - `rm -rf` exit code `0`.
+`spotlessCheck` clean; full `BackupRestoreDrillTest` (all 9 scenarios) rerun clean on this project's own
+dev machine after removing the two redundant directory-creation calls (no regression); full
+`fullBackendGate` rerun once more.
+
+### Gates (post-close CI finding)
+
+`runner-service/src/databaseIntegrationTest/.../BackupRestoreDrillTest.java` changed (the
+`prepareLocalRcloneRemote()` fix, plus the spotless reformat) - `BackupRestoreDrillTest` itself (9/9)
+is the real gate for the test-infrastructure change; `spotlessCheck` is the gate for the formatting
+fix. `fullBackendGate` rerun to confirm no wider regression. The actual CI-Linux-specific claim (that
+this fix resolves the real GitHub Actions failure) is verified via the real Linux
+container/volume proof above, not by this project's own Windows CI-equivalent run, which cannot
+reproduce the bug at all.
+
 **D4.6 is now genuinely closed** - the operational runbook and its supporting scripts exist, every
 procedure either traces to a real file in this repo or was independently verified against a real
-system across six review rounds, every safety/exposure/correctness gap found across all six
-(manual-SQL lifecycle corruption, no-app-stop restore, two separate rounds of password-on-the-CLI/argv
-exposure, session-credential-on-the-CLI, non-exception-safe credential cleanup at a helper-script
-level, a real-interactive-shell level, and a signal-handling level, and a hand-rolled URL parser that
-could not handle a real production password) is closed, and the remaining honestly-stated gaps (no
-image-versioned rollback, no break-glass recovery tool, a minimal crit-log-only backup-failure alert,
-the systemd layer itself only closable at real D5 time) are real, acknowledged scope boundaries, not
-oversights. Left uncommitted per this session's own standing rule - user commits/pushes themselves.
-Next per the roadmap: D5 (real hosting) - the runbook's own section 13 is the acceptance checklist that
-phase's own final acceptance pass should follow.
+system across six review rounds plus one real-CI-surfaced fix, every safety/exposure/correctness/CI-
+portability gap found (manual-SQL lifecycle corruption, no-app-stop restore, two separate rounds of
+password-on-the-CLI/argv exposure, session-credential-on-the-CLI, non-exception-safe credential
+cleanup at a helper-script level, a real-interactive-shell level, and a signal-handling level, a
+hand-rolled URL parser that could not handle a real production password, and a Windows-dev-machine-
+only-masked root-owned-file cleanup failure that only real Linux CI could surface) is closed, and the
+remaining honestly-stated gaps (no image-versioned rollback, no break-glass recovery tool, a minimal
+crit-log-only backup-failure alert, the systemd layer itself only closable at real D5 time) are real,
+acknowledged scope boundaries, not oversights. Left uncommitted per this session's own standing rule -
+user commits/pushes themselves. Next per the roadmap: D5 (real hosting) - the runbook's own section 13
+is the acceptance checklist that phase's own final acceptance pass should follow.
