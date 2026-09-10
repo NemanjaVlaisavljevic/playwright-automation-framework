@@ -1,0 +1,23 @@
+# D4.6 - fires only once runner-backup.service has genuinely exhausted its own bounded retries (see
+# that unit's own StartLimitIntervalSec/StartLimitBurst/Restart=/RestartSec= - OnFailure= is not
+# invoked for a run systemd is about to auto-restart on its own, only for one it has truly given up
+# on). A template unit (the trailing "@") so OnFailure=...@%n.service can pass the failed unit's own
+# name through as this unit's %i - see runner-backup.service's own header.
+#
+# Deliberately minimal today, a real review-round finding this repo has no established answer for
+# yet: journald alone is not an alert, but this project also has no existing paging/notification
+# infrastructure (no paid monitoring service - see docs/DEPLOYMENT_ARCHITECTURE.md's own D4.3.2
+# reasoning for why that was deliberately deferred). What this unit actually does is the minimum that
+# is genuinely free and already present on any systemd host: log at `crit` priority, distinct from
+# ordinary backup output, so `journalctl -p crit` (or any syslog-forwarding the host operator already
+# has configured) surfaces it distinctly. Recommended, not yet wired up here: add a second
+# `ExecStart=` line below calling a dead-man's-switch ping service (many have a generous free tier -
+# absence of a periodic "I'm still working" ping is what actually pages someone) or a webhook curl to
+# whatever chat/notification channel the operator already uses day to day - this template unit is
+# exactly where either would go.
+[Unit]
+Description=Alert for a failed %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p daemon.crit -t runner-backup "backup run FAILED and exhausted its retries (%i) - check: journalctl -u runner-backup.service --since today"

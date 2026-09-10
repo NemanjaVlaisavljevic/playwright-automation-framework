@@ -1499,6 +1499,186 @@ looked available, and the retention endpoints' own missing rate limit. Full deta
 two tests that force genuine concurrent-transaction interleaving via a second raw JDBC connection,
 is in `docs/RELEASE_EVIDENCE.md`'s D4.1 "Review round" section.
 
+## 7. Backup and restore (D4.5)
+
+PostgreSQL is the only real source of truth this deployment needs to protect (run-lifecycle status/
+history/events all live there - see §3; the `runner-data` volume holds only artifacts/logs/raw-event
+files, already bounded by §6's retention and reconstructible by re-running tests, so it is
+deliberately **not** part of this backup - a decision made explicitly, not by omission).
+
+**Mechanism - a standalone image, not a JVM-embedded `@Scheduled` job.** `deploy/backup/` is a
+separate `postgres:17-alpine`-based image (so `pg_dump`/`pg_restore` always match the exact server
+major version §1's `postgres` service runs, never a second, independently-pinned client version that
+could silently drift) carrying `age` and `rclone` (both real Alpine packages, no third-party binary
+download). It is invoked on demand - `docker compose -f docker-compose.yml -f
+docker-compose.backup.yml run --rm backup` - normally from a host-level **systemd timer** (preferred
+over cron for this: `Persistent=true` catches a run missed while the host was down, a real timeout,
+a clear unit exit status, and journald evidence for free - documented in the D4.6 operational
+runbook, not here: GitHub Actions cannot reach a real production host any more than it could for the
+D4.4 performance-baseline workflow - see `docs/RELEASE_EVIDENCE.md`'s D4.4.2b section for the
+identical constraint already established there). Kept entirely separate from `runner-service`'s own
+image and container lifecycle - a backup failure must never be coupled to the application's own
+restart/health behavior, and `pg_dump`/`age`/`rclone` have no reason to live inside a JVM image at
+all.
+
+**Two separate Compose files, not one - a real review-round finding, not a stylistic choice.** The
+`backup` service originally lived in the base `docker-compose.yml`, gated by `profiles: ["backup"]`.
+That looked safe but was not: Docker Compose interpolates every `${VAR:?message}` in a file's own
+service definitions while building its config model, *regardless of which profiles are actually
+active* - a bare `docker compose -f docker-compose.yml up` (the ordinary deployment path, with no
+`--profile backup` in sight and no `BACKUP_*` vars ever set) failed outright the moment those four
+required vars were interpolated, confirmed live via `docker compose ... config --services`. Moved the
+whole service into `deploy/docker-compose.backup.yml`, only ever combined in explicitly
+(`-f docker-compose.yml -f docker-compose.backup.yml`) - the base file now validates cleanly with
+zero `BACKUP_*` vars set, confirmed the same way. The same overlay also fixed a second, independent
+gap: `backup` was originally wired to only the `data` network, which is `internal: true` (no gateway
+at all, by design) - it could reach `postgres` but had no route to the internet, so a real off-site
+upload could never have succeeded; the local `rclone type = local` drill test never caught this
+because a bind-mounted directory needs no network egress at all. `docker-compose.backup.yml` adds a
+second, plain (non-internal) `backup-egress` network to `backup` alongside `data` -
+`postgres`/`runner-service`/`web` are all untouched, still exactly as isolated as before.
+
+**The pipeline (`backup.sh`)**: `pg_dump --format=custom` streams directly into `age --encrypt
+--recipient <public-key>` - **no plaintext database dump is ever written to disk**, at any point, on
+either side of the backup/restore round trip (`restore.sh` mirrors this: `age --decrypt` pipes
+directly into `pg_restore`'s own stdin). The encrypted archive is written to a `*.partial` path first
+and atomically renamed to its final `*.dump.age` name (now `runner-backup-<timestamp>-<random-hex>
+.dump.age` - a random suffix added alongside the timestamp as defense in depth against a same-second
+filename collision) only once the pipe completes successfully. It is then uploaded via `rclone
+copyto` to an S3-compatible remote (Backblaze B2 is the reference target, but
+`BACKUP_REMOTE`/`BACKUP_BUCKET`/`BACKUP_PREFIX` are plain rclone config, so this is not hard-wired to
+one provider), the upload is independently re-verified with `rclone check` (a real checksum
+comparison, not just trusting `copyto`'s own internal retry logic), and only *then* is the local copy
+deleted. The whole cycle runs under a non-blocking `flock` held for the script's own duration - a
+review-round finding: without it, two concurrent invocations (an overlapping systemd timer run and a
+manual one, say) could race the same filename, an in-flight `*.partial`, or a double upload; now a
+second, genuinely concurrent invocation fails immediately and loudly instead.
+
+**Retry-before-cleanup - a real bug found and fixed in review, not just a rewording.** An earlier
+version of this script called a leftover local `*.dump.age` a "retry candidate" in a comment, but
+never actually retried it - it only ever deleted such files once they aged past
+`BACKUP_LOCAL_RETENTION_DAYS`, which directly contradicted the script's own "delete only after
+verified" guarantee (a file could be discarded having *never* been confirmed uploaded at all).
+`backup.sh` now attempts to upload-and-verify every existing local `*.dump.age` file *first*, before
+even starting a new dump; a file only ever leaves local disk once that has genuinely succeeded (a
+second review round specifically demanded proof this retry genuinely happens on the *next* run, not
+just that a failed file survives the run that failed to upload it - see the live-verification
+paragraph below). A stale `*.partial` (only ever possible from a crashed prior run now that `flock`
+excludes a genuinely concurrent one) is still always removed unconditionally on every run.
+
+**Disk-budget guard - sized to the actual dump, not a flat floor alone.** A first version of this
+guard only ever checked a flat `BACKUP_MIN_FREE_BYTES` floor (100 MiB) regardless of how large the
+database about to be dumped actually is - a second review round pointed out that 101 MiB free with a
+several-hundred-MiB database would have passed that check and then exhausted the filesystem mid-dump.
+Fixed: required free space is now `BACKUP_MIN_FREE_BYTES` (general headroom) + the source database's
+own real, live-measured size (`SELECT pg_database_size(current_database())` - a conservative estimate,
+since `pg_dump`'s own compressed custom-format output is typically *smaller* than this raw figure) +
+`BACKUP_DUMP_RESERVE_BYTES` (an additional flat safety margin, default 100 MiB). If that fails - most
+plausibly meaning uploads have been failing repeatedly and unverified archives have piled up, though
+it could just as well mean the database has genuinely outgrown its old defaults - the script fails
+closed and refuses to start a new dump at all, loudly, rather than either risking real disk exhaustion
+mid-dump or (the original, actually-shipped behavior before either review round) silently discarding
+an unconfirmed backup just to make room.
+
+**Retention**: primarily the bucket's own lifecycle policy (configured on the bucket itself, outside
+this repo's control - not yet configured, since no real bucket exists before D5); `backup.sh` also
+enforces an optional, independent second bound (`BACKUP_RETENTION_DAYS`, `rclone delete --min-age`)
+as defense in depth, made deliberately non-fatal on its own failure (a self-caught hardening fix: a
+transient cleanup failure must never make an already-successful, already-verified backup report as
+failed).
+
+**Key management - recipient/identity split, deliberately asymmetric.** `backup.sh` only ever holds
+the **public** age recipient (`BACKUP_AGE_RECIPIENT`, set in `deploy/.env` - not a secret, safe to
+have on the production host). The matching **private** identity key never resides permanently in the
+standing deployment - it is generated once, offline, via `age-keygen`, and kept outside the
+deployment entirely (a password manager, per the user's own explicit D4.5 decision), supplied only
+at actual restore time as a mounted, read-only file - genuinely present on the host, temporarily,
+for the duration of that one restore invocation (a review-round wording correction: "never touches
+this host" overclaimed this; it is present, just never part of the *standing* config).
+`docker-compose.backup.yml` deliberately defines no standing `restore` service for exactly this
+reason; a restore is always a manual, explicit `docker compose ... run --rm` invocation with that
+mount added on top (see that file's own header comment for the full command).
+
+**Restore safety - five independent findings across two review rounds, all closed.** `restore.sh`
+still refuses to run without an explicit backup identifier as its first argument (never guesses
+"latest"), but that argument is now also validated against a strict regex matching `backup.sh`'s own
+naming convention *before* it is used to build any local or remote path - a first-round finding, an
+uncontrolled-path gap (path traversal, an absolute-path escape) in an earlier version that passed it
+through unvalidated. The restore itself runs under `pg_restore --single-transaction` (which, per
+PostgreSQL's own `pg_restore` docs, implies `--exit-on-error`) plus `--no-owner --no-privileges` -
+either the whole archive applies, or none of it does.
+
+A second review round found the target-identity checks from the first round were not actually
+sufficient. `restore.sh` originally only parsed `target_db` out of `TARGET_DATABASE_URL`'s own
+string for display, and its destructive-restore guard checked only whether a `runs` table already
+existed - a mistyped or misdirected connection string parses just as "successfully" as a correct one,
+so a genuinely wrong-but-fresh (never-migrated) target database would have been silently accepted as
+if it were the intended empty/disposable one. Fixed: a new, required `RESTORE_EXPECTED_DATABASE` is
+cross-checked against what Postgres itself reports via `SELECT current_database()` - never just a
+parsed string - and the script refuses outright on any mismatch, before touching rclone/age/Postgres
+at all. The destructive-restore acknowledgment was also tightened: `RESTORE_CONFIRM_DESTRUCTIVE` must
+now equal exactly `<real-database-name>:<backup-identifier>` (the two facts specific to *this*
+restore), never a generic `yes` that a script or a copy-pasted runbook step could silently reuse
+across a completely different incident without ever re-confirming intent - the required value is
+printed in the script's own refusal message, never something the caller has to compute by hand. The
+real, now database-confirmed target name is printed alongside the backup identifier before anything
+destructive happens - the two facts an operator mid-incident actually needs to be certain about.
+
+**RPO/RTO**: not yet measured against a real production host or a real off-site round trip (no real
+deployment exists before D5) - see the D5 acceptance list below for what closes this out for real.
+Today's automated drill (below) proves the mechanism end to end but times only a local,
+Docker-Desktop-speed round trip, not a representative RPO/RTO figure.
+
+**Live-verified against a real system, not just reasoned about, across three rounds.**
+`BackupRestoreDrillTest` (`runner-service/src/databaseIntegrationTest/`) builds the real
+`deploy/backup` image once per class, then eight separate scenarios, all against real Testcontainers
+`postgres:17-alpine` instances and the real `docker run --network container:<id>` mechanism (sharing
+a Postgres container's own network namespace - the same way a production host reaches `postgres` by
+Compose DNS, just addressed as `127.0.0.1:5432` instead): (1) the full happy-path round trip - real
+Flyway migrations plus one real row in every one of
+`runs`/`run_selected_tests`/`run_events`/`artifacts`, migration counts compared dynamically against
+the source's own real count rather than a hardcoded literal; (2) an invalid backup identifier is
+refused before restore.sh ever touches rclone/age/Postgres; (3) a destructive restore into a target
+with an existing, populated `runs` table is refused both with no acknowledgment at all *and* with a
+present-but-wrong one, proving the tied-confirmation format is actually enforced, not just checked for
+presence; (4) a wrong-but-plausible `RESTORE_EXPECTED_DATABASE` is refused before anything else runs;
+(5) decrypting with the wrong identity key fails loudly, and the target is confirmed to have received
+nothing at all; (6) a genuinely failed upload (a read-only destination, simulating a
+network/credentials/bucket failure) leaves the local encrypted archive on disk, unretried-but-intact;
+(7) - the second round's own specific demand - running `backup.sh` a *second* time against that exact
+same survivor, this time with a writable bucket, confirms it is genuinely retried and uploaded
+alongside that second run's own fresh dump (two real objects off-site afterward, zero left locally),
+not merely that it survives the first failure; (8) a real background container holding the identical
+`flock` lock file `backup.sh` itself uses (via a "LOCK_ACQUIRED" announcement waited on properly, not
+a race against the lock *file*'s mere existence) proves a genuinely concurrent invocation fails fast
+with the lock-held message rather than blocking, racing, or corrupting anything.
+
+The `docker()` test helper that drives every one of these `docker run`/`build` invocations also
+gained a second-round fix of its own: a bounded `Process#waitFor(timeout, unit)` (reading output on a
+separate thread, since blocking on `InputStream#readAllBytes()` first has no timeout of its own) plus
+an explicit, unique `--name` on every `run` invocation so a hang has a guaranteed cleanup path
+(`docker kill`/`docker rm -f` by name) - destroying the local Java `Process` handle alone only ever
+stops the local `docker` CLI client, never the container the daemon keeps executing regardless,
+mirroring the same failure-path discipline `DashboardProcess` already established elsewhere in this
+repo, adapted to Docker's own execution model.
+
+All eight scenarios passed on the first real run of the twice-rewritten suite; the full
+`databaseIntegrationTest` suite was re-run afterward with no regressions after each round's fixes.
+`docker compose ... config` was re-validated against both the base file alone (zero `BACKUP_*` vars,
+now succeeds) and the base+backup overlay together (all vars set, `backup`'s own resolved network
+list correctly shows both `data` and `backup-egress`, and the new `BACKUP_MIN_FREE_BYTES`/
+`BACKUP_DUMP_RESERVE_BYTES` vars resolve through the overlay) - see the transcript in
+`docs/RELEASE_EVIDENCE.md`'s D4.5 section for the exact commands and output.
+
+**Required for the D5 acceptance pass (not done here - no real production host or bucket exists
+yet)**: dump a real production Postgres; upload it off-site for real, against a real Backblaze B2
+bucket; download it back into a fresh, isolated Postgres; verify the real Flyway schema history, real
+run/event counts, and one specific known run; confirm a missing/purged artifact file's own graceful
+behavior is unaffected by a database-only restore (artifacts are deliberately not backed up, per this
+section's own opening decision); document the actually-measured RPO/RTO from that real run - a
+materially stronger portfolio signal than a local backup file sitting on the same VPS it is supposed
+to survive the loss of.
+
 ## Verified
 
 Every claim above was checked against a real, running Docker Compose stack on this machine, across

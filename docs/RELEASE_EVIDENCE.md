@@ -2248,3 +2248,667 @@ regression proof - **26/26 green** (24 existing + 2 new), no side effects on any
 after the review-round fixes: both tests `PASSED` again.
 
 **D4.4.3d is closed. D4.4.3 (3a/3b/3c/3d) as a whole is now fully closed.**
+
+## Faza D4.5 - Backup and restore
+
+**Date:** 2026-09-10. **Scope:** protect the one real source of truth this deployment carries -
+PostgreSQL (run lifecycle/history/events - see `docs/DEPLOYMENT_ARCHITECTURE.md` section 3). The
+`runner-data` artifact volume is deliberately out of scope, a locked decision, not an omission: it is
+already D4.1-bounded and fully reconstructible by re-running tests, unlike the database.
+
+**Design, locked with the user via one detailed review round before any code was written** (matches
+this project's own established pre-implementation-review pattern): `pg_dump --format=custom` streams
+directly into `age --encrypt --recipient <public-key>` - no plaintext dump is ever written to disk on
+either side of the round trip; asymmetric age recipient/identity keys, not a passphrase - the backup
+host only ever holds the public recipient, the private identity key never touches it at all (kept
+offline, supplied only at actual restore time); rclone as the transport to an S3-compatible off-site
+bucket (Backblaze B2 the reference target, provider-neutral via plain env config); an explicit
+`rclone check` verification before the local copy is ever deleted; retention primarily via the
+bucket's own lifecycle policy, with a secondary bounded cleanup in the script itself; `restore.sh`
+never accepts an implicit "latest" - the caller must name the exact backup identifier being restored.
+See `docs/DEPLOYMENT_ARCHITECTURE.md` section 7 for the full design writeup.
+
+**Architectural inference made and not corrected**: since the whole pipeline is pure shell with no
+Java involved, and the env vars are unprefixed/Compose-style rather than `RUNNER_...` Spring
+properties, this shipped as a standalone Docker image/Compose service (`deploy/backup/`), not a
+`@Scheduled` job inside `runner-service`'s own JVM - decouples backup failures from the app's own
+container lifecycle and avoids bloating the app image with `pg_dump`/`age`/`rclone`. Meant to be
+triggered by a host-level cron/systemd timer (`docker compose --profile backup run --rm backup`),
+documented in the D4.6 runbook - GitHub Actions still cannot reach a real production host pre-D5, the
+same constraint already established for D4.4.2b's performance workflow.
+
+**What shipped**: `deploy/backup/Dockerfile` (`postgres:17-alpine` base - `age`/`rclone` are both real
+Alpine 3.24 packages, confirmed live, no third-party binary download; `pg_dump`/`pg_restore` always
+exactly match the server's own major version this way); `deploy/backup/backup.sh` (the real pipeline:
+pipe into age, atomic `*.partial` -> final rename, `rclone copyto`, explicit `rclone check --one-way`
+verification, local delete only after verified, a local-cleanup pass at the start of every run that
+clears stale partials and gives up on a persistently-failing upload after `BACKUP_LOCAL_RETENTION_DAYS`,
+never logs secrets - only filenames/sizes/timestamps/remote paths); `deploy/backup/restore.sh` (takes
+an explicit `<backup-identifier>` argument, refuses to guess "latest," prints exactly what it is about
+to restore before doing anything destructive, `age --decrypt | pg_restore` piped directly so plaintext
+never touches disk on this side either); `deploy/docker-compose.yml`'s new `backup` service
+(`profiles: ["backup"]` - never runs on a plain `docker compose up`, only the `data` network, a new
+dedicated `backup-local` volume decoupled from `runner-data`/`pgdata`) - deliberately no standing
+`restore` service, since the private identity key must never sit in this file's own config; a restore
+is a one-off `docker compose --profile backup run --rm` override with the identity file mounted on
+top, documented inline in that file and in the deployment-architecture doc; `deploy/.env.example`'s
+new vars (`BACKUP_AGE_RECIPIENT`, `BACKUP_REMOTE`, `BACKUP_BUCKET`, `BACKUP_PREFIX`,
+`BACKUP_RCLONE_CONFIG_FILE`, `BACKUP_RETENTION_DAYS`).
+
+**The automated restore-drill test, built now, not deferred to D5** - the original D4.5 spec's own
+hard requirement ("a backup with no proven restore is not a finished backup"):
+`runner-service/src/databaseIntegrationTest/.../backup/BackupRestoreDrillTest.java`. Builds the real
+`deploy/backup` image, generates a genuine disposable `age-keygen` test keypair (never the production
+one), runs real Flyway migrations and inserts a real row into a first Testcontainers
+`postgres:17-alpine`, runs the real `backup.sh` as a real, separate `docker run --network
+container:<id>` invocation sharing that Postgres container's own network namespace (reaches it at
+`127.0.0.1:5432` - the same mechanism a production host uses to reach `postgres` by Compose DNS),
+confirms exactly one correctly-named encrypted object landed in an rclone `type = local`-backed
+stand-in bucket (a bind-mounted host directory - the one real difference from production, since this
+repo carries no real B2 credentials to exercise), then runs the real `restore.sh` against a second,
+completely empty Testcontainers Postgres, and confirms the restored database carries the exact same
+Flyway migration count and the exact same real run row the source had. New
+`databaseIntegrationTest.repoRoot` system property added to `runner-service/build.gradle` (mirrors
+`dashboardE2eTest`'s own `dashboardE2e.repoRoot` convention) so the test can locate `deploy/backup`
+regardless of the task's own working directory.
+
+**A real self-caught hardening fix, before any external review**: the secondary remote-retention
+cleanup (`rclone delete --min-age`) originally ran unguarded - a transient failure there (the bucket's
+own lifecycle policy is the *primary* retention mechanism; this is only defense in depth) would have
+made an already-successful, already-verified backup report as failed, risking a false alert or an
+unnecessary re-run of a dump that had already safely landed off-site. Made deliberately non-fatal:
+logs a warning and still exits `0` if this one step fails, since the actual backup is already safe by
+that point.
+
+**Live-verified against a real system throughout, not just reasoned about**: `BackupRestoreDrillTest`
+passed on its first real run; rebuilt the image from scratch (`docker rmi` first, forcing a genuine
+rebuild rather than a cached layer) after the retention-cleanup hardening fix and reran clean; the
+full `databaseIntegrationTest` suite reran with no regressions (including a separate run before the
+fix, to isolate it as a real regression-free change); `docker compose --profile backup config`
+(with a throwaway `.env`) confirmed the new service resolves correctly - `DATABASE_URL` interpolation,
+`data`-network-only (never `edge`), the `backup-local`/rclone-config volume mounts all correct; ran
+`shellcheck` (via the `koalaman/shellcheck` Docker image) against both scripts - zero findings; every
+run confirmed no leftover containers/volumes afterward via `docker ps -a`/`docker volume ls`.
+
+### Gates
+
+`fullBackendGate` (spotlessCheck + every module's tests + `databaseIntegrationTest`, including
+`BackupRestoreDrillTest`) green end to end, exit 0 - the drill test's third consecutive real pass
+across this session (standalone, post-hardening-fix rebuild, and inside the full gate).
+
+**Review round (2026-09-10) - 5 P1 + 2 P2, all fixed and reverified, closed the same session.** The
+user's own words: "D4.5 još ne bih zatvorio. Osnovna arhitektura je dobra, ali postoje četiri P1
+problema koje happy-path drill nije mogao da otkrije" - a real, adversarial second look specifically
+probing what a golden-path-only test could never catch, not a style pass.
+1. **[P1] The backup container had no route to the actual off-site bucket at all.** Wired only to the
+   `data` network, which is `internal: true` (no gateway, by design, for `runner-service`/`postgres`)
+   - it could reach Postgres but had no path to the internet, so a real B2/S3 upload could never have
+   succeeded. The local `rclone type = local` drill test never caught this: a bind-mounted directory
+   needs no network egress. Fixed by moving `backup` into its own overlay (see finding 2) with a
+   second, plain (non-internal) `backup-egress` network added alongside `data`.
+2. **[P1] The `backup` service, defined in the base `docker-compose.yml` behind `profiles:
+   ["backup"]`, broke a plain deployment with no backup config at all.** Confirmed by the reviewer
+   directly: `docker compose ... config --services` failed on all four `${VAR:?}` expressions with no
+   `--profile backup` anywhere in the command - Compose interpolates every variable in a file's own
+   service definitions while building its config model, independent of which profiles are actually
+   active. Fixed by extracting the whole service into `deploy/docker-compose.backup.yml`, only ever
+   combined in explicitly (`-f docker-compose.yml -f docker-compose.backup.yml`); re-verified live -
+   the base file alone now validates cleanly with zero `BACKUP_*` vars set, and the two-file
+   combination resolves `backup` with both `data` and `backup-egress` correctly attached.
+3. **[P1] A leftover local `*.dump.age` was called a "retry candidate" in a comment but was never
+   actually retried - only ever deleted by age, contradicting the script's own "delete only after
+   verified" guarantee.** Extracted `upload_and_verify()`, now called first against every existing
+   local final file *before* a new dump is even attempted; a file only ever leaves local disk once
+   that genuinely succeeds. Age-based deletion of an unverified file is gone entirely - replaced with
+   a fail-closed disk-budget check (`BACKUP_MIN_FREE_BYTES`, default 100 MiB) that refuses to start a
+   new dump (loudly) if local disk is still critical after retrying, rather than either risking real
+   disk exhaustion or silently discarding unconfirmed data.
+4. **[P1] `restore.sh`'s `identifier` argument was an uncontrolled path, and `TARGET_DATABASE_URL`
+   went straight into a destructive `--clean` restore with no target-emptiness check at all.** Fixed:
+   `identifier` is now validated against a strict regex matching `backup.sh`'s own naming convention
+   before it is used to build any path; a target database already carrying a populated `runs` table
+   is now refused outright unless `RESTORE_CONFIRM_DESTRUCTIVE=yes` is explicitly set; the real target
+   database name is printed alongside the backup identifier before anything destructive runs.
+5. **[P1] The restore was not atomic.** Added `--single-transaction` (which PostgreSQL's own
+   `pg_restore` docs confirm implies `--exit-on-error`) plus `--no-privileges` (alongside the existing
+   `--no-owner`) - either the whole archive applies, or none of it does.
+6. **[P2] No single-flight protection** - a parallel cron/manual run in the same second could share a
+   filename, race an in-flight `*.partial`, or double-upload. Fixed with a non-blocking `flock` held
+   for the script's own duration, plus a random suffix added to the timestamp-based filename as
+   independent defense in depth.
+7. **[P2] The drill test only ever checked one `runs` column and hardcoded the Flyway migration count
+   as a literal `4`.** Rewritten: migration counts are now compared dynamically against the source's
+   own real count; a real row in every one of `run_selected_tests`/`run_events`/`artifacts` is now
+   seeded and verified too, not just `runs`. Four new negative tests added: an invalid identifier, a
+   non-empty target without acknowledgment, the wrong decryption key, and a genuinely failed/unverified
+   upload (proving the local copy survives - the real proof of finding 3's fix).
+
+**Also fixed, the reviewer's own explicit preference**: the D4.6 runbook plan now calls for a
+**systemd timer**, not cron, to trigger `backup.sh` (`Persistent=true`, a real timeout, a clear unit
+exit status, journald evidence) - noted in `docs/DEPLOYMENT_ARCHITECTURE.md` section 7, actual runbook
+content still pending D4.6 itself. **Also fixed, a wording correction**: "the private identity key
+never touches this host" overclaimed - it is genuinely present, temporarily, for the duration of an
+actual restore invocation; corrected everywhere to "never resides permanently in the standing
+deployment."
+
+All five `BackupRestoreDrillTest` scenarios (the rewritten happy path plus four new negative tests)
+passed on the first real run of the rewritten suite. Re-verified: `docker compose -f
+docker-compose.yml config` (base file alone, zero `BACKUP_*` vars) now succeeds; `docker compose -f
+docker-compose.yml -f docker-compose.backup.yml config` (both vars set) resolves `backup` with the
+correct `data`+`backup-egress` network pair and the expected volume mounts; `shellcheck` reran clean
+against both rewritten scripts; `fullBackendGate` reran green end to end with no regressions.
+
+**Required for the D5 acceptance pass, explicitly not done here** (no real production host or bucket
+exists yet): dump a real production Postgres; upload it off-site for real against a real Backblaze B2
+bucket; download it back into a fresh, isolated Postgres; verify the real Flyway schema history, real
+run/event counts, and one specific known run; confirm a missing/purged artifact file's own graceful
+behavior is unaffected by a database-only restore; document the actually-measured RPO/RTO from that
+real run.
+
+**Review round 2 (2026-09-10) - 2 P1 + 2 P2 + 2 P3, all fixed and reverified, closed the same
+session.** The user's own framing: most of round 1's findings were good, but two P1s remained -
+"D4.5 još ne bih zatvorio zbog dva preostala P1 problema" - plus four smaller findings, all closed
+together before the phase was accepted.
+1. **[P1] Restore still didn't confirm the real target database name.** `target_db` was only ever
+   parsed out of `TARGET_DATABASE_URL`'s own string for display, and the destructive-restore guard
+   checked only whether a `runs` table existed - a genuinely wrong-but-fresh (never-migrated) target
+   database would have been silently accepted as if it were the intended empty/disposable one, since
+   a mistyped or misdirected connection string parses just as "successfully" as a correct one. Fixed:
+   a new, required `RESTORE_EXPECTED_DATABASE` is cross-checked against `SELECT current_database()` -
+   what Postgres itself reports the connection actually landed on, never a parsed string - and the
+   script refuses (exit `4`) on any mismatch before touching rclone/age/Postgres at all. Went further
+   than the literal ask, per the reviewer's own "još bolje" suggestion: `RESTORE_CONFIRM_DESTRUCTIVE`
+   must now equal exactly `<real-database-name>:<backup-identifier>`, never a generic `yes` a script
+   or a copy-pasted runbook step could silently reuse across a completely different incident - the
+   required value is printed in the script's own refusal message, never something the caller
+   computes by hand.
+2. **[P1] The disk-budget guard only ever checked a flat 100 MiB floor, independent of how large the
+   dump about to be attempted actually is.** 101 MiB free with a several-hundred-MiB database would
+   have passed the old check and then exhausted the filesystem mid-dump. Fixed: required free space
+   is now the flat floor + the source database's own real, live-measured size
+   (`SELECT pg_database_size(current_database())` - a conservative estimate, since `pg_dump`'s own
+   compressed output is typically smaller than this raw figure) + a new
+   `BACKUP_DUMP_RESERVE_BYTES` flat safety margin (default 100 MiB).
+3. **[P2] The upload-failure test proved a survived local file, never that it is genuinely retried on
+   the next run.** New test runs `backup.sh` twice against the same local directory - once with a
+   read-only (failing) bucket, once with the bucket made writable - and confirms the survivor from
+   run 1 is actually retried and uploaded alongside run 2's own fresh dump (two objects off-site
+   afterward, nothing left locally), plus asserts the exact "retrying a previously-unverified local
+   backup: <name>" log line fires. New second test for `flock` itself: a real background container
+   holds the identical lock file `backup.sh` uses (waited on via a "LOCK_ACQUIRED" announcement -
+   deliberately not the lock *file*'s mere existence, which the shell's own `exec 9>...` redirection
+   creates before `flock` itself has necessarily run, a real race the first attempt at this check
+   would have had), and a concurrent `backup.sh` invocation is confirmed to fail immediately with the
+   lock-held message.
+4. **[P2] The `docker()` test helper had no bounded cleanup path at all** - the same failure-path gap
+   `DashboardProcess` already guards against elsewhere in this repo. A hung `docker` command (or a
+   test JUnit 5's own default `@Timeout` mode cannot actually interrupt, since it never preempts a
+   blocking same-thread `Process#waitFor()`) could leak both the local CLI client and, for a `run`
+   invocation, the container the daemon keeps executing regardless of what happens to that client.
+   Fixed: every `run` invocation gets an explicit, unique `--name`; the helper now waits with a real
+   bounded timeout (draining output on a separate thread first, since `InputStream#readAllBytes()`
+   itself has no timeout and would already be stuck before a bounded `waitFor` is ever reached), and
+   on timeout forcibly destroys the local process *and* issues a named `docker kill`/`docker rm -f` -
+   the only mechanism that actually reaches the daemon-managed container.
+5. **[P3] `BACKUP_MIN_FREE_BYTES` (and the new `BACKUP_DUMP_RESERVE_BYTES`) were never wired through
+   the Compose overlay or documented in `.env.example`**, so a systemd invocation had no standard way
+   to configure them. Fixed: both added to `docker-compose.backup.yml`'s environment block and
+   documented in `.env.example` with the same heavy why-comment convention as every other var.
+6. **[P3] `deploy/backup/Dockerfile`'s own comment still said the service came from the base
+   `docker-compose.yml` and was profile-gated** - stale since round 1's compose split. Corrected to
+   reference `docker-compose.backup.yml` and the two-file invocation.
+
+**Also adopted, the user's own confirmations**: the standalone-container-plus-future-systemd-timer
+architecture was confirmed as the right call; the retry-before-cleanup fix, the `flock`+random-suffix
+collision fix, the `--single-transaction --no-owner --no-privileges` restore semantics, and the
+dynamic four-table drill test were all called out as correctly done.
+
+All eight `BackupRestoreDrillTest` scenarios (the original three plus round 1's four plus round 2's
+two new ones) passed on the first real run of the twice-rewritten suite. Re-verified: `shellcheck`
+reran clean on both scripts; the base+overlay `docker compose config` check now shows
+`BACKUP_MIN_FREE_BYTES`/`BACKUP_DUMP_RESERVE_BYTES` resolving correctly through the overlay;
+`fullBackendGate` reran green end to end with no regressions.
+
+**D4.5 is now genuinely closed** - implemented, self-verified, then independently reviewed across two
+rounds with seven real P1 findings total the original happy-path-only drill could not have caught, all
+fixed and reverified against a real system.
+
+## Faza D4.6 - Operational runbook
+
+**Date:** 2026-09-10. **Scope:** document the real, exercised procedures for operating this
+deployment - deploy/upgrade/rollback, restarting the service, recovering from a crash-loop,
+credential/secret rotation, checking free disk, manual retention triggers, backup/restore (including
+the systemd timer D4.5 deferred to this phase), diagnosing a failed run, Postgres unavailability, the
+Flyway migration procedure, and a final production Compose acceptance checklist. A documentation
+phase, not a design phase - no user review round preceded it (per the user's own "Mozes na D4.6 fazu
+slobodno").
+
+**What shipped**: `docs/RUNBOOK.md` (new) - every command traced back to a real file already in this
+repo or verified live during this phase (see below), organized as 15 numbered sections plus a
+prerequisite admin-auth section. `deploy/systemd/runner-backup.service` + `runner-backup.timer` (new)
+- the systemd timer D4.5's own documentation explicitly deferred to this phase, triggering
+`docker compose -f docker-compose.yml -f docker-compose.backup.yml run --rm backup` on a daily
+schedule (`OnCalendar=*-*-* 03:15:00`, `Persistent=true` so a run missed while the host was down/
+asleep still happens, matching the user's own D4.5 review-round preference for systemd over cron).
+
+**A real, deliberately-not-hidden gap documented rather than papered over**: this deployment has no
+image versioning/registry today - `APP_VERSION` only labels a structured-log field, never tags the
+built image, and nothing is ever pushed anywhere. The runbook's own rollback section states this
+plainly: the only rollback mechanism that exists is `git checkout <previous commit>` followed by a
+full rebuild, which replaces (does not preserve) whatever the current image was. Flagged as a real
+future improvement beyond D4.6's own scope, not silently assumed away.
+
+**Live-verified against a real system, not just reasoned about**:
+- **systemd unit syntax**: `systemd-analyze verify` (via a `debian:bookworm-slim` container with
+  `systemd` installed) against both new unit files. First pass correctly flagged two genuine,
+  environment-specific gaps (not real syntax errors): the files had inherited `777` permissions from
+  this Windows filesystem (systemd unit files should never be executable - fixed, `chmod 644`), and
+  the bare verification container had neither `docker.service` nor a real `/usr/bin/docker` binary
+  (expected - this container has no Docker installed at all). Re-ran with both stubbed (a fake
+  `/usr/bin/docker` script and a minimal `docker.service` unit) to isolate the actual unit file
+  content from those environment artifacts: **clean exit 0, zero warnings** - `OnCalendar`,
+  `Persistent`, `Type=oneshot`, `TimeoutStartSec`, and `WantedBy` all parse correctly.
+- **Credential rotation procedure**: the documented `ALTER USER ... WITH PASSWORD` command run for
+  real against a fresh `postgres:17-alpine` container - `ALTER ROLE` returned, confirming the exact
+  syntax works (and confirming the runbook's own correction that `POSTGRES_PASSWORD` alone does
+  nothing once a data directory already exists - only this command, not an env var change, actually
+  rotates it).
+- **D3.2 fail-closed startup messages**: triggered live via a real `bootRun` against a real local
+  Postgres with `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO` set. The Secure-cookie check fired and its exact
+  message matched the runbook word-for-word. The missing-GitHub-credentials check's exact message was
+  instead confirmed by reading `RunnerSecurityEnvironmentPostProcessor.java` directly (the literal
+  string constant thrown, lines 108-112) - a live repro of this second message specifically was
+  abandoned after a real, understood red herring: a reused Gradle daemon's own captured environment
+  predated the newly-exported env var for that one attempt (confirmed by the *first* attempt, which
+  forced a fresh daemon and correctly threw the sibling Secure-cookie check), not a defect in the
+  application code itself. Direct source confirmation of a literal string constant is at least as
+  strong evidence as a live capture would have been for this specific case.
+- **A real usability bug caught and fixed in the runbook's own first draft, before anyone else saw
+  it**: several commands referenced `$POSTGRES_USER`/`$POSTGRES_DB` as plain shell variables, which
+  only exist inside the containers `docker compose --env-file` manages - never in the operator's own
+  outer shell. Fixed by adding an explicit `source .env` prerequisite step where those commands are
+  first used.
+
+### Gates
+
+No Java/Gradle source touched - a pure documentation phase (`deploy/systemd/*` and `docs/RUNBOOK.md`
+are new files, not code). No `fullBackendGate`/`dashboardE2eTest` re-run needed as a result, though
+the live-verification steps above each independently exercised real Postgres/Docker/systemd behavior.
+
+**Review round (2026-09-10) - 4 P1 + 3 P2, all fixed and reverified, closed the same session.** The
+user's own framing: "D4.6 je sadržajno veoma dobar, ali ga još ne bih zatvorio" - a real adversarial
+read of every procedure's own actual safety, not a style pass.
+1. **[P1] The crash-loop procedure's own manual `SQL UPDATE runs SET status = 'ERROR' ...` broke
+   lifecycle/event atomicity.** `RunRecoveryService`'s real recovery write is not just a status
+   column change - it is one atomic transaction that also inserts the run's own `RUN_FINISHED` event,
+   advances `next_event_sequence`, and bumps the optimistic-lock `version` column. The documented raw
+   `UPDATE` skipped all three: the next startup correctly stopped retrying the row (now terminal), but
+   no `RUN_FINISHED` event ever existed for it, so an SSE client replaying that run's history would
+   wait forever for a terminal event that would never arrive - trading a visible crash-loop for a
+   quieter, worse failure. Fixed: the raw SQL repair is gone entirely. The runbook now documents
+   diagnosing the *specific* underlying data problem the exception names (via the full stack trace,
+   not just the aggregate message) and fixing *that* minimally, then simply restarting
+   `runner-service` so `RunRecoveryService` retries the identical atomic transition and succeeds
+   through the real, correct path. If the specific problem can't be identified this way, the runbook
+   now states this as a genuine, currently-unclosed gap (no supported break-glass tool exists) rather
+   than offering an unsafe workaround - the same honesty pattern already used for the rollback gap.
+2. **[P1] The restore procedure ran `pg_restore --clean` against production without first stopping
+   `runner-service`** - its own live HikariCP connections or an in-flight run write could race the
+   destructive restore and corrupt the outcome. Fixed: restore is now a full, ordered 6-step
+   procedure - take a safety backup of the current state first, stop `runner-service`, run the
+   restore, restart the service, wait for Flyway/readiness, then verify a specific known run, its
+   event count, and a couple of ordinary public endpoints - never the bare `restore.sh` invocation in
+   isolation.
+3. **[P1] Rollback ignored Flyway schema compatibility.** A `git checkout` + rebuild replaces the
+   application code but never undoes an already-applied Flyway migration - an older binary was never
+   written against columns/constraints a later migration added. Fixed: the runbook now requires a
+   confirmed backup and a recorded commit SHA before any schema-changing upgrade, and states plainly
+   that a code-only rollback is safe *only* when the new migration was backward-compatible; otherwise
+   the safe path is a controlled restore of the pre-upgrade backup during a real maintenance window,
+   not a live schema downgrade attempt (which Flyway has no mechanism for at all).
+4. **[P1] The password-rotation procedure put the real new password into a shell command** - `ALTER
+   USER ... WITH PASSWORD '<value>'` leaves the plaintext sitting in shell history and briefly visible
+   in the process list, and an apostrophe in the password would break the SQL string outright. Fixed:
+   a 6-step procedure using `psql`'s own `\password` meta-command (prompts twice, locally, sends only
+   the resulting hash) - stop `runner-service` first, open an interactive session, `\password`, update
+   `deploy/.env`, recreate `runner-service`, confirm readiness's `db` sub-indicator is `UP` again.
+5. **[P2] The systemd timer's own `Persistent=true` had no bounded retry for a real boot race** -
+   Postgres might not be reachable at the exact moment a missed-backup catch-up run fires, and a
+   single failed attempt would otherwise wait a full day for the next scheduled run; also, journald
+   alone is not an alert - nothing pages an operator just because a log line exists. Fixed:
+   `runner-backup.service` gained `Restart=on-failure`/`RestartSec=300` bounded by
+   `StartLimitIntervalSec=3600`/`StartLimitBurst=5` (up to 5 total attempts - the initial run plus up
+   to 4 restarts - 5 minutes apart, within any rolling hour), plus a new
+   `OnFailure=runner-backup-alert@%n.service` that fires only once those
+   retries are genuinely exhausted - a new companion template unit,
+   `deploy/systemd/runner-backup-alert@.service`, that logs at `crit` priority today (a deliberately
+   minimal, zero-infrastructure mechanism, this project's same "no paid monitoring service" stance
+   D4.3.2 already took) and documents two concrete, close-to-free options to extend it (a dead-man's-
+   switch ping service, or a webhook into an existing chat channel).
+6. **[P2] `TimeoutStartSec` only bounds the local `docker compose run` client process - the actual
+   container lives under the Docker daemon, outside this unit's own systemd cgroup, and `--rm` only
+   removes it once the container itself exits.** The identical class of gap already found and fixed
+   in D4.5's own `BackupRestoreDrillTest` test helper. Fixed: `ExecStart` now gives the container a
+   stable, deterministic `--name runner-backup-scheduled` (deliberately not random, since exactly one
+   scheduled backup should ever be in flight), and a new best-effort `ExecStopPost=-/usr/bin/docker rm
+   -f runner-backup-scheduled` runs after `ExecStart` exits for any reason, including a timeout kill -
+   the guaranteed cleanup path a hung run previously had none of.
+7. **[P2] The public readiness endpoint does not actually reveal which sub-check failed** -
+   `application.yml` sets both `show-details: never` and `show-components: never` explicitly, so even
+   a `DOWN`/`OUT_OF_SERVICE` response carries only the bare aggregate status, to anyone, always - the
+   runbook's own health-checks section had claimed sub-check detail was visible. Corrected, with the
+   response body shown literally (`{"status":"DOWN"}`, nothing more) and pointers to where the real
+   cause actually has to be found instead (the disk-usage endpoint, container logs, direct Postgres
+   diagnostics).
+
+**Also fixed, the reviewer's own explicit cleanup note**: `source deploy/.env` was removed from the
+runbook's own prerequisites entirely - a Compose `.env` file is not guaranteed to be safe/valid shell
+syntax, and sourcing it would needlessly export every secret in that file (the GitHub OAuth client
+secret, the DB password) into the operator's own shell history/environment for no reason.
+`POSTGRES_USER`/`POSTGRES_DB` are resolved instead from inside the `postgres` container's own real
+environment (`exec postgres sh -c '...'`), never the operator's outer shell. Caught and fixed two of
+its own bugs while doing this: two `psql` invocations used `-d "$POSTGRES_USER"` instead of
+`-d "$POSTGRES_DB"` (only "correct" by the coincidence that both default to `runner`), and three
+`section N` cross-references pointed at the wrong section after earlier edits shifted the numbering -
+all corrected, then the full cross-reference list re-audited end to end.
+
+**Live-verified against a real system, including the exact test the reviewer asked for.** All three
+systemd unit files (`runner-backup.service`, `runner-backup.timer`, the new
+`runner-backup-alert@.service`) re-verified clean with `systemd-analyze verify` (stubbed
+`docker.service`/binary, as in round 1). A genuine `systemctl start runner-backup.service` end-to-end
+test was attempted via a real nested systemd container (`jrei/systemd-debian:12`, `--privileged`,
+real cgroup mount, confirmed `systemctl is-system-running` -> `running`) with Docker CLI + Compose
+plugin installed inside it - blocked by a real, confirmed environment limitation, not a design flaw:
+Docker Desktop on this Windows machine exposes no `/var/run/docker.sock` reachable via a bind mount
+from a nested container (confirmed absent both via a direct bind-mount attempt and by checking
+directly inside the `docker-desktop` WSL2 distro itself, which has no `systemctl`/no such socket path
+either) - a real Linux production host has no such problem. Adapted to the closest achievable
+equivalent instead: ran the exact `ExecStart=`/`ExecStopPost=` command lines from the real unit file,
+verbatim, against a real, freshly-isolated Postgres (a real `docker compose -p runbook-verify -f
+docker-compose.yml -f docker-compose.backup.yml --env-file .env run --rm --name
+runner-backup-scheduled backup`, using the real `deploy/backup/Dockerfile`/`backup.sh`, with the one
+genuine host-bind-mount for `rclone.conf` swapped for a named Docker volume in this test copy only,
+since Windows/Docker-Desktop path-translation for a bind-mount source does not survive a
+nested-daemon-via-socket hop either - the real, unmodified `deploy/docker-compose.backup.yml` uses a
+real host bind mount and was independently config-validated in D4.5's own review round already).
+Result: **a real encrypted object was uploaded and independently confirmed inside the target volume**
+(`runner-backup-20260910T084340Z-55801119.dump.age`, 1031 bytes, listed directly from the volume by a
+separate throwaway container), exit code `0`. Also confirmed `docker rm -f` against an
+already-`--rm`-removed container name is a safe no-op on this Docker version - the exact behavior
+`ExecStopPost`'s leading `-` is there to guarantee regardless. Full cleanup confirmed after
+(`docker compose ... down -v`, both extra named volumes removed, the isolated project's own image
+removed, zero leftover containers/volumes via `docker ps -a`/`docker volume ls`) - the stray
+`deploy_pgdata`/etc. volumes an earlier step in this same verification pass had accidentally created
+(a real, caught-live gotcha: Compose derives its default project name from the directory basename, so
+a scratch copy also named `deploy` collided with the real repo's own project namespace) were removed
+too, isolated properly under an explicit `-p runbook-verify` project name for the rest of the pass.
+
+`git diff --check` clean throughout (confirmed by the reviewer independently, and by this session).
+
+### Gates (review round)
+
+No Java/Gradle source touched this round either - `docs/RUNBOOK.md` and the systemd unit files are
+the only changes, plus one new companion unit. No `fullBackendGate` re-run needed; the live
+verification above (real Postgres, real Docker, real `systemd-analyze verify`, the real `ExecStart`
+command run to completion with a real uploaded-and-confirmed object) is the actual proof for this
+round.
+
+**Review round 3 (2026-09-10) - 1 P1 + 3 P2 + 2 P3, all fixed and reverified, closed the same
+session.** The user's own framing: round 2's seven findings were all fixed correctly, but one new P1
+remained plus several smaller corrections - "Nakon rešavanja novog P1 nalaza i dodavanja stvarnog
+systemd acceptance testa u D5 checklist, D4.6 možemo potpuno zatvoriti."
+1. **[P1] The restore procedure's own fix for round 2 re-introduced a password on the command line.**
+   `-e TARGET_DATABASE_URL=postgresql://runner:<password>@postgres:5432/runner` still put the real
+   plaintext password in a literal CLI argument - exactly the class of exposure round 2's password-
+   rotation fix had just closed elsewhere, missed here. Fixed at the source, not just in the docs:
+   `restore.sh` itself now defaults `TARGET_DATABASE_URL` to `DATABASE_URL` (already present in the
+   `backup` service's own environment - the same value `backup.sh` dumps *from*) when not explicitly
+   overridden, so the ordinary "restore into the same production database" case never needs the
+   password typed anywhere at all. For the genuinely-different-target case, the runbook now uses
+   Compose's own `run --env-from-file <path>` (a real flag, verified directly) against a `chmod 600`
+   temporary file, unconditionally deleted afterward - never `-e`. A real regression caught while
+   making this fix: the new default-value line contained an apostrophe inside a `${VAR:?message}`
+   expansion, which is a genuine bash parser bug (confirmed via `bash -n`, not just shellcheck) -
+   fixed by rewording, both tools clean afterward.
+2. **[P2] Restore verified readiness, but never that Flyway's own post-restore behavior was actually
+   watched** - a backup can legitimately predate the currently-deployed code's own migrations, and
+   the original wording implied nothing new should ever need applying. Corrected: Flyway checks the
+   restored history, applies any migration the running code has that the backup didn't, and must
+   complete successfully before readiness - the runbook now says to actually confirm each step in the
+   logs, not just assume a clean startup.
+3. **[P2] The D5 acceptance checklist proved the Compose command works but never the systemd layer
+   itself** - D4.6's own verification (round 2) could only run `runner-backup.service`'s exact
+   `ExecStart`/`ExecStopPost` lines directly, never `systemctl` itself, due to the Docker-Desktop-on-
+   Windows environment limitation already found and documented. New checklist item names this gap
+   explicitly and lists the real 8-step systemd-specific test (install all three units, `systemctl
+   start`, confirm the remote object, force a controlled failure, confirm retry + the final `crit`
+   alert, interrupt an active run, confirm no orphaned container, confirm the timer's next scheduled
+   run) - the actual D5-time closure of the gap round 2's verification could not reach.
+4. **[P2] The admin-auth curl examples put the session cookie and CSRF token in `-b`/`-H` arguments**
+   - the same shell-history/process-list exposure class already fixed for the DB password. Fixed with
+   curl's own `-K`/`--config` file mechanism (verified directly: a real `curl -K` config file with
+   `cookie =`/`header =`/`request =` directives correctly set the `Cookie`/`X-Xsrf-Token` headers) -
+   a `chmod 600` temp file, populated by hand in an editor rather than any shell command carrying the
+   secret, unconditionally deleted after use; sections 8 and 9's own examples updated to the same
+   pattern.
+5. **[P3] "Retries up to 5 times" over-counted** - `StartLimitBurst=5` bounds the *total* attempts
+   (the initial run plus up to 4 restarts), not 5 retries on top of the first attempt. Corrected here
+   and in the equivalent phrasing already written for round 2 above.
+6. **[P3] The password-rotation verification step told the operator to check the `db` sub-indicator
+   directly** - impossible, per round 2's own `show-details: never`/`show-components: never` finding.
+   Fixed: now checks the three things that are actually possible - aggregate readiness `UP`, no new
+   DB/HikariCP errors in the logs, and a direct `pg_isready` connectivity check.
+
+**Live-verified again, including a genuine regression proof.** `bash -n`/`shellcheck` both clean on
+the updated `restore.sh` after the apostrophe-in-`:?`-message fix (confirmed as a real parse failure
+first, not assumed). The default-`TARGET_DATABASE_URL`-to-`DATABASE_URL` fallback was proven for real,
+not just read as plausible: seeded a real Postgres table with a `before-backup` marker row, ran a real
+`backup.sh` capturing that state, inserted a second `after-backup-should-be-wiped` row, then ran the
+real `restore.sh` with **no `TARGET_DATABASE_URL` override at all** - the restore succeeded (exit 0,
+"about to restore ... into database 'runner'" correctly resolved via the default) and the marker table
+afterward showed only `before-backup` - the second row was genuinely wiped, proving the restore really
+reconnected to and overwrote the same database purely through the new fallback, never an argument on
+the command line. `curl -K` config-file behavior for cookies/headers verified directly against a real
+endpoint before being documented as fact. Full `BackupRestoreDrillTest` suite (all 8 scenarios) rerun
+clean after the `restore.sh` change, confirming no regression. All test containers/volumes/images
+cleaned up afterward, confirmed via `docker ps -a`/`docker volume ls`. Per the user's own explicit
+instruction this round, no further `--privileged`/nested-systemd verification was attempted - round
+2's already-established finding (no accessible Docker socket for that approach on this machine) stood
+without needing to be re-demonstrated.
+
+### Gates (review round 3)
+
+No Java/Gradle source touched except `deploy/backup/restore.sh` itself (the `TARGET_DATABASE_URL`
+default-value fix) - `runner-service:databaseIntegrationTest`'s `BackupRestoreDrillTest` (all 8
+scenarios) is the real gate for that change, rerun clean. Everything else this round is
+`docs/RUNBOOK.md`/`docs/RELEASE_EVIDENCE.md` text.
+
+**Review round 4 (2026-09-10) - 2 P1 + 1 P2 + 2 P3, all fixed and reverified, closed the same
+session.** The user's own framing: most of round 3 was solved well, but two security findings and
+two documentation findings remained.
+1. **[P1] The password was gone from the operator's own `docker compose` command line, but still
+   reached `psql`/`pg_dump`/`pg_restore` as a literal process argument inside the container** - e.g.
+   `psql "$TARGET_DATABASE_URL"`/`pg_restore --dbname "$TARGET_DATABASE_URL"`, both fully visible via
+   `ps` to any other user on the host/inside the container by default (unlike environment variables,
+   which need same-or-higher-privilege `/proc/<pid>/environ` access - a meaningfully higher bar). The
+   identical pattern existed in `backup.sh`'s own `pg_dump --dbname "$DATABASE_URL"`/
+   `psql "$DATABASE_URL"`. Fixed in both scripts: a new `export_pg_env_from_url()` parses the
+   connection URL once into the real libpq `PGUSER`/`PGPASSWORD`/`PGHOST`/`PGPORT`/`PGDATABASE`
+   environment variables; every `psql`/`pg_dump` call afterward takes no connection-string argument
+   at all (libpq reads the exported vars automatically), and `pg_restore --dbname` receives only the
+   plain database name (`$PGDATABASE`), never the full URL.
+2. **[P1] Two operator-facing examples re-exposed the same password after the round-3 fix.**
+   `docker-compose.backup.yml`'s own restore example still showed
+   `-e TARGET_DATABASE_URL=postgresql://runner:<password>@...`, contradicting `restore.sh`'s own new
+   default; and `docs/RUNBOOK.md`'s cross-target restore example had the operator substitute
+   `<password>` directly into a `printf ... "<password>"` command, putting the real value on a
+   visible, interactive command line the shell records in history the moment it runs. Fixed: the
+   compose file's own example now shows the same-database case (no `TARGET_DATABASE_URL` override at
+   all) as primary, with the different-target case pointed at the runbook's own procedure instead of
+   inlined; the runbook now uses `read -rsp` (a real, silent, non-echoing prompt - only the `read`
+   invocation itself ever becomes a history line) to capture the whole URL, never a literal argument.
+3. **[P2] Both new temporary-credential-file patterns (the curl config, the cross-target restore env
+   file) claimed "unconditional" cleanup but only ever had a plain trailing `rm -f`** - not exception-
+   safe: a disconnected terminal, Ctrl-C, or any early exit skips it, leaving a real session cookie/
+   CSRF token/DB URL sitting in `/tmp`. Fixed: both now register `trap '...' EXIT HUP INT TERM`
+   immediately after `mktemp`, so cleanup runs on every exit path, not just a clean one.
+4. **[P3] Section 12 still claimed the `db` sub-indicator "surfaces this automatically"**, directly
+   contradicting section 5's own correct `show-details: never`/`show-components: never` finding a few
+   sections earlier. Corrected to say what is actually true: the check contributes to the aggregate
+   `DOWN`, with no component name ever attached; the real cause is confirmed via logs and a direct
+   connectivity check, not the readiness body itself.
+5. **[P3] "4 exist today: V1-V4" was a time-sensitive claim that goes stale the moment another
+   migration is added.** Replaced with an instruction to check the directory itself for the current
+   highest version, never a number written into the doc.
+
+**Live-verified again, including a real, adversarial proof of the actual security claim.** Started a
+real Postgres with a distinctive password, ran `psql` the *old* way (URL as a positional argument) in
+the background and captured `ps aux` mid-query - the real password was plainly visible in the process
+list, confirming the vulnerability was real, not theoretical. Reran with the *new* way (the exact
+`PGUSER`/`PGPASSWORD`/`PGHOST`/`PGPORT`/`PGDATABASE` pattern the fix now uses) - the `psql` process's
+own argv showed no password at all. Separately verified the `read -rsp` + `trap`-based cleanup pattern
+for real: the temp file held the correct content while the script ran, and was confirmed gone
+immediately after normal exit *and* after a simulated `SIGINT` (`kill -INT $$`) mid-script - the exact
+interruption scenario the P2 finding was about. `bash -n`/`shellcheck` both clean on both scripts
+after the `PGUSER`/etc. refactor; `docker compose ... config` still resolves cleanly for
+`docker-compose.backup.yml` after its own example-comment rewrite. Full `BackupRestoreDrillTest` (all
+8 scenarios, exercising the new `pg_restore --dbname "$PGDATABASE"` path for real, not just reasoned
+about) rerun clean. Per the user's own standing instruction from round 3, no `--privileged`/nested-
+systemd verification was attempted again. All test containers cleaned up, confirmed via `docker ps
+-a`/`docker volume ls`.
+
+### Gates (review round 4)
+
+`deploy/backup/backup.sh` and `deploy/backup/restore.sh` both changed (the `PGUSER`/etc. refactor) -
+`runner-service:databaseIntegrationTest`'s `BackupRestoreDrillTest` (all 8 scenarios) is the real gate
+for that change, rerun clean. `fullBackendGate` rerun once more to confirm no wider regression.
+Everything else this round is `docs/RUNBOOK.md`/`deploy/docker-compose.backup.yml`/
+`docs/RELEASE_EVIDENCE.md` text.
+
+**Review round 5 (2026-09-10) - 1 P1 + 1 P2, both fixed and reverified, closed the same session.**
+The user's own framing: round 4 correctly closed the original argv-exposure problem, but the new
+parsing approach itself opened a fresh P1, and the runbook's own trap pattern had a P2 gap in real
+interactive use.
+1. **[P1] The hand-rolled `export_pg_env_from_url()` regex from round 4 could not actually parse a
+   safe, real production password.** Verified live by running the exact same regex: `p@ssword`
+   parsed as password `p` and host `ssword@postgres`; percent-encoded `p%40ssword` was never decoded
+   at all and stayed literally `p%40ssword`. A normally-generated strong password could silently
+   break the very first production backup - the round-4 code's own comment had flagged this as a
+   "pre-existing concern" rather than something round 4 introduced, but the user correctly identified
+   it as an immediate, concrete D5 production risk, not a theoretical one. Fixed by removing URL
+   construction/parsing entirely: `docker-compose.backup.yml` now passes `PGHOST`/`PGPORT`/
+   `PGDATABASE`/`PGUSER`/`PGPASSWORD` directly as five separate Compose environment variables (no
+   `DATABASE_URL` at all); both `backup.sh` and `restore.sh` now just require these five libpq
+   variables to already be present (no parsing function, no regex) - psql/pg_dump/pg_restore pick
+   them up automatically, with no URL syntax anywhere to disambiguate a special character. The
+   cross-target restore case in `docs/RUNBOOK.md` section 10 now overrides the same five variables
+   via `--env-from-file`, writing `PGPASSWORD` with `printf '%s\n'` (a literal string, never
+   URL-assembled) - any password, including one containing `@`, `:`, `/`, or `%`, passes through
+   unchanged. New test `BackupRestoreDrillTest#aPasswordContainingUrlSpecialCharactersRoundTripsCorrectly`
+   runs both containers with password `p@ss:word/with%special` and proves a full real dump/encrypt/
+   upload/download/decrypt/restore round trip succeeds - the exact case that would have silently
+   broken under the old regex.
+2. **[P2] The runbook's `trap '...' EXIT HUP INT TERM` cleanup pattern (added in round 4) does not
+   fire when the snippet runs un-subshelled in a real interactive shell.** `EXIT` there only fires
+   when the *entire login shell* exits, not when the pasted block finishes - so `curl_config`/
+   `target_env` would sit in `/tmp`, and the plaintext password would sit in a shell variable, for the
+   rest of the operator's session, not just for the duration of the one command the trap was meant to
+   scope to. The round-4 `kill -INT $$` proof (a standalone helper script) never exercised this
+   specific interactive-shell gap. Fixed: every `trap`-using example in `docs/RUNBOOK.md` (sections 0,
+   8, 9, 10) now wraps the whole procedure in a subshell `( ... )`, so the closing `)` triggers `EXIT`
+   immediately, deregistering the trap and deleting the credential file the moment the block finishes
+   - not merely by the time the operator eventually logs out. Section 0's own example additionally now
+   runs `"${EDITOR:-vi}" "$curl_config"` *inside* the subshell (pausing it for the operator to type and
+   save the config, then continuing automatically) instead of describing a separate "edit now" step
+   that would have been ambiguous about whether it happened inside or outside the trapped scope.
+3. **Self-caught while fixing #1**: the new `${PGHOST:?message}` validation in `restore.sh` initially
+   read "already set in this container's ambient environment" - an apostrophe inside a
+   `${VAR:?message}` default-message expansion, the exact real `bash -n` parser bug (not a shellcheck
+   false-positive) found and fixed in round 3's own retrospective. Caught by running `bash -n` before
+   committing to the fix, not assumed correct; reworded to avoid the apostrophe entirely.
+
+**Live-verified again, including the exact scenario the P1 finding was about.** Confirmed via direct
+regex testing that the round-4 parser genuinely mis-parsed `p@ssword`/never-decoded `p%40ssword`
+before writing any fix. After the fix, `BackupRestoreDrillTest`'s new special-character-password
+scenario ran a real Testcontainers Postgres pair with password `p@ss:word/with%special` through the
+real Docker image's `backup.sh`/`restore.sh` end to end - all 9 scenarios in the suite passed (the 8
+existing plus the new one), confirming no regression from removing the URL-based env vars. `bash -n`
+clean on both scripts (confirming the self-caught apostrophe fix), `shellcheck` clean on both,
+`docker compose ... config --quiet` clean on `docker-compose.backup.yml` with the new five-variable
+environment block, `git diff --check` clean. Every fenced `bash` block in `docs/RUNBOOK.md` (including
+the newly-subshelled section 0/8/9/10 examples) was mechanically extracted and syntax-checked with
+`bash -n`; the only failures are pre-existing, deliberate `<placeholder>` angle-bracket conventions
+(`<repo-url>`, `<backup-identifier>`) that `bash -n` cannot distinguish from redirection syntax -
+unrelated to this round's changes and consistent with how every other placeholder in this document
+has always been written. Section numbering re-audited (`## 0` through `## 14`, no drift). `docker ps
+-a`/`docker volume ls` confirmed no leftover test resources. Full `fullBackendGate` rerun once more
+to confirm no wider regression.
+
+### Gates (review round 5)
+
+`docker-compose.backup.yml`, `deploy/backup/backup.sh`, `deploy/backup/restore.sh` all changed (the
+PG*-env-vars-directly refactor, removing `export_pg_env_from_url()` entirely) -
+`runner-service:databaseIntegrationTest`'s `BackupRestoreDrillTest` (now 9 scenarios) is the real gate
+for that change, rerun clean including the new special-character-password scenario. `fullBackendGate`
+rerun once more. Everything else this round is `docs/RUNBOOK.md`/`docs/RELEASE_EVIDENCE.md` text.
+
+**Review round 6 (2026-09-10) - 1 P2, fixed and reverified, closed the same session.** The user's own
+framing: the P1 fix was now correct (URL parser fully removed, Compose passes `PG*` vars directly, a
+real special-character round-trip test covers the actual risk); one P2 remained.
+1. **[P2] The signal trap cleaned up state but did not actually stop the procedure.** Every subshell
+   block across sections 0/8/9/10 used a single `trap '...' EXIT HUP INT TERM` - registering the same
+   handler for `HUP`/`INT`/`TERM` *catches and handles* those signals, which replaces bash's own
+   default disposition (terminate the process); once the handler returns, execution continues with the
+   next command instead of stopping. Confirmed live with a real `kill -INT "$BASHPID"` test against
+   both the old and new patterns (see below). Against the cross-target restore procedure specifically,
+   an operator's Ctrl-C landing mid-`read -rsp` under the old pattern could delete `$target_env`, then
+   let the script continue straight into re-creating it with an **empty** `PGPASSWORD` and attempting
+   `docker compose run` anyway - cleanup ran, but the interruption itself was silently swallowed rather
+   than aborting the procedure. A second, related gap: none of these blocks had `set -euo pipefail` -
+   without it, `curl -K ... | jq`'s own exit status is `jq`'s, not `curl`'s, so a failed `curl` inside
+   that pipeline could be masked by a successful `jq`. Fixed in every block (sections 0, 8, 9, and the
+   section 10 cross-target restore): added `set -euo pipefail`; split the single merged trap into an
+   `EXIT`-only `cleanup()` function (still always runs, deleting the credential file/unsetting the
+   password variable) plus separate `HUP`/`INT`/`TERM` handlers that call `exit 129`/`exit 130`/
+   `exit 143` (the signal's own conventional 128+n exit code) instead of just returning - `exit` then
+   triggers the same `EXIT` trap, so cleanup still always happens, but the script now genuinely stops
+   instead of racing ahead into whatever command was next.
+
+**Live-verified with a real, adversarial before/after proof of the exact mechanism.** Built a minimal
+reproduction of each pattern and sent it a real `SIGINT` via `kill -INT "$BASHPID"` (targeting the
+subshell's own real PID - `$$` inside a bash subshell keeps the *parent* shell's PID, a portability
+quirk that would otherwise send the signal to the wrong process and produce a false-negative result).
+**Old pattern** (`trap '...' EXIT HUP INT TERM`): output was `BEFORE` / `TRAP_RAN` /
+`CONTINUED_AFTER_SIGNAL` / `TRAP_RAN` again, exit code `0` - confirming the handler ran, control
+returned to the script, the next command executed, and the trap fired a *second* time at real `EXIT` -
+exactly the reported bug. **New pattern** (`cleanup()` on `EXIT` alone, `exit 130` on `INT`): output
+was `BEFORE` / `GOT_INT` / `CLEANUP_RAN file_gone=no` (file still existed as `cleanup()` ran, proving
+cleanup runs exactly once, at real exit) - and the following command was never reached, exit code
+`130`, matching `SIGINT`'s own conventional code. This same interrupt-then-verify-nothing-after-runs
+mechanism is what interrupting a blocking `read -rsp` mid-prompt reduces to (a caught signal aborts any
+blocking syscall the same way, `read` included), so the cross-target restore's own specific scenario is
+covered by the same proof, not a separate unverified claim. Every fenced `bash` block in
+`docs/RUNBOOK.md` re-extracted and `bash -n`-checked after this round's edits - clean except the same
+pre-existing `<placeholder>` false positives already noted in round 5 (unrelated to this change).
+`bash -n`/`shellcheck` on `deploy/backup/backup.sh`/`restore.sh` still clean (unchanged this round -
+only `docs/RUNBOOK.md` text changed). Section numbering re-audited (`## 0` through `## 14`, no drift).
+`git diff --check` clean.
+
+### Gates (review round 6)
+
+Documentation-only round (`docs/RUNBOOK.md`/`docs/RELEASE_EVIDENCE.md`) - no application or script
+code changed, so no Gradle gate reruns anything new. The real verification is the standalone signal-
+handling proof above, run directly against the same shell construct the runbook now documents.
+
+**D4.6 is now genuinely closed** - the operational runbook and its supporting scripts exist, every
+procedure either traces to a real file in this repo or was independently verified against a real
+system across six review rounds, every safety/exposure/correctness gap found across all six
+(manual-SQL lifecycle corruption, no-app-stop restore, two separate rounds of password-on-the-CLI/argv
+exposure, session-credential-on-the-CLI, non-exception-safe credential cleanup at a helper-script
+level, a real-interactive-shell level, and a signal-handling level, and a hand-rolled URL parser that
+could not handle a real production password) is closed, and the remaining honestly-stated gaps (no
+image-versioned rollback, no break-glass recovery tool, a minimal crit-log-only backup-failure alert,
+the systemd layer itself only closable at real D5 time) are real, acknowledged scope boundaries, not
+oversights. Left uncommitted per this session's own standing rule - user commits/pushes themselves.
+Next per the roadmap: D5 (real hosting) - the runbook's own section 13 is the acceptance checklist that
+phase's own final acceptance pass should follow.

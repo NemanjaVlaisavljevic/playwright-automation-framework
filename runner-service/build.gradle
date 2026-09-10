@@ -120,6 +120,13 @@ tasks.register('databaseIntegrationTest', Test) {
     classpath = sourceSets.databaseIntegrationTest.runtimeClasspath
     useJUnitPlatform()
     maxHeapSize = '512m'
+    // D4.5 - BackupRestoreDrillTest builds deploy/backup's own Dockerfile as a real image (via
+    // Testcontainers' ImageFromDockerfile). This task's own working directory is this module's
+    // directory (runner-service/), not the repo root, the same reason bootRun below needs its own
+    // explicit workingDir override - a system property (mirrors dashboardE2eTest's own
+    // dashboardE2e.repoRoot/dashboardE2e.dashboardDir convention) is more robust than a relative
+    // "../deploy/backup" path baked into the test itself.
+    systemProperty 'databaseIntegrationTest.repoRoot', rootProject.projectDir.absolutePath
     // A real Docker container is started fresh each run - this task has side effects Gradle's
     // input/output modeling cannot see, so it must never be treated as cacheable/up-to-date (the
     // same reasoning dashboardE2eTest's own task documents for its own real side effects).

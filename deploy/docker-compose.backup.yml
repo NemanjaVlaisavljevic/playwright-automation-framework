@@ -1,0 +1,103 @@
+# D4.5 - backup/restore overlay, never merged into the base docker-compose.yml directly.
+#
+# Two independent reasons this is its own file, not a service added to the base one:
+#
+# 1. Docker Compose interpolates every `${VAR:?message}` in a file's own service definitions while
+#    building its config model, regardless of which `profiles:` are actually activated - a
+#    `profiles: ["backup"]`-gated service defined in the *base* file (an earlier version of this
+#    design did exactly that) still made a bare `docker compose -f docker-compose.yml up` fail
+#    outright the moment BACKUP_AGE_RECIPIENT/BACKUP_REMOTE/BACKUP_BUCKET/BACKUP_RCLONE_CONFIG_FILE
+#    were unset - which they always are until an operator has actually set up off-site backup,
+#    breaking the ordinary deployment path for everyone who hasn't. A real review-round finding,
+#    confirmed live (`docker compose ... config --services` failing on all four `${VAR:?}` expressions
+#    with no `--profile backup` in sight). Splitting into a separate file means these variables are
+#    only ever interpolated when this file is explicitly included - see Docker's own docs on
+#    variable interpolation happening at config-model build time, independent of profile filtering.
+# 2. The `backup` service needs real internet egress (to reach an S3-compatible bucket) that the
+#    base file's own `data` network deliberately does not provide (`internal: true` - no gateway at
+#    all, by design, for `runner-service`/`postgres`). A plain, non-internal `backup-egress` network
+#    below is ADDED to this service alongside `data` (still needed to reach `postgres` by its
+#    Compose DNS name) - `postgres`/`runner-service` themselves are untouched, still fully isolated
+#    from the internet exactly as before.
+#
+# Usage - a routine backup run (host-level systemd timer, preferred over cron for this - Persistent=
+# true, a real timeout, a clear unit exit status, and journald evidence for free; documented in the
+# D4.6 operational runbook, not here):
+#   docker compose -f docker-compose.yml -f docker-compose.backup.yml --env-file .env \
+#     run --rm backup
+#
+# A restore is always a manual, one-off override on top of the above - BACKUP_AGE_IDENTITY_FILE (the
+# private age identity key) never sits in this file's own standing config; it exists on this host
+# only for the duration of this one invocation, mounted read-only from wherever it is actually kept
+# at rest (offline/a password manager - see backup.sh/restore.sh's own headers). RESTORE_EXPECTED_DATABASE
+# is cross-checked against what Postgres itself reports via `SELECT current_database()`, never just
+# the name PGDATABASE itself claims; restore.sh prints the exact
+# RESTORE_CONFIRM_DESTRUCTIVE value it expects (tied to this database name and this backup identifier
+# - never a generic "yes") in its own refusal message if the target isn't genuinely empty.
+#
+# Restoring into THIS SAME production database (the ordinary disaster-recovery case) needs no
+# override at all - restore.sh picks up PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD directly from
+# this service's own ambient environment below (a review finding: an earlier version of this example
+# built a single DATABASE_URL/TARGET_DATABASE_URL connection string and parsed it with a hand-rolled
+# regex - a raw `@`/`:`/`/`/`%` character in a real password broke that parser outright, and an even
+# earlier version showed `-e TARGET_DATABASE_URL=postgresql://runner:<password>@...` here, re-exposing
+# the password on the command line):
+#   docker compose -f docker-compose.yml -f docker-compose.backup.yml --env-file .env \
+#     run --rm \
+#     -e RESTORE_EXPECTED_DATABASE=runner \
+#     -e BACKUP_AGE_IDENTITY_FILE=/secrets/identity.txt \
+#     -v /path/to/offline/identity.txt:/secrets/identity.txt:ro \
+#     backup ./restore.sh <backup-identifier>
+#
+# Restoring into a genuinely different target overrides all five PG* variables at once - never as a
+# literal `-e` argument (the password would sit in shell history). See docs/RUNBOOK.md section 10 for
+# the full `run --env-from-file` procedure (a chmod-600 temp file holding PGHOST/PGPORT/PGDATABASE/
+# PGUSER/PGPASSWORD, the password itself read via a silent, non-echoing prompt, the whole procedure
+# run inside a subshell so cleanup fires the moment the block exits - not just on a clean exit).
+#
+# See docs/DEPLOYMENT_ARCHITECTURE.md section 7 for the full design writeup.
+services:
+  backup:
+    build:
+      context: ./backup
+    networks:
+      - data
+      - backup-egress
+    environment:
+      # Standard libpq connection variables, passed directly (never assembled into a URL first) - a
+      # review finding: an earlier version of this file instead built a single
+      # postgresql://user:password@host:port/dbname DATABASE_URL here, which backup.sh/restore.sh then
+      # had to parse with a hand-rolled regex - a raw `@`/`:`/`/`/`%` character in a real, strong
+      # production password broke that parser outright. Five separate KEY=VALUE variables have no URL
+      # syntax to disambiguate, so an arbitrary password (including one containing any of those
+      # characters) passes through correctly with no parsing step at all.
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${POSTGRES_DB:-runner}
+      - PGUSER=${POSTGRES_USER:-runner}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - see deploy/.env.example}
+      - BACKUP_AGE_RECIPIENT=${BACKUP_AGE_RECIPIENT:?set BACKUP_AGE_RECIPIENT in .env - see deploy/.env.example}
+      - BACKUP_REMOTE=${BACKUP_REMOTE:?set BACKUP_REMOTE in .env - see deploy/.env.example}
+      - BACKUP_BUCKET=${BACKUP_BUCKET:?set BACKUP_BUCKET in .env - see deploy/.env.example}
+      - BACKUP_PREFIX=${BACKUP_PREFIX:-runner-backups}
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-}
+      # Review-round addition: the disk-budget guard's own inputs, now also configurable through the
+      # standard deployment env file - not just a code-level default a systemd invocation could never
+      # override (see .env.example's own comment for what each one means).
+      - BACKUP_MIN_FREE_BYTES=${BACKUP_MIN_FREE_BYTES:-104857600}
+      - BACKUP_DUMP_RESERVE_BYTES=${BACKUP_DUMP_RESERVE_BYTES:-104857600}
+      # rclone's own real env var name (not invented here) - points at the config file holding
+      # BACKUP_REMOTE's actual real credentials. Mounted read-only below, never baked into the image.
+      - RCLONE_CONFIG=/secrets/rclone.conf
+    volumes:
+      - backup-local:/backups
+      - ${BACKUP_RCLONE_CONFIG_FILE:?set BACKUP_RCLONE_CONFIG_FILE in .env - see deploy/.env.example}:/secrets/rclone.conf:ro
+    command: ["./backup.sh"]
+
+networks:
+  # Deliberately NOT internal - the whole point is real egress to an S3-compatible bucket. Only
+  # `backup` ever joins it; `postgres`/`runner-service`/`web` are all untouched by this file.
+  backup-egress:
+
+volumes:
+  backup-local:
