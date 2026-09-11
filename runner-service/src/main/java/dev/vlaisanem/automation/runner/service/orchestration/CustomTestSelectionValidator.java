@@ -53,11 +53,9 @@ public final class CustomTestSelectionValidator {
           "At most " + max + " test(s) may be selected, got " + requested.size());
     }
 
-    // TestCatalogContentValidator already guards against a duplicate testKey reaching this method
-    // in production (see TestCatalogService), but this method also takes `catalog` as a plain
-    // parameter with no guarantee its caller ran that check - silently keeping only the last
-    // duplicate here would be exactly the kind of hidden collision the whole catalog design exists
-    // to prevent, so fail fast instead of trusting the input.
+    // TestCatalogContentValidator guards against this in production, but this method takes
+    // `catalog` as a plain parameter with no guarantee that ran - fail fast rather than silently
+    // keeping only the last duplicate.
     Map<String, TestCatalogEntry> byKey = new LinkedHashMap<>();
     for (TestCatalogEntry entry : catalog) {
       if (byKey.putIfAbsent(entry.testKey(), entry) != null) {

@@ -184,9 +184,7 @@ class ArtifactManifestEntryTest {
 
   @Test
   void rejectsAWindowsStyleTraversalSegmentOnceBackslashesAreNormalized() {
-    // The dedicated backslash rejection above already refuses this literal string on its own, but
-    // this proves the '..' segment check would ALSO catch it if the separator check were ever
-    // relaxed - defense in depth, not redundant with the backslash test.
+    // Proves the '..' check alone would also catch this if the separator check were relaxed.
     assertThatThrownBy(() -> entryWith(b -> b.relativePath = "tests/../../secrets"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("'..'");

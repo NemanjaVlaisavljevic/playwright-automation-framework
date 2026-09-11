@@ -17,6 +17,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -124,16 +125,14 @@ class ArtifactManifestReaderTest {
 
   @Test
   void reportsInvalidUtf8InsideACompleteLineAsCorrupt(@TempDir Path dir) throws IOException {
-    // A lone continuation byte (0x80) is never valid at the start of a UTF-8 sequence - embedded
-    // inside an otherwise well-formed, newline-terminated JSON line so only the strict decode step
-    // is what catches it, not the JSON parser itself.
+    // 0x80 is never valid at the start of a UTF-8 sequence; embedded in an otherwise well-formed
+    // line so only the strict decode step catches it, not the JSON parser.
     byte[] validPrefix =
         "{\"schemaVersion\":\"1.0\",\"artifactId\":\"a\",\"runId\":\"run-1\",\"testId\":\"t"
             .getBytes(StandardCharsets.UTF_8);
     byte[] invalidByte = {(byte) 0x80};
     byte[] validSuffix =
-        ("\",\"testDisplayName\":\"t\",\"type\":\"SCREENSHOT\",\"relativePath\":\"a.png\","
-                + "\"mediaType\":\"image/png\",\"sizeBytes\":1,\"createdAt\":\"2026-01-01T00:00:00Z\"}\n")
+        ("\",\"testDisplayName\":\"t\",\"type\":\"SCREENSHOT\",\"relativePath\":\"a.png\",\"mediaType\":\"image/png\",\"sizeBytes\":1,\"createdAt\":\"2026-01-01T00:00:00Z\"}\n")
             .getBytes(StandardCharsets.UTF_8);
     Path manifest = dir.resolve("manifest.jsonl");
     try (var out = Files.newOutputStream(manifest, StandardOpenOption.CREATE)) {
@@ -165,6 +164,23 @@ class ArtifactManifestReaderTest {
 
     assertCorruptWithDiagnosticContaining(
         () -> reader.read(manifest, RUN_ID, false, 10L), "exceeding the configured");
+  }
+
+  @Test
+  void rejectsASymbolicLinkInsteadOfFollowingIt(@TempDir Path dir) throws IOException {
+    Path target = dir.resolve("outside.jsonl");
+    Files.writeString(target, line(entry("a")));
+    Path manifest = dir.resolve("manifest.jsonl");
+    try {
+      Files.createSymbolicLink(manifest, target);
+    } catch (UnsupportedOperationException | IOException cannotCreateSymlink) {
+      Assumptions.abort(
+          "Symbolic links are not supported/permitted: " + cannotCreateSymlink.getMessage());
+      return;
+    }
+
+    assertCorruptWithDiagnosticContaining(
+        () -> reader.read(manifest, RUN_ID, true, MANIFEST_MAX_BYTES), "could not read");
   }
 
   /**

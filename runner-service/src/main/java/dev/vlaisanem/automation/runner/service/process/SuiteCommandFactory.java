@@ -11,16 +11,12 @@ import java.util.Locale;
 
 /**
  * Maps an allowlisted (environment, suite) pair to a fixed Gradle command via {@link RunCatalog} -
- * the REST API never accepts a task name, tag, or shell argument directly (see {@code
- * RunRequestValidator}, which callers are expected to have already run). {@code --rerun} is
- * required, not optional: without it Gradle's build cache could return a cached result with no
- * JUnit execution at all, meaning the listener would emit zero events for a run that reports as
- * having happened.
- *
- * <p>{@code --no-daemon} is also required, not optional: a daemon build hands the real work off to
- * a long-lived background JVM that outlives the client process and can even be reused across
- * unrelated invocations - {@link GradleProcessRunner#terminate} killing our process tree would not
- * reliably reach it, so a cancelled or timed-out run's tests could keep executing regardless.
+ * the REST API never accepts a task name, tag, or shell argument directly. {@code --rerun} is
+ * required: without it Gradle's build cache could skip JUnit execution entirely, and the listener
+ * would emit zero events for a run that reports as having happened. {@code --no-daemon} is also
+ * required: a daemon build hands work off to a long-lived JVM that {@link
+ * GradleProcessRunner#terminate} killing our process tree would not reliably reach, so a
+ * cancelled/timed-out run's tests could keep executing regardless.
  */
 public final class SuiteCommandFactory {
 
@@ -38,9 +34,8 @@ public final class SuiteCommandFactory {
         RunCatalog.gradleTaskFor(environment, suite)
             .orElseThrow(
                 () ->
-                    // RunRequestValidator should already have rejected an unmapped combination -
-                    // reaching here means RunCatalog has a gap between what it allows and what it
-                    // can actually map, a programming error, not bad input.
+                    // RunRequestValidator should already reject an unmapped combination - reaching
+                    // here means RunCatalog has a gap, a programming error, not bad input.
                     new IllegalStateException(
                         "No Gradle task mapped for " + environment + " + " + suite));
     List<String> command = new ArrayList<>();
@@ -48,30 +43,19 @@ public final class SuiteCommandFactory {
     command.add(task);
     command.add("--rerun");
     command.add("--no-daemon");
-    // The only place a client-submitted value ever reaches this command line - and only the exact
-    // testKey a caller already validated against the server's own catalog (see
-    // RunService#submit), translated into Gradle's `--tests Class.method` filter syntax. Never a
-    // raw string from the request body copied through directly.
+    // The only place a client-submitted value reaches this command line, and only an already
+    // catalog-validated testKey (see RunService#submit) - never a raw request-body string.
     for (SelectedTestSnapshot selected : selectedTests) {
       command.add("--tests");
       command.add(selected.testKey().replace('#', '.'));
     }
     command.add("-Drunner.runId=" + runId);
     command.add("-Drunner.rawEventsDir=" + rawEventsDir);
-    // D4.2 - read by build.gradle itself (the outer, --no-daemon build JVM this command line
-    // actually reaches), never by the forked JUnit test-worker JVM directly - a raw system
-    // property set here does NOT propagate to that forked worker on its own (see build.gradle's
-    // own forwardRunnerEventProperties comment for why only env vars are inherited automatically).
-    // build.gradle uses this to override the Allure Gradle plugin's own `adapter.resultsDir`,
-    // which is what actually computes the real `-Dallure.results.directory=` argument the plugin
-    // hands to the forked worker - redirecting Allure's automatic per-test result JSON/TXT writing
-    // (which happens regardless of whether TestFixture ever calls Allure.addAttachment) into this
-    // run's own artifacts subdirectory, included in DiskUsageService's runnerDataBytes() and D4.1's
-    // retention purge for free, rather than growing unbounded in the shared build/allure-results
-    // directory outside every disk-protection mechanism this project has. The raw-event byte limit
-    // is threaded differently (as the RUNNER_RAW_EVENT_MAX_BYTES environment variable set by
-    // RunService, not a -D flag here) precisely because it must reach RunnerEventWriterRegistry
-    // inside the forked worker itself, not build.gradle's own configuration code.
+    // Read by build.gradle itself (the outer build JVM), not the forked JUnit worker - a system
+    // property doesn't propagate there on its own, unlike an env var. build.gradle uses this to
+    // redirect the Allure plugin's per-test result output into this run's own artifacts
+    // subdirectory (so it's covered by DiskUsageService/retention) instead of the shared,
+    // unbounded build/allure-results directory.
     command.add("-Drunner.allureResultsDir=" + allureResultsDir);
     return List.copyOf(command);
   }

@@ -15,10 +15,9 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * D4.3.2 - proves {@link RunnerMetrics}'s own two central guarantees directly, against a plain
- * {@link SimpleMeterRegistry} (no Spring context needed): cardinality-locked tag values (every
- * enum, never a free-form string) and best-effort recording (a broken registry never throws out of
- * a {@code record*} call).
+ * Proves {@link RunnerMetrics}'s two central guarantees against a plain {@link
+ * SimpleMeterRegistry}: cardinality-locked tag values (enums only, never free-form strings) and
+ * best-effort recording (a broken registry never throws out of a {@code record*} call).
  */
 class RunnerMetricsTest {
 

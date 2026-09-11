@@ -17,7 +17,6 @@ describe("Alert", () => {
     const alert = screen.getByRole("alert");
     const icon = alert.querySelector("[aria-hidden='true']");
     expect(icon).not.toBeNull();
-    // The visible text is still present and accessible on its own, without the icon.
     expect(alert).toHaveTextContent("Run finished.");
   });
 });

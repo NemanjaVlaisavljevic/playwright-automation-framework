@@ -33,12 +33,10 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedStatic;
 
 /**
- * Exercises {@link TestFixture#captureFailure} against mocked Playwright interfaces (real ones
- * would need an actual browser) - specifically the independent-best-effort-step guarantee added in
- * response to a review's finding: a failure in any one artifact-capture step (screenshot, its
- * manifest entry, its Allure attachment, and the same for the trace) must never prevent any other
- * step, and must never itself become a new reported failure that could mask the test's own real
- * one.
+ * Exercises {@link TestFixture#captureFailure} against mocked Playwright interfaces. Each
+ * artifact-capture step (screenshot, its manifest entry, its Allure attachment, and the same for
+ * the trace) must be independent: a failure in one must never prevent another or itself become a
+ * new reported failure that masks the test's real one.
  */
 class TestFixtureTest {
 
@@ -76,8 +74,7 @@ class TestFixtureTest {
   @Test
   void aScreenshotManifestFailureDoesNotPreventTraceCapture(@TempDir Path artifactsDir)
       throws Exception {
-    // A directory sitting where manifest.jsonl needs to be a file - every manifest write (for
-    // either artifact) fails, but that must not stop the trace file itself from being captured.
+    // A directory where manifest.jsonl needs to be a file forces every manifest write to fail.
     Files.createDirectories(artifactsDir.resolve("manifest.jsonl"));
     Page page = workingScreenshotPage();
     BrowserContext browserContext = browserContextWithWorkingTracing();
@@ -128,17 +125,15 @@ class TestFixtureTest {
     TestFixture fixture = fixtureWith(artifactsDir, browserContext, page, true);
     ExtensionContext context = context("someTest");
 
-    // The point of this assertion: captureFailure() is called from AutomationExtension's own
-    // afterTestExecution, precisely because a real test failure already occurred - it must never
-    // itself throw and become a second, different failure that could confuse or replace the
-    // original one JUnit already recorded for this test.
+    // captureFailure() runs after a real test failure already occurred; it must never itself throw
+    // and replace or mask that original failure.
     assertThatCode(() -> fixture.captureFailure(context)).doesNotThrowAnyException();
     assertThat(readManifest(artifactsDir)).isEmpty();
   }
 
   /**
-   * D4.2 - a probe that cannot determine free space at all (here: the configured directory never
-   * existing) must fail closed (skip the capture), never fail open and assume there's room.
+   * D4.2: a probe that can't determine free space must fail closed (skip the capture), never assume
+   * there's room.
    */
   @Test
   void hasEnoughFreeSpaceForTraceCaptureFailsClosedWhenTheFilesystemProbeFails(
@@ -151,9 +146,8 @@ class TestFixtureTest {
   }
 
   /**
-   * D4.2 - an impossibly large configured floor guarantees the real (finite) disk always reports as
-   * below it, deterministically proving the skip-on-low-space path without needing to actually
-   * exhaust a real disk.
+   * D4.2: an impossibly large configured floor guarantees the real disk always reports as below it,
+   * proving the skip-on-low-space path without needing to actually exhaust a disk.
    */
   @Test
   void hasEnoughFreeSpaceForTraceCaptureSkipsWhenBelowTheConfiguredFloor(@TempDir Path artifactsDir)
@@ -190,8 +184,7 @@ class TestFixtureTest {
   private static Page workingScreenshotPage() {
     Page page = mock(Page.class);
     when(page.isClosed()).thenReturn(false);
-    // TestFixture now captures to memory first (no setPath on the options), so the mock simply
-    // returns bytes - TestFixture itself writes them to disk once they pass the size check.
+    // TestFixture captures to memory first (no setPath), so the mock just returns bytes.
     when(page.screenshot(any(Page.ScreenshotOptions.class)))
         .thenReturn("fake screenshot bytes".getBytes(StandardCharsets.UTF_8));
     return page;

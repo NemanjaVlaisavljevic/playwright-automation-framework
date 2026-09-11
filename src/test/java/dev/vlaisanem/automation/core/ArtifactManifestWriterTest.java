@@ -49,8 +49,7 @@ class ArtifactManifestWriterTest {
     assertThat(entry.type()).isEqualTo(ArtifactType.SCREENSHOT);
     assertThat(entry.mediaType()).isEqualTo("image/png");
     assertThat(entry.sizeBytes()).isEqualTo(Files.size(artifact));
-    // Always '/' - verified on this very machine (Windows), where Path.relativize() alone would
-    // have produced backslashes and silently violated ArtifactManifestEntry's own contract.
+    // Must be '/' on every OS, including Windows where Path.relativize() alone would use '\'.
     assertThat(entry.relativePath()).isEqualTo("tests/some-test/failure.png");
   }
 
@@ -94,29 +93,16 @@ class ArtifactManifestWriterTest {
   }
 
   /**
-   * Proves {@link ArtifactManifestWriter}'s own explicit locking (in-JVM {@code synchronized} plus
-   * an OS-level {@link java.nio.channels.FileLock}) actually serializes concurrent writers, rather
-   * than relying on any accidental platform-specific atomicity: every one of many
-   * concurrently-appended lines must still be a complete, independently-parseable JSON object - not
-   * a single call actually interleaved with another mid-line.
-   *
-   * <p><b>Known gap, deliberately not closed here:</b> this only exercises the in-JVM {@code
-   * synchronized} layer - a single in-process JVM cannot prove the {@link
-   * java.nio.channels.FileLock} actually protects a <em>second, separate</em> JVM process from
-   * interleaving with this one (that would need a small standalone fixture launched as a real child
-   * process, mirroring {@code GradleProcessRunnerTest}'s own fixtures). Today's A1 guarantee (one
-   * test JVM per run's own artifacts directory) makes that scenario unreachable in production, so
-   * this is tracked as backlog hardening rather than blocking A2.
+   * Proves concurrent writers never interleave or lose a line. Only exercises the in-JVM {@code
+   * synchronized} layer, not the OS-level {@link java.nio.channels.FileLock} across separate JVM
+   * processes; cross-process interleaving is untested here and tracked as backlog hardening.
    */
   @Test
   void concurrentAppendsNeverInterleaveOrLoseAnEntry(@TempDir Path artifactsRoot) throws Exception {
     int writers = 20;
     Path artifact = artifactsRoot.resolve("failure.png");
     Files.writeString(artifact, "x");
-    // One thread per writer, not a smaller fixed pool: every task blocks on `release` after its own
-    // `ready.countDown()`, so a pool smaller than `writers` would deadlock - every thread would be
-    // stuck waiting on `release` while `ready` can never reach zero without more threads than the
-    // pool has to give.
+    // One thread per writer: each task blocks on `release`, so a smaller pool would deadlock.
     ExecutorService pool = Executors.newFixedThreadPool(writers);
     try {
       CountDownLatch ready = new CountDownLatch(writers);
@@ -229,8 +215,7 @@ class ArtifactManifestWriterTest {
             26_214_400L,
             15L,
             2_097_152L);
-    // Written only now, mirroring real usage: the next artifact's own file doesn't exist on disk
-    // until its own capture step runs, immediately before its own record() call.
+    // Written only now, mirroring real usage: the file doesn't exist until its capture step runs.
     Files.write(second, new byte[10]);
     boolean secondRecorded =
         ArtifactManifestWriter.record(

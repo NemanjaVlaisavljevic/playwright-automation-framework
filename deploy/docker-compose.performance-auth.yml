@@ -1,11 +1,8 @@
-# D4.4.1d - OAuth-only override, additional to docker-compose.performance.yml, used ONLY around
-# create-run.js. Deliberately kept out of docker-compose.performance.yml itself (a design tension
-# the user flagged and resolved 2026-09-08): the plan's own step-5 review checkpoint requires "one
-# production-policy (real, unmodified deploy/docker-compose.yml) measurement-only pass across every
-# scenario" - if this override lived in the always-applied performance overlay, D4.4.1a-c's own
-# read-path/SSE scenarios would silently also run under LOCAL_DEV + a non-Secure cookie instead of
-# the real PORTFOLIO + Secure-cookie posture they were actually validated against, which the
-# checkpoint's own "unmodified" framing does not tolerate.
+# OAuth-only override, additional to docker-compose.performance.yml, used ONLY around create-run.js.
+# Deliberately kept out of docker-compose.performance.yml itself: if this override lived in the
+# always-applied performance overlay, the read-path/SSE scenarios would silently also run under
+# LOCAL_DEV + a non-Secure cookie instead of the real PORTFOLIO + Secure-cookie posture they need to
+# be validated against.
 #
 # Required sequence around create-run.js (never just `run --rm k6 run /scripts/create-run.js`
 # against the plain performance.yml stack - see performance/README.md's own step 3c for the full
@@ -14,39 +11,35 @@
 #        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
 #          -f deploy/docker-compose.performance-auth.yml --env-file deploy/performance.env \
 #          up -d --build runner-service wiremock
-#      (Compose recreates runner-service automatically here because its resolved config changed -
-#      no explicit `stop`/`rm` needed. This also re-runs RunRecoveryService's startup pass - safe
-#      only because create-run.js runs last, after every SSE fixture has already been cleaned up,
-#      so there is never a real RUNNING row for that pass to observe.)
+#      (Compose recreates runner-service automatically because its resolved config changed - no
+#      explicit `stop`/`rm` needed. This also re-runs RunRecoveryService's startup pass - safe only
+#      because create-run.js runs last, after every SSE fixture has already been cleaned up, so
+#      there is never a real RUNNING row for that pass to observe.)
 #   b. Wait for runner-service healthy again, then run create-run.js against this now-LOCAL_DEV/
 #      non-Secure-cookie instance.
 #   c. Revert runner-service back to the real, unmodified config - WITHOUT this file:
 #        docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
 #          --env-file deploy/performance.env up -d --build runner-service
-#      (again an automatic recreate, this time back to real PORTFOLIO + Secure cookie - the state
-#      every other scenario, and the plan's own step-5 checkpoint, actually needs.)
+#      (again an automatic recreate, back to real PORTFOLIO + Secure cookie.)
 #   d. Wait healthy again before moving on to teardown.
 #
-# Compose environment merging is additive by key across `-f` files, not full replacement - `docker
-# compose ... config` is the way to confirm the final resolved runner-service.environment before
-# trusting any of the above, never assumed from reading the YAML alone.
+# Compose environment merging is additive by key across `-f` files, not full replacement - use
+# `docker compose ... config` to confirm the final resolved runner-service.environment rather than
+# assuming from the YAML alone.
 #
-# create-run.js's own results are therefore an authenticated-write-path performance measurement
-# under an isolated HTTP (non-TLS) test override, not a fully production-identical TLS/OAuth
-# result - real Secure-cookie/TLS acceptance for the write path is deferred to D5. This is a
-# deliberate, narrowly-scoped, documented technical deviation, not a silent weakening: it never
-# touches the base docker-compose.yml, never affects D4.4.1a-c's own scenarios, and is reverted
-# immediately after create-run.js finishes.
+# create-run.js's own results are therefore an authenticated-write-path measurement under an
+# isolated HTTP (non-TLS) test override, not a fully production-identical TLS/OAuth result - real
+# Secure-cookie/TLS acceptance for the write path is deferred to D5. It never touches the base
+# docker-compose.yml, never affects the other scenarios, and is reverted immediately after
+# create-run.js finishes.
 services:
   # Stands in for github.com so create-run.js can perform a real GitHub OAuth2 admin login (never
-  # a fake ClientRegistrationRepository - mirrors OAuthFlowE2eTest's own established pattern: stub
-  # only the external dependency, keep the app's own real OAuth2 binding/wiring) with no outbound
-  # network call ever made to the real GitHub. Stub mappings in performance/wiremock/mappings/
-  # cover the three real calls Spring's own OAuth2 login flow makes server-to-server: the
-  # authorize redirect, the token exchange, and the user-info lookup. `--global-response-templating`
-  # is what lets authorize.json echo the real request's own `redirect_uri`/`state` query params
-  # back in its `Location` header - without it, WireMock would return that template literally
-  # instead of evaluating it.
+  # a fake ClientRegistrationRepository - stubs only the external dependency, keeps the app's real
+  # OAuth2 binding/wiring) with no outbound call ever made to the real GitHub. Stub mappings in
+  # performance/wiremock/mappings/ cover the three server-to-server calls Spring's OAuth2 login
+  # flow makes: the authorize redirect, the token exchange, and the user-info lookup.
+  # `--global-response-templating` lets authorize.json echo the real request's `redirect_uri`/
+  # `state` query params back in its `Location` header.
   wiremock:
     image: wiremock/wiremock:3.9.1
     profiles: ["tools"]
@@ -56,9 +49,8 @@ services:
     volumes:
       - ../performance/wiremock/mappings:/home/wiremock/mappings:ro
     healthcheck:
-      # Not `wget --spider` (a review-worthy real quirk found live: its default HEAD request gets
-      # a genuine 404 from WireMock's own /__admin/health endpoint, which only implements GET) -
-      # curl performs a real GET, matching what this endpoint actually supports.
+      # Not `wget --spider` - its default HEAD request gets a 404 from WireMock's /__admin/health
+      # endpoint, which only implements GET. curl performs a real GET instead.
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/__admin/health"]
       interval: 5s
       timeout: 3s
@@ -66,22 +58,17 @@ services:
 
   # Redirects the real Spring OAuth2 client's provider URIs at `wiremock` instead of the real
   # github.com (the base docker-compose.yml's own registration.github.{client-id,client-secret,
-  # redirect-uri} stay completely untouched - this overlay only ever changes *where the provider
-  # lives*, never fakes the app's own OAuth2 wiring/binding). Merges additively with the base
-  # file's own `runner-service.environment`.
+  # redirect-uri} stay untouched - this overlay only changes where the provider lives). Merges
+  # additively with the base file's `runner-service.environment`.
   #
-  # SERVER_SERVLET_SESSION_COOKIE_SECURE=false + RUNNER_DEPLOYMENTPROFILE=LOCAL_DEV - a real
-  # finding, confirmed live: this isolated stack has no real TLS (Caddy serves plain HTTP - no
-  # SITE_ADDRESS configured), and a standards-compliant HTTP client (confirmed directly with curl's
-  # own cookie jar, and this is exactly what k6's cookie jar does too) will never send a
-  # `Secure`-flagged cookie back over a plain-HTTP connection, regardless of same-origin - with the
-  # base file's own default (`true`, paired with `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO`), the session
-  # cookie the whole OAuth2 login flow depends on would be silently dropped by any real client after
-  # the very first `Set-Cookie`, and RunnerSecurityEnvironmentPostProcessor's own fail-closed check
-  # refuses to even start with `PORTFOLIO` + a non-Secure cookie regardless. This is not a novel
-  # workaround - it is the exact same escape hatch `deploy/.env.example`'s own `SESSION_COOKIE_SECURE`
-  # comment already documents for precisely this situation (a local, non-TLS Compose acceptance run),
-  # always paired with a non-`PORTFOLIO` profile override, applied here for the identical reason.
+  # SERVER_SERVLET_SESSION_COOKIE_SECURE=false + RUNNER_DEPLOYMENTPROFILE=LOCAL_DEV: this isolated
+  # stack has no real TLS (Caddy serves plain HTTP), and a standards-compliant HTTP client never
+  # sends a Secure-flagged cookie over plain HTTP regardless of same-origin - with the base file's
+  # default (`true` + PORTFOLIO), the session cookie the OAuth2 login flow depends on would be
+  # silently dropped after the first `Set-Cookie`, and RunnerSecurityEnvironmentPostProcessor's
+  # fail-closed check refuses to even start with PORTFOLIO + a non-Secure cookie. Same escape hatch
+  # `deploy/.env.example`'s SESSION_COOKIE_SECURE comment documents, always paired with a
+  # non-PORTFOLIO profile override.
   runner-service:
     environment:
       - SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_GITHUB_AUTHORIZATION_URI=http://wiremock:8080/login/oauth/authorize

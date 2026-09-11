@@ -4,10 +4,9 @@ import java.time.Duration;
 
 /**
  * One fixed-window rate-limit threshold - at most {@code maxAttempts} within {@code window},
- * counted per key (client IP or authenticated GitHub numeric id, depending on the surface - see
- * {@code security.AbuseRateLimitFilter}). A surface needing more than one simultaneous window (e.g.
- * create-run's per-minute *and* per-hour caps) simply gets two separate {@code RateLimitRule}
- * fields on {@link RunnerProperties}, each checked independently.
+ * counted per key (client IP or authenticated GitHub id - see {@code
+ * security.AbuseRateLimitFilter}). A surface needing more than one window gets multiple {@code
+ * RateLimitRule} fields on {@link RunnerProperties}, checked independently.
  *
  * @param maxAttempts maximum number of attempts allowed within {@link #window}.
  * @param window the fixed window duration attempts are counted over.

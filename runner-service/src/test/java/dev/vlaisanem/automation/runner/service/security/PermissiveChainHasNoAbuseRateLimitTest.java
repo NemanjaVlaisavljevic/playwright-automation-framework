@@ -18,25 +18,18 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * Regression test for a review finding: {@link AbuseRateLimitFilter}/{@link
- * RequestBodySizeLimitFilter}, as plain {@code Filter} beans, are also auto-registered by Spring
- * Boot as generic servlet-container filters, completely independent of - and in addition to - their
- * intended manual {@code SecurityFilterChain} wiring (see {@code ServletContextInitializerBeans}).
- * That auto-registration only exists in a real embedded servlet container, never in a {@code
- * MockMvc}-based {@code @WebMvcTest} slice (which dispatches straight to {@code
- * DispatcherServlet}), so this test deliberately boots the real application with a real embedded
- * Tomcat ({@code WebEnvironment.RANDOM_PORT}) - the one environment where the bug this class guards
- * against could actually have manifested. Pairs with {@link OAuth2ChainAppliesAbuseRateLimitTest},
- * which proves the exact same real-server setup still applies the limit on the OAuth2 chain -
- * together they prove {@code SecurityConfig}'s disabled {@code FilterRegistrationBean}s left the
- * explicit {@code SecurityFilterChain} wiring as the only place either filter ever runs, per-chain,
- * exactly as intended.
+ * {@link AbuseRateLimitFilter}/{@link RequestBodySizeLimitFilter}, as plain {@code Filter} beans,
+ * are also auto-registered by Spring Boot as generic servlet-container filters, independent of
+ * their intended {@code SecurityFilterChain} wiring - that only happens in a real embedded
+ * container, never a {@code MockMvc}-based slice, so this boots a real embedded Tomcat ({@code
+ * WebEnvironment.RANDOM_PORT}). Pairs with {@link OAuth2ChainAppliesAbuseRateLimitTest}, which
+ * proves the same real-server setup still applies the limit on the OAuth2 chain - together
+ * confirming {@code SecurityConfig}'s explicit {@code SecurityFilterChain} wiring is the only place
+ * either filter runs, per-chain.
  */
-// D4.3.1 - no longer excludes DataSourceAutoConfiguration: application.yml's readiness group now
-// unconditionally includes the `db` contributor, so a full-context test without a real DataSource
-// bean fails to start at all. Flyway stays excluded and hikari.initialization-fail-timeout=-1
-// stops HikariCP's own eager startup connection check from failing context refresh - see
-// HealthEndpointGroupMembershipTest's own Javadoc for the full reasoning.
+// Flyway is excluded and Hikari's init-fail-timeout disabled so a real DataSource is required
+// (readiness group needs `db`) without a live Postgres blocking context startup - see
+// HealthEndpointGroupMembershipTest for details.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
     properties = {
@@ -48,19 +41,17 @@ class PermissiveChainHasNoAbuseRateLimitTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
   @MockitoBean private ArtifactRepository artifactRepository;
-  // D4.2: DiskUsageService also needs a JdbcTemplate and isn't behind an interface, so it must be
-  // mocked here too for the same reason as the two stores above.
+  // DiskUsageService needs a JdbcTemplate and isn't behind an interface, so it's mocked too.
   @MockitoBean private DiskUsageService diskUsageService;
 
   @Value("${local.server.port}")
   private int port;
 
   /**
-   * The OAuth2 chain's own public-read limit is 120/min (see {@code
-   * OAuth2ChainAppliesAbuseRateLimitTest}) - sending more than that here and seeing zero {@code
-   * 429}s proves the permissive/local chain (no GitHub credentials configured, the default for this
-   * test and for every plain {@code bootRun}/{@code dashboardE2eTest}) genuinely has no abuse rate
-   * limiting applied to it at all, not merely a limit too high to hit in this run.
+   * Sends more than the OAuth2 chain's 120/min public-read limit ({@code
+   * OAuth2ChainAppliesAbuseRateLimitTest}) and expects zero 429s - proves the permissive/local
+   * chain (default for {@code bootRun}/{@code dashboardE2eTest}) has no rate limiting at all, not
+   * merely a limit too high to hit here.
    */
   @Test
   void manyRapidRequestsNeverReceiveA429() throws Exception {

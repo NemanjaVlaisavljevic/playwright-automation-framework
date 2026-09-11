@@ -7,23 +7,14 @@ import styles from "./RunDetailsPage.module.css";
 export interface FailureDetailProps {
   detail: string | undefined;
   artifacts: readonly ArtifactSummaryResponse[];
-  /**
-   * Set only when the artifacts *query itself* failed (see `RunDetailsPage.tsx`) - scoped here so a
-   * broken artifacts fetch is visible right where it matters (this specific failure) rather than
-   * only as a single banner elsewhere on the page that a viewer has to connect back to this test by
-   * themselves.
-   */
+  /** Set only when the artifacts query itself failed, so the error shows next to this failure. */
   artifactsErrorMessage?: string;
 }
 
 /**
- * Everywhere a single failure (a step's own, or a whole test's when it never used the `Steps` API)
- * needs to be understood without hunting the rest of the page: a one-line summary always visible,
- * the full redacted text available verbatim on demand, a one-click copy of that same full text, and
- * whichever of its own screenshot/trace/other artifacts exist. Deliberately does not parse the
- * failure text into a structured object (message/type/stack frames) - the first line is a plain
- * string slice, and the full text is shown completely verbatim; `FailureDetailFormatter` on the
- * backend already does the real formatting/redaction work.
+ * Renders one failure (a step's, or a whole test's without steps): a one-line summary, the full
+ * text on demand, a copy button, and its artifacts. Does not parse the failure text - formatting
+ * and redaction already happen server-side in `FailureDetailFormatter`.
  */
 export function FailureDetail({
   detail,
@@ -54,9 +45,7 @@ export function FailureDetail({
         <>
           <p className={styles.failureSummary}>{firstLine(detail)}</p>
           <div className={styles.failureActions}>
-            {/* Nothing to disclose beyond the summary when the detail is only one line - showing
-                "View full detail" over an identical copy of the same text would be pointless, and
-                would put that same text on the page twice. */}
+            {/* Skip "View full detail" when it would just duplicate the one-line summary. */}
             {detail !== firstLine(detail) && (
               <details>
                 <summary>View full detail</summary>

@@ -4,19 +4,9 @@ import java.util.function.Supplier;
 import org.slf4j.MDC;
 
 /**
- * D4.3.3 - runs {@code action} with {@code key} set to {@code value} in the current thread's MDC,
- * restoring whatever value {@code key} held before (not a blind {@code remove}) once {@code action}
- * completes, whether normally or by throwing. A blind remove would be wrong the moment this is ever
- * nested, or ever used on a thread some other scope already set the same key on; restoring the
- * exact previous value (including "absent" when there was none) is correct in every case, not just
- * the common one.
- *
- * <p>Used at every per-run background thread boundary this service has - {@code RunService}'s own
- * single-worker executor task, {@code GradleProcessRunner}'s output-drainer thread, {@code
- * ListenerEventIngestor}'s own per-run executor, and the HTTP-thread cancel path - so {@code runId}
- * is a real, structured MDC field (and so appears in the real ECS JSON output) on every log line
- * any of them ever produce, not just the ones on whichever single thread happened to be wrapped
- * first.
+ * Runs {@code action} with {@code key}={@code value} set in the current thread's MDC, restoring
+ * whatever value {@code key} held before (not a blind remove) once {@code action} completes -
+ * correct even when nested or already set by an outer scope.
  */
 public final class MdcScope {
 
@@ -40,12 +30,9 @@ public final class MdcScope {
   }
 
   /**
-   * Opens {@code key} = {@code value} in the current thread's MDC and returns a {@link Handle}
-   * whose {@link Handle#close()} restores whatever value {@code key} held before (the same
-   * restore-not-remove semantics as {@link #withMdc(String, String, Runnable)}) - a try-with-
-   * resources-friendly equivalent for a call site that must interleave with checked-exception-
-   * throwing code a plain {@code Runnable}/{@code Supplier} cannot express, e.g. a servlet filter's
-   * own {@code doFilter}, which declares {@code ServletException}/{@code IOException}.
+   * Same restore-not-remove semantics as {@link #withMdc(String, String, Runnable)}, but as a
+   * try-with-resources {@link Handle} for call sites that must interleave with checked-exception
+   * code (e.g. a servlet filter's {@code doFilter}).
    */
   public static Handle open(String key, String value) {
     String previous = MDC.get(key);

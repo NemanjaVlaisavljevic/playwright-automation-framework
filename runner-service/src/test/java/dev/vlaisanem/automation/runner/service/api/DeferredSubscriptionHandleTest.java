@@ -18,10 +18,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
- * Regression tests for the review's finding: {@code replayAndSubscribe} can already be delivering
- * events - and therefore racing toward its own close - before it returns a {@link
- * RunEventSubscription} handle, so a completion/timeout/error that fires that early must not be
- * lost just because the handle has not been set yet.
+ * {@code replayAndSubscribe} can already be delivering events - and racing toward its own close -
+ * before it returns a {@link RunEventSubscription} handle. A completion/timeout/error firing that
+ * early must not be lost just because the handle isn't set yet.
  */
 class DeferredSubscriptionHandleTest {
 
@@ -40,9 +39,8 @@ class DeferredSubscriptionHandleTest {
   }
 
   /**
-   * The exact race the review flagged: a completion/timeout/error fires before {@code
-   * replayAndSubscribe} has returned anything to {@link #set}. The close must be deferred, not
-   * lost.
+   * Exercises the race directly: a close request arrives before {@code replayAndSubscribe} has
+   * returned anything to {@link #set}. The close must be deferred, not lost.
    */
   @Test
   void aRequestBeforeTheSubscriptionIsSetIsHonoredAsSoonAsItArrives() {
@@ -85,9 +83,9 @@ class DeferredSubscriptionHandleTest {
   }
 
   /**
-   * Deterministic proof that exactly one of {@link DeferredSubscriptionHandle#set} / {@link
-   * DeferredSubscriptionHandle#requestClose} ever performs the actual close, however they are
-   * interleaved - not just under timing that happens to favor one ordering.
+   * Proves exactly one of {@link DeferredSubscriptionHandle#set}/{@link
+   * DeferredSubscriptionHandle#requestClose} ever performs the actual close, under every
+   * interleaving.
    */
   @Test
   void concurrentSetAndRequestCloseNeverDoubleCloseAndNeverLoseTheClose() throws Exception {

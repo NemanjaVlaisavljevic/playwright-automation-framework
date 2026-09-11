@@ -22,51 +22,33 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.1 (docs/RELEASE_EVIDENCE.md's D4.1 section) - the single orchestration point for both
- * retention protocols: full-run cleanup (a terminal run's whole row/files removed once it exceeds
- * either the age or count bound - see {@link RunLifecycleStore#findEligibleForCleanup}) and
- * artifact-only purge (a terminal run's artifact files/metadata removed on their own, shorter
- * window - see {@link RunLifecycleStore#findEligibleForArtifactPurge}). {@link #sweep} is the one
- * entry point both {@code RetentionScheduler} and {@code RetentionController} call.
+ * The single orchestration point for both retention protocols: full-run cleanup (a terminal run's
+ * whole row/files removed past the age or count bound) and artifact-only purge (just its artifact
+ * files/metadata, on a shorter window). {@link #sweep} is the one entry point both {@code
+ * RetentionScheduler} and {@code RetentionController} call.
  *
- * <p><strong>Every candidate is processed independently</strong> - unlike {@code
- * RunRecoveryService}'s deliberately fail-closed startup gate, a periodic maintenance sweep must
- * never let one run's own failure (a permissions error, a transient disk issue) block every other
- * eligible run, and must never crash the application over it. A failure here means "still
- * tombstoned/claimed, retried on the next sweep" - never an inconsistent, half-deleted state, since
- * the row is deleted only after every file is confirmed gone (see {@link #cleanupRun}).
+ * <p>Every candidate is processed independently - one run's failure (permissions, transient disk
+ * issue) must never block every other eligible run or crash the application. A failure means "still
+ * tombstoned/claimed, retried next sweep," never a half-deleted state, since the row is deleted
+ * only after every file is confirmed gone.
  *
- * <p><strong>Concurrency (revised, D4.1 review round)</strong>: {@link
- * RunLifecycleStore#claimForCleanup}/{@link RunLifecycleStore#claimForArtifactPurge} alone are
- * <em>not</em> sufficient to prevent two overlapping sweeps (a scheduled tick racing a manual
- * {@code POST /api/v1/retention/run}) from double-processing the same run - a review finding: a run
- * already tombstoned by an in-progress sweep is indistinguishable, via {@link
- * RunLifecycleStore#findPendingCleanup}, from one left over by an earlier crash, so a second,
- * genuinely concurrent sweep would see {@code alreadyClaimed=true} and race the first sweep's own
- * in-flight file deletion instead of safely skipping it. {@link #sweep} therefore also holds a
- * plain in-process {@link ReentrantLock} for the whole duration of a real (non-dry-run) sweep - a
- * non-blocking {@code tryLock}, so a second concurrent call returns immediately with {@link
- * RetentionReport#skipped()} set, touching nothing, rather than blocking or double-processing. This
- * is correct and sufficient for this project's own documented "single-instance only" scope (see
- * {@code README.md}'s own "Known limitations" bullet - one {@code runner-service} process, no
- * clustering); a genuinely multi-instance deployment would need a real DB-level owner/lease
- * protocol instead of a process-local lock, which is out of scope until that ever changes. The
- * per-run {@code claimForCleanup}/{@code claimForArtifactPurge} guard still matters independently:
- * it is what lets a single sweep safely resume a run left tombstoned by an earlier, crashed process
- * (a different failure mode the in-process lock cannot help with, since that earlier process no
- * longer exists to hold any lock at all).
+ * <p>{@link RunLifecycleStore#claimForCleanup}/{@code claimForArtifactPurge} alone can't stop two
+ * overlapping sweeps (a scheduled tick racing a manual trigger) from double-processing the same
+ * run, since a run tombstoned by an in-progress sweep looks identical to one left by an earlier
+ * crash. {@link #sweep} also holds an in-process {@link ReentrantLock} (non-blocking {@code
+ * tryLock}) for a real sweep's whole duration, so a concurrent call returns immediately with {@link
+ * RetentionReport#skipped()} instead of double-processing - sufficient only because this service is
+ * single-instance (see README "Known limitations"). The per-run claim guard still matters
+ * separately: it lets a sweep resume a run tombstoned by an earlier, now-gone crashed process.
  *
- * <p><strong>Precedence</strong>: a run eligible for both protocols in the same sweep is only ever
- * fully cleaned up, never also artifact-purged in that same pass - see {@link #sweep}.
+ * <p>A run eligible for both protocols in the same sweep is only ever fully cleaned up, never also
+ * artifact-purged in that pass.
  *
- * <p><strong>Path safety</strong>: every filesystem path this class builds comes only from the
- * configured root directories ({@code runner.artifacts-dir}/{@code logs-dir}/{@code
- * raw-events-dir}) plus a {@code runId} re-validated against the exact UUID shape {@code
- * RunService#submit} always generates ({@link #requireValidRunId}) - never from any value read out
- * of the {@code artifacts} table's own {@code relative_path} column. Recursive deletion ({@link
- * #deleteRecursively}) never follows symlinks (the default for {@link Files#walkFileTree}/{@code
- * visitFile} - a symlink is reported to the visitor itself, never traversed into), so a symlink
- * planted inside a run's own directory is deleted itself, never used to escape it.
+ * <p>Every filesystem path here comes only from the configured root directories plus a {@code
+ * runId} re-validated against the UUID shape {@code RunService#submit} generates ({@link
+ * #requireValidRunId}) - never from the {@code artifacts} table's {@code relative_path} column.
+ * Recursive deletion never follows symlinks, so one planted inside a run's directory is deleted
+ * itself, never used to escape it.
  */
 @Component
 public class RetentionService {
@@ -87,10 +69,7 @@ public class RetentionService {
   private final Path logsDir;
   private final Path rawEventsDir;
 
-  /**
-   * The in-process concurrency guard described in this class's own Javadoc - held only for a real
-   * (non-dry-run) sweep's whole duration, via a non-blocking {@code tryLock} in {@link #sweep}.
-   */
+  /** The in-process concurrency guard from this class's Javadoc - held only for a real sweep. */
   private final ReentrantLock sweepLock = new ReentrantLock();
 
   public RetentionService(
@@ -123,8 +102,7 @@ public class RetentionService {
     }
 
     // Non-blocking: a second concurrent real sweep must never wait for, or race, the one already
-    // running - see this class's own Javadoc for why claimForCleanup/claimForArtifactPurge alone
-    // do not close this gap.
+    // running.
     if (!sweepLock.tryLock()) {
       log.info(
           "Retention sweep skipped - another real sweep is already running in this process; the"
@@ -151,8 +129,8 @@ public class RetentionService {
     long bytesFreed = 0;
     for (String runId : candidates.fullCleanupIds) {
       try {
-        // D4.3.3 review finding - wrapped so any logging cleanupRun itself performs also carries
-        // runId as a real MDC field, not only the structured addKeyValue below on failure.
+        // Wrapped so any logging cleanupRun itself performs also carries runId as a real MDC
+        // field, not only the structured addKeyValue below on failure.
         long freed =
             MdcScope.withMdc(
                 "runId", runId, () -> cleanupRun(runId, candidates.pendingCleanup.contains(runId)));
@@ -204,11 +182,10 @@ public class RetentionService {
   }
 
   /**
-   * Kept separate from the newly-eligible set, not merged before this point: an already-tombstoned/
-   * claimed run must never go through claimForCleanup/claimForArtifactPurge again - that call's own
-   * contract is "did *this* call just win the claim", which a resumed run (claimed by an earlier,
-   * possibly crashed, attempt) would always lose, silently skipping the resume entirely. See
-   * cleanupRun/purgeArtifacts' own alreadyClaimed parameter.
+   * Kept separate from the newly-eligible set: an already-tombstoned/claimed run must never go
+   * through {@code claimForCleanup}/{@code claimForArtifactPurge} again, since a resumed run
+   * (claimed by an earlier, possibly crashed, attempt) would always lose that race and silently
+   * skip the resume. See {@code cleanupRun}/{@code purgeArtifacts}'s {@code alreadyClaimed} param.
    */
   private Candidates computeCandidates() {
     Instant now = Instant.now();
@@ -243,22 +220,16 @@ public class RetentionService {
       Set<String> artifactPurgeIds) {}
 
   /**
-   * Validate, claim (unless {@code alreadyClaimed} - see below), delete every on-disk file
-   * (artifact directory, process log, raw event files), then delete the row - in that exact order.
-   * Validating the {@code runId} shape <em>before</em> claiming means a malformed id (which should
-   * never occur in practice - see this class's own Javadoc - but is checked anyway) is never
-   * tombstoned at all, so it stays visible and simply fails (logged, retried, never crashing the
-   * sweep) on every attempt rather than being hidden behind an unfinishable tombstone. A crash
-   * anywhere after the claim always leaves a tombstoned-but-not-yet-fully-gone run for the next
-   * sweep to safely resume (files may already be gone; deleting an already-gone file is success,
-   * not an error), never a row deleted before its files are confirmed gone.
+   * Validate, claim (unless {@code alreadyClaimed}), delete every on-disk file, then delete the row
+   * - in that exact order. Validating the {@code runId} shape before claiming means a malformed id
+   * is never tombstoned, so it stays visible and simply fails on every retry rather than being
+   * hidden behind an unfinishable tombstone. A crash after the claim always leaves a
+   * tombstoned-but-not-fully-gone run for the next sweep to safely resume.
    *
-   * @param alreadyClaimed {@code true} for a run resumed from {@link RunLifecycleStore#
-   *     findPendingCleanup} - already tombstoned by an earlier (possibly crashed) attempt, so
-   *     {@link RunLifecycleStore#claimForCleanup} must not be called again: that call's own
-   *     contract is "did *this* call just win the claim," which a resumed run would always lose (it
-   *     is already claimed), silently skipping the resume entirely. File/row deletion is idempotent
-   *     regardless, so re-running it for an already-claimed run is always safe.
+   * @param alreadyClaimed {@code true} for a run resumed from {@link
+   *     RunLifecycleStore#findPendingCleanup} - already tombstoned by an earlier attempt, so {@link
+   *     RunLifecycleStore#claimForCleanup} must not be called again (it would always lose that
+   *     race). File/row deletion is idempotent regardless.
    */
   private long cleanupRun(String runId, boolean alreadyClaimed) {
     String safeRunId = requireValidRunId(runId);
@@ -269,9 +240,8 @@ public class RetentionService {
     deleteIfExists(logsDir.resolve(safeRunId + ".log"));
     deleteIfExists(rawEventsDir.resolve(safeRunId + ".tests.jsonl"));
     deleteIfExists(rawEventsDir.resolve(safeRunId + ".tests.complete"));
-    // D4.2 - a run whose raw event stream overflowed its configured size cap gets this marker
-    // instead of .tests.complete (see RunnerEventJsonlWriter's own Javadoc); it must be cleaned up
-    // here too, or it would linger forever after the run itself is otherwise fully purged.
+    // A run whose raw event stream overflowed its size cap gets this marker instead of
+    // .tests.complete; it must be cleaned up here too or it would linger forever.
     deleteIfExists(rawEventsDir.resolve(safeRunId + ".tests.overflow"));
     runStore.deleteRun(runId);
     return freed;
@@ -279,8 +249,8 @@ public class RetentionService {
 
   /**
    * Validate, claim (unless {@code alreadyClaimed}), delete the artifact directory, then complete
-   * the purge (delete rows + set purged_at) - see {@link #cleanupRun}'s own Javadoc for why
-   * validation happens before the claim, and what {@code alreadyClaimed} means.
+   * the purge (delete rows + set purged_at) - see {@link #cleanupRun} for the same ordering
+   * rationale and what {@code alreadyClaimed} means.
    */
   private long purgeArtifacts(String runId, boolean alreadyClaimed) {
     String safeRunId = requireValidRunId(runId);

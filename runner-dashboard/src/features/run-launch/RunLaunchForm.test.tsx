@@ -74,14 +74,8 @@ describe("RunLaunchForm", () => {
     ).toBeInTheDocument();
   });
 
-  /**
-   * Regression test for the review finding: `canManageRuns` must also depend on the CSRF token
-   * actually being primed, not just on `currentUser.canManageRuns` - an admin whose CSRF priming
-   * is failing (backend unreachable at bootstrap) must not be able to submit a request that would
-   * only fail downstream with a 403 for a missing/invalid `X-XSRF-TOKEN` header. Proves the full
-   * recovery path end to end: priming fails -> submit is disabled -> priming recovers on its own
-   * -> submit becomes enabled -> the resulting request actually carries the real CSRF header value.
-   */
+  // Proves the full recovery path: priming fails -> submit disabled -> priming recovers ->
+  // submit enabled -> the request carries the real CSRF header value.
   it("disables submit while CSRF priming is failing, then recovers and sends a valid X-XSRF-TOKEN header on submit", async () => {
     const user = userEvent.setup();
     document.cookie = "XSRF-TOKEN=test-token-value";

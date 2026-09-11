@@ -4,17 +4,10 @@ import java.util.Arrays;
 import java.util.regex.Pattern;
 
 /**
- * Formats a failure into a single bounded string for {@code RunnerEvent#detail()} - shared by
- * {@link RunnerEventTestExecutionListener} ({@code TEST_FAILED}/{@code TEST_ABORTED}) and the main
- * automation suite's {@code Steps} API ({@code STEP_FAILED}), so every failure reaching the
- * dashboard carries the same shape: the exception's class, a redacted message, and a handful of the
- * application's own stack frames - never the full trace, which would be excessive for an SSE
- * payload every viewer receives and could itself contain sensitive framework/library internals.
- *
- * <p>Bounded twice over: at most {@link #MAX_APPLICATION_FRAMES} stack frames (only frames inside
- * this project's own {@code dev.vlaisanem.automation} package - JDK/library/Playwright internals
- * add noise, not the "where did my test/step fail" signal a drill-down needs), and the whole result
- * truncated to {@link #MAX_LENGTH} characters regardless.
+ * Formats a failure into a single bounded string for {@code RunnerEvent#detail()}: the exception's
+ * class, a redacted message, and up to {@link #MAX_APPLICATION_FRAMES} of this project's own stack
+ * frames (never the full trace - too large for an SSE payload and could leak internals). The whole
+ * result is truncated to {@link #MAX_LENGTH} characters regardless.
  */
 public final class FailureDetailFormatter {
 
@@ -25,33 +18,20 @@ public final class FailureDetailFormatter {
   private static final String REDACTED = "***REDACTED***";
 
   /**
-   * Deliberately simple {@code key: value} / {@code key=value} redaction, not a general-purpose
-   * secret scanner - catches the common cases (an HTTP header line, a query string, a JSON-ish
-   * {@code "password": "..."} fragment inside a caught response body) without trying to be
-   * exhaustive. {@code JsonSupport#redact()} only understands well-formed JSON and would discard an
-   * entire non-JSON stack trace as {@code "<non-JSON body omitted>"}, losing everything - useless
-   * for arbitrary exception text. The key alternation is built from {@link SensitiveDataKeys#KEYS},
-   * the same set {@code JsonSupport} matches JSON field names against, so the two can never
-   * independently drift apart.
-   *
-   * <p>The value is matched up to end-of-line/quote, not just to the next whitespace or comma/
-   * semicolon: a real {@code Authorization: Bearer abc123.def456} value contains a space (stopping
-   * at whitespace would redact only the literal word "Bearer" and leak the actual token after it),
-   * and a real {@code Set-Cookie: SESSION=abc; Path=/; HttpOnly} value contains semicolons as part
-   * of the value itself, not a boundary to some unrelated field (stopping there would leave every
-   * cookie pair after the first one leaked in plain text).
+   * Simple {@code key: value}/{@code key=value} redaction, not a JSON-aware scanner ({@code
+   * JsonSupport#redact()} would discard a whole non-JSON stack trace instead of redacting it). Keys
+   * come from {@link SensitiveDataKeys#KEYS}, shared with {@code JsonSupport} so the two never
+   * drift apart. Matches to end-of-line/quote, not whitespace or comma/semicolon, since a real
+   * Bearer token or Set-Cookie value contains those characters.
    */
   private static final Pattern SENSITIVE_VALUE =
       Pattern.compile(
           "(?i)(" + sensitiveKeyAlternation() + ")([\"']?\\s*[:=]\\s*[\"']?)[^\\r\\n\"']+");
 
   /**
-   * A bearer token can appear with no {@code Authorization:} key at all (e.g. copied into a log
-   * message, or a caught response body that just embeds the header value alone) - {@link
-   * #SENSITIVE_VALUE} only fires when one of {@link SensitiveDataKeys#KEYS} precedes it, so this is
-   * a separate, unconditional pass over the word {@code Bearer} itself. Applied after {@link
-   * #SENSITIVE_VALUE}, so a {@code "authorization"}-keyed value redacted already contains no
-   * literal {@code Bearer} left for this pass to find.
+   * Catches a bearer token with no preceding key (e.g. embedded alone in a log line), which {@link
+   * #SENSITIVE_VALUE} would miss. Applied after it, so an already-redacted keyed value leaves no
+   * literal {@code Bearer} behind to double-match.
    */
   private static final Pattern STANDALONE_BEARER_TOKEN = Pattern.compile("(?i)\\bBearer\\s+\\S+");
 

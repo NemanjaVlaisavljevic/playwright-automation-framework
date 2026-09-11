@@ -1,22 +1,19 @@
-# D4.4.2 - throughput override, additional to docker-compose.performance.yml, used ONLY for a
-# throughput measurement pass (never the production-policy pass the plan's own step-5 checkpoint
-# already validated end to end against the real, unmodified limits - see
-# docker-compose.performance-auth.yml's own header comment for the same "keep every profile out of
-# the always-applied overlay" reasoning applied here for a different surface).
+# Throughput override, additional to docker-compose.performance.yml, used ONLY for a throughput
+# measurement pass (never the production-policy pass already validated against the real, unmodified
+# limits).
 #
-# Raises the two rate-limit buckets public-read.js/artifact-reads.js's own read-path traffic can
+# Raises the two rate-limit buckets public-read.js/artifact-reads.js's read-path traffic can
 # actually hit (AbuseRateLimitFilter's `public-read`/`download` buckets - see RunnerProperties'
-# own Javadoc) to a ceiling no realistic throughput run gets anywhere near within one scenario's
-# duration - the point is to measure the real backend's own capacity, not the anti-abuse limiter's
-# capacity. Every other RunnerProperties limit (create-run, cancel-run, OAuth, retention, disk,
-# sse-max-connections-per-ip) is deliberately left untouched - create-run.js is never load-tested
-# at all (see its own header comment), and sse-connection-cap.js exists specifically to prove the
-# real, fixed per-IP SSE connection cap, which must never vary by profile.
+# Javadoc) to a ceiling no realistic throughput run gets near within one scenario's duration - the
+# point is to measure the real backend's capacity, not the anti-abuse limiter's. Every other
+# RunnerProperties limit (create-run, cancel-run, OAuth, retention, disk, sse-max-connections-per-ip)
+# is deliberately left untouched - create-run.js is never load-tested at all, and sse-connection-cap.js
+# exists specifically to prove the real, fixed per-IP SSE connection cap, which must never vary by
+# profile.
 #
 # Usage - always with PERFORMANCE_PROFILE=throughput passed to k6 itself (see
 # performance/README.md's own throughput section for the exact commands and the stepped VU
-# escalation methodology, e.g. 10 -> 20 -> 40 VUs, stopping at the first real saturation signal
-# rather than jumping straight to one aggressive run):
+# escalation methodology, e.g. 10 -> 20 -> 40 VUs, stopping at the first real saturation signal):
 #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.performance.yml \
 #     -f deploy/docker-compose.performance-throughput.yml --env-file deploy/performance.env \
 #     up -d --build runner-service

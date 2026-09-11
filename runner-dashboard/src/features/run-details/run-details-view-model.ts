@@ -8,13 +8,8 @@ import type {
 } from "../event-stream/run-event-reducer";
 
 /**
- * `INTERRUPTED` exists only here, never in the SSE wire contract or the reducer's own
- * `TestExecutionStatus`/`StepExecutionStatus` - the backend never emits it, and the reducer's
- * strict lifecycle validation (`applyTestEvent`/`applyStepEvent`) must stay ignorant of it. It is
- * purely a display-time reconciliation: a test or step that is still (wire-level) `RUNNING` once
- * the run itself has reached a terminal status can never legitimately receive its own terminal
- * event afterward (the JVM that would have emitted it is gone), so the view model relabels it here
- * rather than the UI showing something that will never actually change again.
+ * Display-only status: relabels a test/step still `RUNNING` once the run itself is terminal (it
+ * can never receive a real terminal event afterward). Never appears on the wire or in the reducer.
  */
 export type DisplayTestStatus = TestExecutionStatus | "INTERRUPTED";
 export type DisplayStepStatus = StepExecutionStatus | "INTERRUPTED";
@@ -38,15 +33,10 @@ export interface DisplayStep {
 }
 
 /**
- * The one failure a viewer should see without hunting the rest of the page: the failed step's own
- * detail/artifacts if one exists (`scope: "step"`), or the test's own when no step explains it
- * (`scope: "test"` - a test that never used the `Steps` API, or whose `TEST_FAILED`/`TEST_ABORTED`
- * arrived without any step reporting `STEP_FAILED` first, e.g. a failure during cleanup after every
- * step already passed). The two scopes matter beyond just which fields are present: a `"step"`
- * failure is also rendered richly by that step's own row once the test is expanded, so a caller
- * showing this as a collapsed-row preview should hide it once expanded to avoid double-rendering the
- * same content - a `"test"` failure has nowhere else to appear, expanded or not, and must stay
- * visible regardless of the row's expand state.
+ * The one failure to show without hunting the page: the failed step's own detail (`scope: "step"`),
+ * or the test's own when no step explains it (`scope: "test"`). A "step" failure is also rendered
+ * by that step's row once expanded, so a collapsed-row preview should hide on expand; a "test"
+ * failure has nowhere else to appear and must stay visible regardless.
  */
 export type DisplayTestFailure =
   | {
@@ -74,12 +64,7 @@ export interface DisplayTest {
   readonly steps: readonly DisplayStep[];
   /** Present only when `status` is `FAILED` or `ABORTED` - see {@link DisplayTestFailure}. */
   readonly primaryFailure?: DisplayTestFailure;
-  /**
-   * `true` if this test's own (no-`stepId`) artifacts or any of its steps' own artifacts are
-   * non-empty - the C4.4 evidence filter's whole basis. Computed here, not re-derived per caller,
-   * so "has evidence" means the exact same thing everywhere it's asked (the filter, and any future
-   * caller) rather than each reimplementing "test-level or any step" themselves.
-   */
+  /** True if this test's own artifacts or any of its steps' artifacts are non-empty. */
   readonly hasArtifacts: boolean;
 }
 
@@ -89,15 +74,9 @@ export function testRowElementId(testId: string): string {
 }
 
 /**
- * A stable, valid DOM id for one step's own row - `stepId` alone is not unique run-wide (two
- * different tests may legitimately reuse the same one, see `RunnerEvent`'s own contract), so both
- * ids must be encoded together. Length-prefixed, not joined with a bare delimiter: `-` (like most
- * URL-safe punctuation) survives `encodeURIComponent` unescaped, so a naive `${testId}-${stepId}`
- * join could let two different (testId, stepId) pairs collide on the same string (e.g. testId
- * `"a-b"` + stepId `"c"` vs. testId `"a"` + stepId `"b-c"`). Prefixing the encoded testId with its
- * own length removes that ambiguity regardless of what characters end up inside either segment -
- * this id is only ever used opaquely via `document.getElementById`, never parsed back apart, so
- * only collision-freedom matters, not reversibility.
+ * A stable DOM id for one step's row. `stepId` alone isn't unique run-wide, so both ids are
+ * encoded together; the testId segment is length-prefixed to avoid collisions since `-` survives
+ * `encodeURIComponent` unescaped (a naive join could let two different pairs collide).
  */
 export function stepRowElementId(testId: string, stepId: string): string {
   const encodedTestId = encodeURIComponent(testId);
@@ -109,12 +88,7 @@ export interface RunDetailsViewModel {
   readonly counts: Record<DisplayTestStatus, number>;
   /** `tests.length - counts.RUNNING` - an `INTERRUPTED` test counts as completed, not running. */
   readonly completedCount: number;
-  /**
-   * A `SUCCEEDED` run can never legitimately have a test/step that never reported a terminal
-   * result - unlike `CANCELLED`/`TIMED_OUT`/`ERROR`, nothing about a successful run explains an
-   * event going missing. `true` here means the raw event stream was inconsistent, not that this is
-   * an ordinary interruption a viewer should read as "the run was cancelled".
-   */
+  /** True means the event stream was inconsistent - a SUCCEEDED run can't legitimately have an incomplete test. */
   readonly hasIncompleteTestsDespiteSucceededRun: boolean;
 }
 
@@ -198,9 +172,7 @@ function toDisplayTest(
     steps,
     hasArtifacts,
     ...(test.startedAt !== undefined ? { startedAt: test.startedAt } : {}),
-    // A still-RUNNING test/step never has its own finishedAt - using the run's own finishedAt as
-    // the display end point means its duration stops advancing once shown, rather than continuing
-    // to tick against `Date.now()` (`runDurationMs`'s default) forever after the run is long over.
+    // Falls back to the run's own finishedAt so duration stops advancing instead of ticking forever.
     ...(finishedAt !== undefined ? { finishedAt } : {}),
     ...(detail !== undefined ? { detail } : {}),
     ...(primaryFailure !== undefined ? { primaryFailure } : {}),
@@ -208,12 +180,8 @@ function toDisplayTest(
 }
 
 /**
- * Prefers the one step whose own `FAILED` outcome most plausibly explains a `FAILED`/`ABORTED`
- * test (the reducer's own lifecycle guarantees a test cannot finish while a step is still
- * `RUNNING`, so any failed step is already terminal by the time this runs) - falls back to the
- * test's own detail/artifacts for a test that never used the `Steps` API, or whose failure wasn't
- * attributed to any single step. `undefined` for anything else (`PASSED`/`SKIPPED`/`RUNNING`/
- * `INTERRUPTED`) - there is nothing to show a dedicated failure panel for.
+ * Prefers the step whose FAILED outcome explains a FAILED/ABORTED test, falling back to the
+ * test's own detail/artifacts. `undefined` for any other status.
  */
 function computePrimaryFailure(
   status: DisplayTestStatus,
@@ -285,12 +253,8 @@ function countByDisplayStatus(
 }
 
 /**
- * `stepId` is scoped to one test, not globally unique (see `RunnerEvent`'s own contract) - two
- * different tests may legitimately reuse the same `stepId`, so grouping artifacts must key on the
- * pair, never `stepId` alone. Joined with an escaped NUL separator, not a printable one - a JUnit
- * unique-id (`testId`) routinely contains spaces itself (e.g. a multi-parameter test method's own
- * `[method:...(TypeA, TypeB)]` segment), so a printable separator could let two distinct (testId,
- * stepId) pairs collide on the same joined string.
+ * `stepId` is scoped to one test, not globally unique, so grouping keys on the pair. Joined with a
+ * NUL separator since `testId` (a JUnit unique-id) can contain spaces or other printable characters.
  */
 function artifactStepKey(testId: string, stepId: string): string {
   return testId + "\u0000" + stepId;
@@ -315,11 +279,7 @@ function groupArtifactsByStepKey(
   return map;
 }
 
-/**
- * An artifact with no `stepId` - a test that never used the `Steps` API, so its own top-level
- * failure is the only thing to attribute a captured screenshot/trace to. Grouped by `testId` alone;
- * unlike a step's `stepId`, `testId` (a JUnit unique ID) already is unique run-wide.
- */
+/** Artifacts with no `stepId` (a test that never used the `Steps` API), grouped by `testId` alone. */
 function groupTestLevelArtifactsByTestId(
   artifacts: readonly ArtifactSummaryResponse[],
 ): ReadonlyMap<string, ArtifactSummaryResponse[]> {

@@ -22,62 +22,15 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.servlet.HandlerMapping;
 
 /**
- * D4.3.3 - a validated, echoed {@code X-Request-ID} plus MDC correlation and a real HTTP access-log
- * line (method/route template/status/duration/outcome), for every request regardless of which
- * {@code SecurityConfig} chain is active. A plain {@code @Component} {@code Filter}, deliberately
- * <em>not</em> disabled the way {@code AbuseRateLimitFilter}/{@code RequestBodySizeLimitFilter} are
- * - unlike those two, this filter's own behavior never differs per chain, and it must wrap Spring
- * Security's own processing (via {@link Order @Order(Ordered.HIGHEST_PRECEDENCE)}) so a
- * security-rejected request still gets a real {@code requestId} and access-log line with its real
- * final status.
+ * Adds a validated, echoed {@code X-Request-ID}, MDC correlation, and one HTTP access-log line
+ * (method/route/status/duration/outcome) per request, regardless of which {@code SecurityConfig}
+ * chain is active. Ordered ahead of Spring Security ({@link Order @Order(HIGHEST_PRECEDENCE)}) so
+ * even a security-rejected request gets a request id and an access-log line with its real status.
  *
- * <p><strong>Every completion path logs exactly once, with a bounded {@link Outcome}</strong> (a
- * review finding): a normal synchronous return logs {@link Outcome#COMPLETED}; an SSE/async request
- * (a real {@code SseEmitter} response starts async processing and returns from {@code
- * filterChain.doFilter} long before the connection actually closes) registers an {@link
- * AsyncListener} instead and logs {@link Outcome#COMPLETED}/{@link Outcome#ERROR}/{@link
- * Outcome#TIMEOUT} from {@code onComplete}/{@code onError}/{@code onTimeout} respectively - never
- * conflated into one, since a timed-out or errored SSE connection must never read as an ordinary
- * successful completion in the log; an exception propagating out of {@code filterChain.doFilter}
- * logs {@link Outcome#EXCEPTION} from this method's own {@code finally} block (never a separate
- * {@code catch}+rethrow) so the original exception is always re-propagated unchanged and the access
- * line is still written exactly once even though the container's own eventual error handling has
- * not run yet at that point. Every non-{@code COMPLETED} outcome's {@code status} field is
- * best-effort ({@code response.isCommitted() ? response.getStatus() : 500}) - the real {@code
- * outcome} field always tells a reader whether that status was actually observed or only inferred.
- *
- * <p><strong>The async cycle can complete between {@code isAsyncStarted()} and listener
- * registration</strong> (a review finding, realistic for a fast terminal SSE replay) - {@code
- * request.getAsyncContext()}/{@code addListener} then throw {@link IllegalStateException}. Caught
- * here and converted into an immediate best-effort {@link Outcome#COMPLETED} log rather than
- * letting an observability-only failure escape and turn into a real request-processing error.
- *
- * <p><strong>A further {@code startAsync()} restarts the cycle without keeping this listener
- * registered</strong> (a review finding) - the container does not carry a previously-registered
- * {@link AsyncListener} over to a new async cycle on the same request, so {@link
- * AccessLogAsyncListener#onStartAsync} re-registers itself on the new {@code AsyncContext}; without
- * this, a request that calls {@code startAsync()} a second time would finish with zero access-log
- * lines at all.
- *
- * <p><strong>Never logs the request body or any header</strong> - so never {@code
- * Authorization}/{@code Cookie}/an OAuth {@code code}/{@code state} - only
- * method/route-template/status/duration/outcome are ever read, by construction, not by a redaction
- * step.
- *
- * <p>{@code durationMs} is computed from {@link System#nanoTime()}, never wall-clock {@code
- * Instant} subtraction - immune to a system clock/NTP adjustment mid-request.
- *
- * <p>A successful (2xx) response on either health-probe route logs at {@code DEBUG} instead of
- * {@code INFO} - a real Docker healthcheck polls both every 10s (D4.3.1), and logging every one at
- * {@code INFO} would let identical {@code 200 UP} lines dominate a low-traffic portfolio app's
- * entire rotated log budget. A *failing* probe response still logs at {@code INFO} - a real signal
- * worth seeing.
- *
- * <p><strong>MDC is restored, never blindly cleared</strong> (a review finding) - both this
- * method's own outer scope and {@link #logAccessLineOnce}'s independent inner scope use {@link
- * MdcScope#open}, so a thread that already carried a {@code requestId} from some outer context (a
- * nested dispatch, a reused thread pool worker) has that exact prior value restored afterward,
- * rather than being left with no value at all.
+ * <p>Each request logs exactly once, via a bounded {@link Outcome}: sync completion logs {@link
+ * Outcome#COMPLETED}; async/SSE requests register an {@link AsyncListener} and log from {@code
+ * onComplete}/{@code onError}/{@code onTimeout}; an exception logs {@link Outcome#EXCEPTION} from
+ * this method's own {@code finally} so the original exception still propagates unchanged.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -137,12 +90,9 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
           .addListener(
               new AccessLogAsyncListener(request, response, requestId, startNanos, logged));
     } catch (IllegalStateException raceLostToCompletion) {
-      // The async cycle can complete between isAsyncStarted() (checked by this method's caller)
-      // and this call - a real, observed race, not a hypothetical, most realistic for a fast
-      // terminal SSE replay - leaving no live AsyncContext left to attach to. Recovered with a
-      // best-effort immediate log rather than letting an observability-only failure escape and
-      // turn into a request-processing error; COMPLETED is the correct classification since a
-      // completed-before-registration cycle is, by definition, not an error or a timeout.
+      // The async cycle can complete between isAsyncStarted() and this call (fast terminal SSE
+      // replay), leaving no AsyncContext to attach to - log immediately instead of letting an
+      // observability-only failure escape as a request-processing error.
       logAccessLineOnce(request, response, requestId, startNanos, logged, Outcome.COMPLETED);
     }
   }
@@ -165,16 +115,19 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     if (!logged.compareAndSet(false, true)) {
       return;
     }
-    // The async listener's callback may run on a different thread than the one that entered this
-    // filter - MDC is thread-local, so it is re-established here, independently of the outer
-    // scope's own, for the duration of this one log call rather than assumed to still be set.
+    // MDC is thread-local and the async callback may run on a different thread than doFilter, so
+    // it's re-established here rather than assumed to still be set.
     try (MdcScope.Handle ignored = MdcScope.open(MDC_REQUEST_ID_KEY, requestId)) {
+      // nanoTime, not wall-clock Instant, so a mid-request clock/NTP adjustment can't skew this.
       long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
       String route = routeTemplate(request);
       int status = resolveStatus(response, outcome);
+      // Successful health-probe polls are frequent and low-signal; log those at DEBUG only.
       boolean quiet =
           outcome == Outcome.COMPLETED && isSuccessfulHealthProbe(request.getRequestURI(), status);
       LoggingEventBuilder entry = quiet ? log.atDebug() : log.atInfo();
+      // Only method/route/status/duration/outcome are read here - never the request body or any
+      // header (Authorization, Cookie, OAuth code/state).
       entry
           .addKeyValue("method", request.getMethod())
           .addKeyValue("route", route)
@@ -189,11 +142,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     if (outcome == Outcome.COMPLETED) {
       return response.getStatus();
     }
-    // TIMEOUT/ERROR/EXCEPTION - the container's own final status handling may not have run yet (an
-    // exception's own async error handling), or may never commit one at all (a torn-down SSE
-    // connection on timeout) - best-effort: the real status if one was actually committed, else the
-    // conventional inferred failure status. The explicit `outcome` field above is what tells a
-    // reader this status was inferred, not directly observed.
+    // TIMEOUT/ERROR/EXCEPTION: the container may not have committed a final status yet, so this is
+    // best-effort (the `outcome` field tells a reader whether it was observed or inferred).
     return response.isCommitted() ? response.getStatus() : 500;
   }
 
@@ -207,9 +157,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
   }
 
   /**
-   * {@code onComplete}/{@code onError} can both fire for the same async request - {@code
-   * logAccessLineOnce}'s own {@link AtomicBoolean} guard, shared across all three callbacks here,
-   * is what keeps the access line to exactly one regardless of which combination actually fires.
+   * {@code onComplete}/{@code onError} can both fire for the same request - the shared {@link
+   * AtomicBoolean} guard in {@code logAccessLineOnce} keeps the access line to exactly one.
    */
   private static final class AccessLogAsyncListener implements AsyncListener {
 
@@ -249,10 +198,8 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
 
     @Override
     public void onStartAsync(AsyncEvent event) throws IOException {
-      // A further async dispatch restarted async processing on the same request - the container
-      // does NOT keep this listener registered for the new cycle automatically (a review finding);
-      // without re-registering here explicitly, a request that calls startAsync() a second time
-      // would finish with zero access-log lines at all.
+      // The container doesn't carry this listener over to a new async cycle on the same request,
+      // so a second startAsync() must re-register it here or the request logs nothing at all.
       event.getAsyncContext().addListener(this);
     }
   }

@@ -23,40 +23,25 @@ import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * One filter enforcing the whole D3.3 rate-limit matrix (see {@code RunnerProperties}'s own D3.3
- * Javadoc for the per-surface rationale) - never a single global limit, since different surfaces
- * have very different real costs. Registered only in the OAuth2 chain, right after {@code
- * SecurityContextHolderFilter} (see {@code SecurityConfig}) - <strong>not</strong> after {@code
- * AuthorizationFilter}, confirmed live: the two OAuth2 login-flow routes are actually handled (and
- * their response fully committed) by {@code OAuth2AuthorizationRequestRedirectFilter}/{@code
- * OAuth2LoginAuthenticationFilter}, both of which run well before {@code AuthorizationFilter} - a
- * filter registered after it is simply never reached for those two routes at all, which the first
- * version of this class got wrong (its rate limits silently never applied there). Registering here
- * instead still gets the same, correct outcome for the admin-keyed surfaces: an anonymous/non-admin
- * caller hitting an admin-only route has no numeric-id key to rate-limit against (see {@link
- * KeyStrategy#ADMIN_GITHUB_ID}, which returns {@code null} for a non-{@code OAuth2User} principal)
- * and is simply skipped here, then still correctly rejected with 401/403 later by {@code
- * AuthorizationFilter} - never rate-limited on top of that, exactly as intended; only an
- * already-authenticated admin's own repeated calls (their session's {@code Authentication} is
- * already restored by {@code SecurityContextHolderFilter} by the time this runs) are ever counted.
+ * One filter enforcing the whole rate-limit matrix - never a single global limit, since different
+ * surfaces have very different real costs. Registered only in the OAuth2 chain, right after {@code
+ * SecurityContextHolderFilter}, not after {@code AuthorizationFilter}: the two OAuth2 login-flow
+ * routes are handled (and their response fully committed) before {@code AuthorizationFilter} runs,
+ * so a filter registered after it would never see them. For the admin-keyed surfaces, an
+ * anonymous/non-admin caller has no numeric-id key (see {@link KeyStrategy#ADMIN_GITHUB_ID}) and is
+ * simply skipped here, then still correctly rejected with 401/403 by {@code AuthorizationFilter}.
  *
  * <p>Anonymous surfaces (OAuth login, public reads, downloads) are keyed by client IP; the two
  * authenticated-admin mutation surfaces (create/cancel run) are keyed by the caller's GitHub
- * numeric id (never username) - the same attribute {@code GithubOAuth2UserService}/{@code
- * CurrentUserController} already read.
+ * numeric id, never username.
  *
  * <p>{@code request.getRemoteAddr()} is only a trustworthy per-IP key because of the {@code
- * RemoteIpValve} trust boundary described in {@code SecurityConfig}'s own D3.3 notes - this class
- * does not itself re-verify that boundary, it simply relies on the container having already
- * resolved the address correctly.
+ * RemoteIpValve} trust boundary described in {@code SecurityConfig} - this class relies on the
+ * container having already resolved the address correctly.
  *
  * <p>Deliberately not a bare {@code @Component}: {@code @WebMvcTest} auto-detects and registers any
- * {@code Filter} bean it finds, in <em>any</em> slice, regardless of whether that slice imports
- * anything related to security at all (confirmed empirically - it broke {@code
- * RunEventStreamControllerTest}, an entirely unrelated slice, the moment this class existed as a
- * component anywhere on the classpath). Constructed as an explicit {@code @Bean} in {@link
- * SecurityConfig} instead, so only a test that actually imports {@code SecurityConfig} ever sees
- * it.
+ * {@code Filter} bean it finds in any slice, breaking unrelated tests. Constructed as an explicit
+ * {@code @Bean} in {@link SecurityConfig} instead, so only a test importing it ever sees this.
  */
 public class AbuseRateLimitFilter extends OncePerRequestFilter {
 
@@ -89,8 +74,7 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
                 KeyStrategy.ADMIN_GITHUB_ID,
                 // Both rules are evaluated atomically by InMemoryRateLimiter.tryAcquire - a
                 // request rejected by the hourly rule never silently consumes the minute rule's
-                // budget (a review finding against an earlier version that checked/incremented
-                // them one at a time).
+                // budget.
                 List.of(
                     new NamedRule(
                         "create-run-per-minute", properties.createRunRateLimitPerMinute()),
@@ -111,11 +95,8 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
                 List.of("/api/v1/runs", "/api/v1/runs/*", "/api/v1/capabilities", "/api/v1/tests"),
                 KeyStrategy.CLIENT_IP,
                 List.of(new NamedRule("public-read", properties.publicReadRateLimit()))),
-            // D4.1 review round: a real sweep does real DB/filesystem work, so both retention
-            // routes get their own conservative admin-keyed limit like every other admin-only
-            // mutation surface above - each tracked as its own independent counter (a valid or
-            // stolen admin session could otherwise trigger dry-run previews and real sweeps as
-            // often as it likes).
+            // A real sweep does real DB/filesystem work, so both retention routes get their own
+            // conservative admin-keyed limit, each its own independent counter.
             new Surface(
                 HttpMethod.GET,
                 List.of("/api/v1/retention/preview"),
@@ -126,9 +107,8 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
                 List.of("/api/v1/retention/run"),
                 KeyStrategy.ADMIN_GITHUB_ID,
                 List.of(new NamedRule("retention-run", properties.retentionRateLimit()))),
-            // D4.2 - a filesystem-tree walk plus a live Postgres size query is real work, so this
-            // new admin-only diagnostic route gets its own conservative rate limit by default, the
-            // same reasoning already applied to every other admin-only surface above.
+            // A filesystem-tree walk plus a live Postgres size query is real work, so this
+            // admin-only diagnostic route gets its own conservative rate limit too.
             new Surface(
                 HttpMethod.GET,
                 List.of("/api/v1/disk/usage"),
@@ -148,10 +128,8 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
     String key = matched.keyStrategy.extractKey(request);
     if (key == null) {
       // Expected, not just defensive, for the admin-keyed surfaces: this filter runs before
-      // AuthorizationFilter's own ROLE_ADMIN decision (see this class's own Javadoc for why), so
-      // an anonymous or non-admin caller genuinely has no numeric id to key against here - skipped
-      // rather than blocked, and still correctly rejected with 401/403 by AuthorizationFilter
-      // afterward. Never block a request this filter cannot key.
+      // AuthorizationFilter's ROLE_ADMIN decision, so an anonymous/non-admin caller genuinely has
+      // no numeric id to key against - skipped here, still correctly rejected later.
       filterChain.doFilter(request, response);
       return;
     }
@@ -193,9 +171,8 @@ public class AbuseRateLimitFilter extends OncePerRequestFilter {
   }
 
   /**
-   * {@code Duration.toSeconds()} truncates - a review finding: 59.9 remaining seconds would floor
-   * to {@code Retry-After: 59}, advising a client to retry slightly before the window actually
-   * elapses. Rounds up instead, and never below 1 (a {@code Retry-After: 0} is meaningless).
+   * {@code Duration.toSeconds()} truncates, so 59.9 remaining seconds would floor to {@code
+   * Retry-After: 59} and advise retrying too early. Rounds up instead, never below 1.
    */
   static long ceilSecondsAtLeastOne(Duration duration) {
     long wholeSeconds = duration.toSeconds();

@@ -5,10 +5,8 @@ import type {
 } from "./event-stream-client";
 
 /**
- * Test double for {@link EventStreamClient} - `connect()` stores the handlers and returns a
- * `close()` that just flips a flag; nothing fires on its own. Tests drive the connection lifecycle
- * explicitly via {@link open}/{@link emit}/{@link error}, in whatever order and interleaving a real
- * `EventSource` could produce (replay then live, a drop and recovery, an error before any open).
+ * Test double for {@link EventStreamClient}. Nothing fires on its own; tests drive the lifecycle
+ * via {@link open}/{@link emit}/{@link error}.
  */
 export class FakeEventStreamClient implements EventStreamClient {
   private handlers: EventStreamHandlers | null = null;

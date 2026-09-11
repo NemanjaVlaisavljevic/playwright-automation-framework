@@ -1,11 +1,6 @@
 import { EventType } from "../../domain/runner-event";
 
-/**
- * Deliberately just `onEvent(raw: string)` - one callback for every event, not one per named SSE
- * type. `applyRunnerEventMessage` (the reducer) already parses `type` out of the JSON body itself
- * to decide what happened; the *transport* only needs to hand it the raw `data` string, replay or
- * live alike, without caring what kind of event it was.
- */
+/** One `onEvent(raw)` callback for every SSE type; `applyRunnerEventMessage` parses `type` itself. */
 export interface EventStreamHandlers {
   onEvent(raw: string): void;
   onOpen(): void;
@@ -21,17 +16,10 @@ export interface EventStreamClient {
 }
 
 /**
- * Production implementation: a real `EventSource` against `GET /api/v1/runs/{runId}/events` (see
- * docs/SSE_CONTRACT_V1.md in the repository root). Registers one named listener per event type in
- * `EventType.options` - the backend uses named SSE events (`event:RUN_STARTED`, etc.), and the
- * generic `onmessage` handler never fires for those, only for an unnamed `message` event.
- *
- * Resuming after a drop is entirely native `EventSource` behavior, not something this class
- * manages: the browser remembers the last event ID it received and automatically resends it as
- * `Last-Event-ID` on its own reconnect attempts (see SSE_CONTRACT_V1.md's own note on why a client
- * cannot set that header by hand). This class only needs to forward `open`/`error` so the caller's
- * own connection-state tracking (see `use-run-event-stream.ts`) can tell first-connect,
- * live, and reconnecting apart - `EventSource` itself makes no such distinction.
+ * Real `EventSource` against `GET /api/v1/runs/{runId}/events` (see docs/SSE_CONTRACT_V1.md).
+ * Registers one named listener per `EventType` since the backend sends named SSE events, not
+ * `message`. Reconnect/resume (`Last-Event-ID`) is handled natively by `EventSource`; this class
+ * just forwards `open`/`error` for the caller's own connection-state tracking.
  */
 export class EventSourceStreamClient implements EventStreamClient {
   connect(runId: string, handlers: EventStreamHandlers): EventStreamConnection {

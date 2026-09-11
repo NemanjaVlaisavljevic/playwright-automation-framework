@@ -8,23 +8,17 @@ export interface UseCsrfReadyOptions {
 }
 
 /**
- * Wraps `primeCsrfToken` in a query, rather than a bare fire-and-forget call, so a priming failure
- * (the backend unreachable at app bootstrap) recovers on its own instead of leaving every mutating
- * control permanently unable to send a valid CSRF header - mirrors RunLaunchForm's own
- * capabilities-retry pattern (error-only `refetchInterval`, `refetchIntervalInBackground: true` so
- * a tab left open, unfocused, across a backend restart still recovers without regaining focus
- * first). Shares one cached result across every consumer (`AuthControls`'s own bootstrap priming,
- * `useCanManageRuns` below) via the same `queryKeys.csrf` key, so only one `GET
- * /api/v1/auth/csrf` call is ever in flight at a time regardless of how many components call this.
+ * Wraps `primeCsrfToken` in a query so a priming failure retries on its own instead of leaving
+ * mutating controls permanently unable to send a CSRF header. Shared across all callers via
+ * `queryKeys.csrf`, so only one priming request is ever in flight.
  */
 export function useCsrfReady({
   retryIntervalMs = 5_000,
 }: UseCsrfReadyOptions = {}) {
   return useQuery({
     queryKey: queryKeys.csrf,
-    // TanStack Query treats a queryFn resolving to `undefined` as an error ("Query data cannot be
-    // undefined") - primeCsrfToken() itself returns Promise<void>, so this must resolve to a real
-    // value on success, not just await it directly.
+    // queryFn must resolve to a real value: TanStack treats `undefined` as an error, and
+    // primeCsrfToken() itself returns Promise<void>.
     queryFn: async () => {
       await primeCsrfToken();
       return true;

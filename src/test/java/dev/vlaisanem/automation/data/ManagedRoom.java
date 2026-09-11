@@ -62,12 +62,8 @@ public final class ManagedRoom implements AutoCloseable {
   }
 
   /**
-   * Runs a caller-provided creation action (e.g. submitting the admin UI's create-room form) and
-   * looks the resulting room up by name, with the same protective cleanup as {@link #create} - if
-   * either the action or the lookup fails, this still attempts to find and delete the room by name
-   * before rethrowing, so a room the action actually created server-side is never left behind just
-   * because the lookup (or something else) failed before a {@code ManagedRoom} could be returned.
-   * The original failure is preserved; any cleanup failure is attached as a suppressed exception.
+   * Runs a caller-provided creation action (e.g. the admin UI's create-room form) and looks the
+   * resulting room up by name. On failure, still attempts cleanup by name before rethrowing.
    */
   public static ManagedRoom createVia(
       RoomClient rooms, CreateRoomRequest request, Runnable creationAction) {

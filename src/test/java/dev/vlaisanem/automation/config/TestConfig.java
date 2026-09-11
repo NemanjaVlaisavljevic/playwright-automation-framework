@@ -40,9 +40,8 @@ public record TestConfig(
       throw new IllegalArgumentException("navigationTimeout must be positive");
     }
     if (runId == null || runId.isBlank()) {
-      // Caught here, not left to surface only once ArtifactManifestWriter tries to use it - a
-      // blank/missing runId would otherwise be reported as a generic "could not capture artifact"
-      // warning, hiding a real configuration bug behind an unrelated-looking log line.
+      // Validated here rather than left to fail later inside ArtifactManifestWriter with a
+      // misleading generic error.
       throw new IllegalArgumentException("runId must not be blank");
     }
     if (sharedTargetBaseUrl == null || sharedTargetBaseUrl.isBlank()) {
@@ -68,10 +67,9 @@ public record TestConfig(
   }
 
   /**
-   * True when {@link #baseUrl()} points at the shared, non-isolated target ({@link
-   * #sharedTargetBaseUrl()}) rather than a dedicated local/CI environment. Compares normalized
-   * origins (scheme + host + effective port), not raw strings, so an equivalent URL spelling (e.g.
-   * an explicit default port) can't slip past the guard this feeds.
+   * True when {@link #baseUrl()} points at the shared target ({@link #sharedTargetBaseUrl()}).
+   * Compares normalized origins (scheme + host + effective port), not raw strings, so an equivalent
+   * URL spelling can't slip past the guard this feeds.
    */
   public boolean targetsSharedEnvironment() {
     return normalizedOrigin(baseUrl).equals(normalizedOrigin(sharedTargetBaseUrl));
@@ -110,12 +108,8 @@ public record TestConfig(
         booleanSetting("tracing", "TRACING", true),
         booleanSetting("recordVideo", "RECORD_VIDEO", false),
         Path.of(setting("artifactsDir", "ARTIFACTS_DIR", "build/artifacts")),
-        // Resolved through the one shared, JVM-scoped identity both this class and
-        // RunnerEventTestExecutionListener use - not this class's own independent setting() lookup
-        // - so a manifest entry's runId always matches its run's RunnerEvents, however the JVM was
-        // launched (a Gradle Test task, an IDE's own JUnit runner, a bare `java` invocation). See
-        // RunnerExecutionIdentity's own Javadoc for why generating this fallback in a Gradle build
-        // script closure instead would be strictly worse.
+        // Shared JVM-scoped identity (not an independent setting() lookup) so this always matches
+        // RunnerEventTestExecutionListener's own runId, regardless of how the JVM was launched.
         RunnerExecutionIdentity.currentRunId(),
         setting("adminUsername", "ADMIN_USERNAME", "admin"),
         setting("adminPassword", "ADMIN_PASSWORD", "password"),
@@ -123,17 +117,13 @@ public record TestConfig(
             "sharedTargetBaseUrl", "SHARED_TARGET_BASE_URL", "https://automationintesting.online"),
         booleanSetting(
             "allowMutationAgainstSharedTarget", "ALLOW_MUTATION_AGAINST_SHARED_TARGET", false),
-        // D4.2 - disk protection. Defaults match runner-service's own RunnerProperties defaults
-        // (application.yml's D4.2 block) so a dashboard-launched run's producer-side limits agree
-        // with the consumer-side limits it's checked against - runner-service threads its own
-        // configured values down as env vars for every run it launches (see RunService), so these
-        // defaults only apply to a standalone Gradle invocation it never launched.
+        // Defaults must match runner-service's own RunnerProperties defaults; a dashboard-launched
+        // run overrides these via env vars, so they only apply to a standalone Gradle invocation.
         longSetting("artifactMaxBytes", "ARTIFACT_MAX_BYTES", 26_214_400L),
         longSetting("runMaxTotalArtifactBytes", "RUN_MAX_TOTAL_ARTIFACT_BYTES", 209_715_200L),
         longSetting("manifestMaxBytes", "MANIFEST_MAX_BYTES", 2_097_152L),
-        // Default matches runner-service's own derived floor (RunnerProperties' default
-        // diskMinFreeBytes 1 GiB + artifactMaxBytes 25 MiB) - see RunService's own Javadoc for why
-        // this must never independently drift from the submit-time guard's own floor.
+        // Must stay in sync with runner-service's own derived floor (diskMinFreeBytes 1 GiB +
+        // artifactMaxBytes 25 MiB).
         longSetting("traceCaptureMinFreeBytes", "TRACE_CAPTURE_MIN_FREE_BYTES", 1_099_956_224L),
         booleanSetting("allureAttachmentsEnabled", "ALLURE_ATTACHMENTS_ENABLED", true));
   }

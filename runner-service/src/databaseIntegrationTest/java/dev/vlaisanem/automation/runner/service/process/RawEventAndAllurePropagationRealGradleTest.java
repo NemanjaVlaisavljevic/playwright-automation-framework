@@ -19,21 +19,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * D4.2 review round 3 - a real, non-daemon child Gradle invocation (exactly what {@code
- * RunService}/{@code GradleProcessRunner} launch in production, via the same real {@link
- * SuiteCommandFactory#commandFor}), not a unit test against {@code SuiteCommandFactory}'s own
- * output. Two earlier review rounds found that neither the raw-event byte cap nor the Allure
- * results redirection actually reached the forked JUnit test-worker JVM - a config-value-shaped
- * unit test could not have caught either gap, since both are genuinely about what {@code
- * build.gradle}'s own configuration does with a value once a real Gradle build starts executing.
- *
- * <p>Deliberately lives in {@code databaseIntegrationTest}, not the routine {@code test}/CI gate -
- * it spawns a second, real, cold {@code --no-daemon} Gradle process (see {@code fullBackendGate}),
- * which is real infrastructure verification, not a fast unit check.
- *
- * <p>Targets {@link Suite#FIXTURE}'s own {@code fixtureTest} task, narrowed via an explicit {@code
- * --tests} selection to only {@code RawEventOverflowFixtureTest} - {@code fixtureTest} also
- * contains two deliberately failing/blocking siblings never meant to run unattended.
+ * Spawns a real, non-daemon child Gradle process - only a real build proves the raw-event byte cap
+ * and Allure redirection actually reach the forked test-worker JVM. Narrows {@code fixtureTest} to
+ * just {@code RawEventOverflowFixtureTest}; its siblings deliberately fail/block.
  */
 class RawEventAndAllurePropagationRealGradleTest {
 
@@ -65,9 +53,8 @@ class RawEventAndAllurePropagationRealGradleTest {
 
     ProcessBuilder builder =
         new ProcessBuilder(command).directory(repoRoot.toFile()).redirectErrorStream(true);
-    // Deliberately far below anything RawEventOverflowFixtureTest's own 200 steps could stay
-    // under (a real run of it produces ~200 KB - see that class's own Javadoc) - guarantees the
-    // overflow path fires reliably, not by chance.
+    // Far below what RawEventOverflowFixtureTest's real run produces (~200 KB), so the overflow
+    // path fires reliably.
     builder.environment().put("RUNNER_RAW_EVENT_MAX_BYTES", "2048");
     Path gradleOutputLog = tempDir.resolve("gradle-output.log");
     builder.redirectOutput(gradleOutputLog.toFile());

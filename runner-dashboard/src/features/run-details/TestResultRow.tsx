@@ -17,23 +17,15 @@ export function TestResultRow({
 }: {
   runId: string;
   test: DisplayTest;
-  /**
-   * Owned by `TestResultsSection`, not this row - a filtered-out test unmounts, so any expand
-   * state kept in the row itself would be lost the moment a filter hides it and reappear reset
-   * once it's shown again (see the C4.4 spec's own reasoning for moving this state up).
-   */
+  /** Owned by `TestResultsSection`, not this row - a filtered-out test unmounts and would lose local state. */
   expanded: boolean;
   onToggleExpand: () => void;
   artifactsErrorMessage?: string;
 }) {
   const durationMs = runDurationMs(test);
   const hasSteps = test.steps.length > 0;
-  // A "step"-scoped failure preview is specifically a *collapsed-state* affordance - once the row
-  // is expanded, that same failed step already renders richly as part of the full step list, and
-  // showing it a second time here would just be duplication. A "test"-scoped failure (no step
-  // explains it - see `DisplayTestFailure`'s own doc comment) has no such counterpart anywhere in
-  // the step list, expanded or not, so it must stay visible regardless of expand state - hiding it
-  // on expand would strand its detail/screenshot/trace/Copy-failure with nowhere else to appear.
+  // A step-scoped failure preview is collapsed-state only (the step list shows it once expanded);
+  // a test-scoped failure has no counterpart in the step list, so it stays visible regardless.
   const showFailurePreview =
     test.primaryFailure !== undefined &&
     (test.primaryFailure.scope === "test" || !expanded);
@@ -42,10 +34,7 @@ export function TestResultRow({
     <>
       <tr
         id={testRowElementId(test.testId)}
-        // Programmatically focusable (never part of normal tab order) so `LiveFocusPanel`'s
-        // click-to-jump can move real keyboard/AT focus here, not just scroll the page to it - and
-        // `.focusableRow`'s own `scroll-margin-top` keeps the row clear of the sticky panel above it
-        // once scrolled into view.
+        // Programmatically focusable so LiveFocusPanel's click-to-jump moves real focus here.
         tabIndex={-1}
         className={cx(
           styles.focusableRow,
@@ -74,9 +63,7 @@ export function TestResultRow({
         </td>
         <td>{durationMs !== undefined ? formatDuration(durationMs) : "—"}</td>
         <td>
-          {/* `FailureDetail` below is the one place a failure's own text is shown - this legacy
-              disclosure would otherwise duplicate that exact same content (word-for-word for a
-              single-line detail, a second redundant disclosure for a multi-line one). */}
+          {/* FailureDetail below is the one place a failure's text is shown; avoid duplicating it here. */}
           {test.primaryFailure !== undefined ? (
             "See failure below"
           ) : test.detail !== undefined ? (

@@ -11,7 +11,6 @@ import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.CorsConfigurer;
-import org.springframework.security.config.annotation.web.configurers.CsrfConfigurer;
 import org.springframework.security.config.annotation.web.configurers.LogoutConfigurer;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
@@ -25,30 +24,20 @@ import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 
 /**
  * Two mutually exclusive {@link SecurityFilterChain} beans, selected by whether GitHub OAuth2
- * credentials were configured at startup (see {@code RunnerSecurityEnvironmentPostProcessor}) -
- * never both active at once, so there is exactly one answer to "what does this request need" at any
- * time.
+ * credentials were configured at startup - never both active at once.
  *
- * <p><strong>CORS is deliberately unsupported (D3.3), on both chains</strong> - no {@code
- * CorsConfigurationSource} bean exists anywhere in this service, and {@code
- * .cors(CorsConfigurer::disable)} below makes that a stated, tested decision rather than an
- * implicit default: this API is same-origin-only by design (Caddy in production, Vite's dev proxy
- * locally, always co-locate the SPA and the API under one origin - see {@code
- * runner-dashboard/vite.config.ts}), so no cross-origin browser access to it is ever legitimate.
- * {@code SecurityAccessMatrixTest} proves a cross-origin-shaped request never receives an {@code
- * Access-Control-Allow-Origin} header on either chain.
+ * <p>CORS is deliberately unsupported on both chains: no {@code CorsConfigurationSource} bean
+ * exists anywhere in this service, and {@code .cors(CorsConfigurer::disable)} below makes that a
+ * stated, tested decision - this API is same-origin-only by design (Caddy in production, Vite's dev
+ * proxy locally), so no cross-origin browser access is ever legitimate.
  *
- * <p><strong>The OAuth2 chain's {@code request.getRemoteAddr()} trust boundary (D3.3)</strong> -
- * {@link AbuseRateLimitFilter}'s client-IP-keyed rate limits are only as trustworthy as that
- * address resolution. {@code deploy/runner-service/Dockerfile} sets {@code
- * SERVER_FORWARD_HEADERS_STRATEGY=native}, which activates Tomcat's own {@code RemoteIpValve} (via
- * {@code server.tomcat.remoteip.internal-proxies}) instead of the plain {@code
- * ForwardedHeaderFilter} the {@code framework} strategy would - the valve only honors {@code
- * X-Forwarded-For}/{@code -Proto}/{@code -Host} when the <em>direct</em> TCP peer matches a trusted
- * (private/Docker-internal) range, which in this topology can only ever be Caddy ( {@code
- * runner-service} has no published port and shares its {@code edge} network with exactly one other
- * container). A plain {@code ForwardedHeaderFilter} has no such concept at all and would parse the
- * header unconditionally regardless of who sent it.
+ * <p>The OAuth2 chain's {@code request.getRemoteAddr()} trust boundary: {@code
+ * deploy/runner-service/Dockerfile} sets {@code SERVER_FORWARD_HEADERS_STRATEGY=native}, which
+ * activates Tomcat's {@code RemoteIpValve} instead of the plain {@code ForwardedHeaderFilter} the
+ * {@code framework} strategy would - the valve only honors {@code X-Forwarded-For}/{@code
+ * -Proto}/{@code -Host} when the direct TCP peer is a trusted (private/Docker-internal) range,
+ * which in this topology can only be Caddy. A plain {@code ForwardedHeaderFilter} has no such
+ * concept and would parse the header unconditionally regardless of who sent it.
  */
 @Configuration
 @EnableWebSecurity
@@ -75,22 +64,13 @@ public class SecurityConfig {
   }
 
   /**
-   * Deliberately an explicit {@code @Bean} here, not a bare {@code @Component} on the filter class
-   * itself - see {@link AbuseRateLimitFilter}'s own Javadoc for why (confirmed empirically:
-   * {@code @WebMvcTest} auto-detects and registers any {@code Filter} bean in any slice, breaking
-   * entirely unrelated tests the moment this class was a component anywhere on the classpath).
-   *
-   * <p><strong>That same auto-detection also applies to a real running application, not just
-   * {@code @WebMvcTest} (a review finding)</strong>: Spring Boot registers <em>any</em> {@code
-   * Filter} bean as a plain servlet-container filter via its own {@code FilterRegistrationBean}
-   * autoconfiguration, completely independent of - and in addition to - this bean also being added
-   * into a {@code SecurityFilterChain} via {@code .addFilterAfter(...)} below. Left unaddressed,
-   * this filter would run as a bare, unconditional, "/*"-scoped servlet filter on every deployment
-   * profile - including the permissive/local chain, where it is specifically meant not to apply at
-   * all - with its position in that generic chain governed by Boot's own default filter ordering,
-   * not by anything declared here. {@link #abuseRateLimitFilterRegistration} disables that
-   * automatic registration, so the only place this filter ever actually runs is the exact position
-   * {@code oauth2SecurityFilterChain}'s own {@code .addFilterAfter(...)} call gives it.
+   * An explicit {@code @Bean}, not a bare {@code @Component}: {@code @WebMvcTest} auto-detects and
+   * registers any {@code Filter} bean in any slice, breaking unrelated tests. Spring Boot also
+   * auto-registers any {@code Filter} bean as a bare, unconditional servlet filter in a real
+   * running application (including the permissive/local chain, where it must not apply at all),
+   * independent of it also being added via {@code .addFilterAfter(...)} below. {@link
+   * #abuseRateLimitFilterRegistration} disables that automatic registration, so this filter only
+   * ever runs at the position {@code oauth2SecurityFilterChain} gives it.
    */
   @Bean
   public AbuseRateLimitFilter abuseRateLimitFilter(
@@ -134,11 +114,11 @@ public class SecurityConfig {
   }
 
   /**
-   * Today's behavior, unchanged: no authentication configured at all (default local {@code
-   * bootRun}, every existing test) - every request is permitted, CSRF disabled. Never active in
-   * {@code PORTFOLIO} (enforced by {@code RunnerSecurityEnvironmentPostProcessor}, which aborts
-   * startup - before any listening socket ever opens - the moment that profile is combined with
-   * missing OAuth2 credentials, so this chain could never serve real production traffic).
+   * No authentication is configured (default local {@code bootRun}, every existing test), so every
+   * request is permitted. CSRF remains enabled because browser cookie/session semantics still apply
+   * in local development. Never active in {@code PORTFOLIO} (enforced by {@code
+   * RunnerSecurityEnvironmentPostProcessor}, which aborts startup before any listening socket ever
+   * opens, so this chain could never serve real production traffic).
    */
   @Bean
   @ConditionalOnProperty(
@@ -146,11 +126,17 @@ public class SecurityConfig {
       havingValue = "false",
       matchIfMissing = true)
   public SecurityFilterChain permissiveSecurityFilterChain(
-      HttpSecurity http, RequestBodySizeLimitFilter requestBodySizeLimitFilter) throws Exception {
+      HttpSecurity http,
+      CsrfTokenRepository csrfTokenRepository,
+      RequestBodySizeLimitFilter requestBodySizeLimitFilter)
+      throws Exception {
     return http.authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
-        .csrf(CsrfConfigurer::disable)
+        .csrf(
+            csrf ->
+                csrf.csrfTokenRepository(csrfTokenRepository)
+                    .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
         .cors(CorsConfigurer::disable)
-        // D3.3 - resource protection, not auth-adjacent, so this applies here too, unlike
+        // Resource protection, not auth-adjacent, so this applies here too, unlike
         // AbuseRateLimitFilter (OAuth2-chain-only).
         .addFilterBefore(requestBodySizeLimitFilter, SecurityContextHolderFilter.class)
         .build();
@@ -188,32 +174,18 @@ public class SecurityConfig {
                         "/api/v1/auth/me",
                         "/api/v1/auth/csrf",
                         "/actuator/health",
-                        // D4.3.1 - the liveness/readiness probe groups. Caddy proxies these three
-                        // exact paths publicly (and fail-closed rejects every other /actuator/*
-                        // path - see the Caddyfile) - both stay permitAll for the same reason
-                        // /actuator/health already was: an unauthenticated healthcheck caller (a
-                        // real Docker healthcheck, a future uptime monitor) must never need admin
-                        // credentials, and show-details/show-components are both `never` globally
-                        // regardless of caller identity anyway.
+                        // Liveness/readiness probes: Caddy proxies these three exact paths publicly
+                        // (and fail-closed rejects every other /actuator/* path) - an
+                        // unauthenticated healthcheck caller must never need admin credentials.
                         "/actuator/health/liveness",
                         "/actuator/health/readiness",
-                        // D4.3.2 - unauthenticated for the same reason as the health paths above,
-                        // but with a different one added: a real Prometheus scraper cannot perform
-                        // an interactive GitHub OAuth2 login, so gating this behind ROLE_ADMIN
-                        // would just have to be undone once a real scraper exists. Never actually
-                        // reachable from outside the Compose network regardless of this permitAll:
-                        // Caddy's own @actuatorOther matcher fail-closed rejects this exact path
-                        // externally (see the Caddyfile), and runner-service publishes no port at
-                        // all in the base docker-compose.yml - only docker-compose.debug.yml
-                        // reaches it, and only on loopback. If stronger protection is ever needed
-                        // (a real scraper on an untrusted network), that should be a separate
-                        // monitoring network / machine credential, not a GitHub session.
+                        // Unauthenticated for the same reason, plus: a Prometheus scraper can't
+                        // perform an interactive GitHub login. Not reachable externally regardless
+                        // (Caddy rejects this path, and runner-service publishes no port).
                         "/actuator/prometheus",
                         "/actuator/info",
-                        // Not proxied publicly at all (Caddy only ever forwards the three health
-                        // paths above and /api/*) - permitted here purely so npm run api:export/
-                        // api:check:contract can still fetch it from a local bootRun once GitHub
-                        // OAuth2 is enabled, the same tooling this repo already relies on today.
+                        // Not proxied publicly at all - permitted here so npm run api:export/
+                        // api:check:contract can still fetch it from a local bootRun.
                         "/v3/api-docs")
                     .permitAll()
                     .requestMatchers(
@@ -225,14 +197,12 @@ public class SecurityConfig {
                     .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/v1/runs", "/api/v1/runs/*/cancel")
                     .hasRole("ADMIN")
-                    // D4.1 - admin-only operational tooling (RetentionController), same role
-                    // requirement as every other admin mutation on this chain.
+                    // Admin-only operational tooling (RetentionController).
                     .requestMatchers(HttpMethod.GET, "/api/v1/retention/preview")
                     .hasRole("ADMIN")
                     .requestMatchers(HttpMethod.POST, "/api/v1/retention/run")
                     .hasRole("ADMIN")
-                    // D4.2 - admin-only operational tooling (DiskUsageController), same role
-                    // requirement as every other admin-only diagnostic route on this chain.
+                    // Admin-only operational tooling (DiskUsageController).
                     .requestMatchers(HttpMethod.GET, "/api/v1/disk/usage")
                     .hasRole("ADMIN")
                     .anyRequest()
@@ -262,20 +232,14 @@ public class SecurityConfig {
             ex ->
                 ex.authenticationEntryPoint(authenticationEntryPoint)
                     .accessDeniedHandler(accessDeniedHandler))
-        // D3.3 - after SecurityContextHolderFilter (which restores an existing session's
-        // Authentication, if any), not after AuthorizationFilter as first designed - confirmed
-        // live that OAuth2AuthorizationRequestRedirectFilter/OAuth2LoginAuthenticationFilter
-        // (which actually handle the two OAuth2 login-flow routes) both run, and fully commit
-        // their response, well before AuthorizationFilter - a filter registered after
-        // AuthorizationFilter is never reached at all for those two routes, so the
-        // oauth-authorization/oauth-callback limits would silently never apply. Registering here
-        // instead still lets ADMIN_GITHUB_ID key extraction work correctly for an
-        // already-authenticated admin's own subsequent requests (Authentication is restored by
-        // SecurityContextHolderFilter, not decided by AuthorizationFilter), while an anonymous
-        // caller hitting an admin-only route still gets a null key (skipped, not rate-limited) and
-        // is rejected by AuthorizationFilter exactly as before - no change to that outcome.
+        // After SecurityContextHolderFilter, not AuthorizationFilter: the OAuth2 login-flow
+        // filters run and fully commit their response before AuthorizationFilter, so a filter
+        // registered after it would never see the oauth-authorization/oauth-callback routes at
+        // all. This position still restores Authentication for rate-limit key extraction on an
+        // already-authenticated admin's requests, while an anonymous caller on an admin-only route
+        // still gets a null key (skipped) and is rejected by AuthorizationFilter as before.
         .addFilterAfter(abuseRateLimitFilter, SecurityContextHolderFilter.class)
-        // D3.3 - resource protection, applies here too regardless of authentication outcome.
+        // Resource protection, applies here too regardless of authentication outcome.
         .addFilterBefore(requestBodySizeLimitFilter, SecurityContextHolderFilter.class)
         .build();
   }
@@ -297,10 +261,8 @@ public class SecurityConfig {
   /**
    * Only ever constructed when GitHub OAuth2 is enabled - {@link AdminGithubAllowlist#parse} would
    * otherwise reject the empty default {@link RunnerSecurityProperties#adminGithubId()} for the
-   * wrong reason (it means "genuinely disabled" here, not "misconfigured"; a genuinely malformed
-   * value fails this bean's own construction at context-refresh time, which is itself the
-   * fail-closed check for this value - see {@code RunnerSecurityEnvironmentPostProcessor} for the
-   * earlier, pre-context checks on the rest of the OAuth2 configuration).
+   * wrong reason (it means "genuinely disabled" here, not "misconfigured"). A malformed value fails
+   * this bean's construction at context-refresh time, which is itself the fail-closed check.
    */
   @Bean
   @ConditionalOnProperty(name = "runner.security.oauth2-enabled", havingValue = "true")

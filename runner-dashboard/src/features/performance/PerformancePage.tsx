@@ -11,11 +11,8 @@ import { ScenarioSection } from "./ScenarioSection";
 import styles from "./PerformancePage.module.css";
 
 /**
- * D4.4.3c - a *committed, manually-published* snapshot of one real CI run's k6 results (see
- * `performance/baselines/<run-id>/` and `runner-dashboard/scripts/summarize-baseline.mjs` for how
- * it's produced). Deliberately never live monitoring: nothing on this page polls, there is no SLA
- * implied by a green badge here - the disclaimer below says so explicitly, and every value shown is
- * exactly what one archived CI run reported, not a rolling average or a current-moment reading.
+ * Renders a committed, manually-published snapshot of one CI run's k6 results (see
+ * `performance/baselines/<run-id>/`). Not live monitoring - nothing here polls.
  */
 export function PerformancePage() {
   const baseline = useQuery({
@@ -31,9 +28,7 @@ export function PerformancePage() {
   return (
     <>
       <PageHeader title="Performance" />
-      {/* A plain, permanent callout - not `Alert` (`role="alert"` is an assertive live region for
-          errors/urgent changes, not text that's present from the very first render; a review
-          finding). */}
+      {/* Plain callout, not `Alert`: role="alert" is for errors/urgent changes, not static text. */}
       <aside className={styles.disclaimer}>
         <span aria-hidden="true">ℹ</span> CI performance snapshot - not live
         monitoring, no SLA. Every number below is from one archived GitHub

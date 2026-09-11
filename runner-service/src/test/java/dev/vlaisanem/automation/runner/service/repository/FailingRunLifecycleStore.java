@@ -15,14 +15,11 @@ import java.util.function.LongFunction;
 import java.util.function.UnaryOperator;
 
 /**
- * Test double proving the D2.3 atomic-store failure mode: wraps a delegate store, throwing from
- * within the caller-supplied event factory itself (before the delegate ever commits anything) every
- * time it would produce an event of {@code failingType} - simulating a real store-level failure (a
- * broken connection, a constraint violation) at exactly the same point {@code JdbcRunStore}'s own
- * transaction would roll back. Unlike {@link FailFirstTransitionStore}, this fails <em>every</em>
- * matching write, not just the first - the right tool for "this class of write is permanently
- * broken" scenarios (e.g. proving a run can never be falsely reported as terminal once its
- * finishing write can never succeed), as opposed to "one transient failure, then recovery."
+ * Wraps a delegate store, throwing from within the caller-supplied event factory itself (before the
+ * delegate ever commits anything) every time it would produce an event of {@code failingType} -
+ * simulating a store-level failure at exactly the point a real transaction would roll back. Unlike
+ * {@link FailFirstTransitionStore}, this fails <em>every</em> matching write, not just the first:
+ * "this class of write is permanently broken," not "one transient failure, then recovery."
  */
 public final class FailingRunLifecycleStore implements RunLifecycleStore {
 

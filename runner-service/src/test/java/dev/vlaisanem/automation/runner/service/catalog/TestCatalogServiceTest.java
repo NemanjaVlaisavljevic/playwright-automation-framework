@@ -63,13 +63,10 @@ class TestCatalogServiceTest {
   }
 
   /**
-   * Regression test for a review's finding: {@code TestCatalogService} used to deserialize the file
-   * and hand its entries straight to callers with no content validation - a corrupted or
-   * hand-edited catalog on disk in a deployed container could silently change what {@code
-   * CustomTestSelectionValidator} treats as a legal selection. The file is syntactically valid JSON
-   * here (so this exercises {@link TestCatalogContentValidator}, not the Jackson-parse-failure path
-   * above) but has two entries sharing one {@code testKey} - exactly the overloaded-method
-   * collision scenario the reviewer was worried about.
+   * A syntactically valid catalog with two entries sharing one {@code testKey} must still be
+   * rejected (exercises {@link TestCatalogContentValidator}, not the Jackson-parse-failure path
+   * above) - an unvalidated duplicate could let {@code CustomTestSelectionValidator} silently treat
+   * it as a legal selection.
    */
   @Test
   void throwsAClientSafeExceptionWhenTheCatalogHasADuplicateTestKey(@TempDir Path repoRoot)

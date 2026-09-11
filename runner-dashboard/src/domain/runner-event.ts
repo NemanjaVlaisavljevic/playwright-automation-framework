@@ -1,11 +1,8 @@
 import { z } from "zod";
 
 /**
- * Hand-written, not generated: `runner-service` deliberately excludes the SSE endpoint from its
- * OpenAPI document (see `docs/SSE_CONTRACT_V1.md` in the repo root - OpenAPI has no way to
- * describe a named-event `text/event-stream` payload without misrepresenting it), so this is the
- * one wire contract in the app with no generated counterpart to fall back on or cross-check
- * against. Keep it in sync with `runner-contract`'s `RunnerEvent` record by hand.
+ * Hand-written, not generated: the SSE endpoint is excluded from the OpenAPI document (see
+ * `docs/SSE_CONTRACT_V1.md`). Keep in sync with `runner-contract`'s `RunnerEvent` record by hand.
  */
 export const RunOutcome = z.enum([
   "SUCCEEDED",
@@ -45,16 +42,9 @@ export type EventType = z.infer<typeof EventType>;
 const nonBlankString = z.string().regex(/\S/, "must not be blank");
 
 /**
- * A minimal shape used to check `runId`/`schemaVersion` before attempting full V1 validation - see
- * `run-event-reducer.ts`'s staged validation. Permissive about everything except those two fields:
- * a real future V2 event (a new `type`, a reshaped payload) must classify as an unsupported-schema-
- * version compatibility error, not a generic protocol error, which only works if the version is
- * checked against a shape this loose *about `type`*, before the strict V1 `RunnerEvent` union below
- * ever gets a chance to reject it for having the "wrong" shape. `schemaVersion`/`runId` still use
- * `nonBlankString`, not plain `z.string()`, though: a blank value is malformed, not a legitimate
- * (if unsupported) future version, and must fail as a protocol error right here - reaching the
- * `schemaVersion !== CURRENT_SCHEMA_VERSION` comparison with a blank value would misreport it as an
- * unsupported-but-otherwise-well-formed version instead.
+ * Minimal shape used to check `runId`/`schemaVersion` before full V1 validation (see
+ * `run-event-reducer.ts`). Loose about everything else so a future V2 event's unknown shape is
+ * classified as an unsupported-schema-version error, not a generic protocol error.
  */
 export const RunnerEventEnvelope = z.object({
   schemaVersion: nonBlankString,
@@ -63,19 +53,9 @@ export const RunnerEventEnvelope = z.object({
 export type RunnerEventEnvelope = z.infer<typeof RunnerEventEnvelope>;
 
 /**
- * Every field the wire format's `NON_NULL` Jackson config can ever omit is `.optional()`, never
- * nullable - the backend never sends `null`, it omits the key entirely (see SSE_CONTRACT_V1.md).
- * `detail` is left optional on every variant uniformly (not restricted to the ones that normally
- * carry one) rather than tightened per event type: the backend record's own constructor doesn't
- * forbid it either, and a frontend contract stricter than the backend's own doesn't buy anything
- * here - a real but unexpected `detail` on, say, `TEST_STARTED` should still parse.
- *
- * Every variant is `.strict()`: `runner-contract`'s `RunnerEvent` compact constructor actively
- * rejects a run-level event carrying `testId`/`testDisplayName`, a non-terminal event carrying
- * `runOutcome`, etc. - the Java side is a closed, cross-scope-field-forbidding contract, so a
- * frontend schema built with plain `z.object()` (which silently strips unknown keys instead of
- * rejecting them) would accept and hide exactly the kind of malformed event the backend itself
- * guarantees can never happen; `.strict()` keeps that same invariant here instead of loosening it.
+ * Optional fields are `.optional()`, never nullable - the backend omits the key rather than
+ * sending `null`. `.strict()` mirrors the backend's cross-scope-field rejection (e.g. a run-level
+ * event can't carry `testId`).
  */
 const baseFields = {
   schemaVersion: nonBlankString,
@@ -122,11 +102,8 @@ const TestSkippedEvent = z
   .strict();
 
 /**
- * Additive over the original schema 1.0 `RUN_*`/`TEST_*` vocabulary (see `CURRENT_SCHEMA_VERSION`
- * below): emitted by the main suite's `Steps` API from inside a running test method, never by the
- * JUnit listener itself. A test that never uses `Steps` emits none of these - a step-free test and
- * a step-using one coexist in the same run, but every event either of them produces still carries
- * the one current `schemaVersion`: schema versions themselves are never mixed in a single stream.
+ * Additive over schema 1.0's `RUN_*`/`TEST_*` vocabulary; emitted by the `Steps` API from inside a
+ * test method, never by the JUnit listener. A step-free test simply emits none of these.
  */
 const stepLevelFields = {
   ...testLevelFields,

@@ -27,13 +27,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * D2.4 - rewritten against {@link FakeArtifactRepository}: {@link ArtifactService} now reads
- * exclusively from {@link ArtifactRepository}, never the manifest file directly (that is {@link
- * ArtifactIngestionService}'s own, separately-tested job). Tests that exercise {@link
- * ArtifactService#download}'s filesystem-safety checks (symlink escape, non-regular file, missing
- * file) still write real files to disk - that trust boundary is unchanged - but seed the
- * corresponding {@link ArtifactManifestEntry} into the fake repository instead of writing a
- * manifest line for it.
+ * Unit tests for {@link ArtifactService}, which reads only from {@link ArtifactRepository}, never
+ * the manifest file directly (that's {@link ArtifactIngestionService}'s job). {@link
+ * ArtifactService#download}'s filesystem-safety tests (symlink escape, non-regular file, missing
+ * file) still write real files to disk, but seed the corresponding {@link ArtifactManifestEntry}
+ * into the fake repository instead of a manifest line.
  */
 class ArtifactServiceTest {
 
@@ -91,10 +89,10 @@ class ArtifactServiceTest {
   }
 
   /**
-   * Regression test for a review's finding: {@code toRealPath()} plus the {@code startsWith}
-   * containment check both happily accept a directory (or any other non-regular filesystem object)
-   * sitting where the manifest claims a file exists - without this check, that would only surface
-   * later as a confusing failure trying to actually read it as an HTTP resource.
+   * A directory (or other non-regular file) sitting where the manifest claims a file exists must be
+   * rejected explicitly - {@code toRealPath()} plus the {@code startsWith} containment check alone
+   * accept it, which would otherwise surface later as a confusing failure serving it as an HTTP
+   * resource.
    */
   @Test
   void downloadThrowsWhenTheManifestedPathIsADirectoryNotAFile(@TempDir Path artifactsRoot)
@@ -112,12 +110,10 @@ class ArtifactServiceTest {
   }
 
   /**
-   * Proves the review's specific concern: a symlink planted inside the run's own artifacts
-   * directory, pointing outside it, must not be served even though the manifest's own {@code
-   * relativePath} textually never leaves the run root (only resolving through the symlink reveals
-   * that). Skipped, not failed, where this process cannot create a symlink at all - creating one on
-   * Windows needs Developer Mode or an elevated process, confirmed unavailable on this machine;
-   * Linux CI runs this for real.
+   * A symlink planted inside the run's artifacts directory, pointing outside it, must not be
+   * served, even though the manifest's {@code relativePath} textually never leaves the run root
+   * (only resolving through the symlink reveals that). Skipped, not failed, on a machine that can't
+   * create a symlink (e.g. Windows without Developer Mode/elevation); Linux CI runs it for real.
    */
   @Test
   void refusesToServeAFileReachedThroughASymlinkEscapingTheRunRoot(@TempDir Path artifactsRoot)
@@ -144,6 +140,30 @@ class ArtifactServiceTest {
             exception ->
                 assertThat(((ArtifactManifestCorruptException) exception).diagnosticReason())
                     .contains("symlink"));
+  }
+
+  @Test
+  void refusesToServeArtifactsWhenTheRunRootItselfIsASymlink(@TempDir Path artifactsRoot)
+      throws IOException {
+    Path outside = artifactsRoot.resolve("outside-run");
+    Files.createDirectories(outside);
+    Files.writeString(outside.resolve("a.png"), "not this run's trusted directory");
+    Path runRoot = artifactsRoot.resolve(RUN_ID);
+    try {
+      Files.createSymbolicLink(runRoot, outside);
+    } catch (UnsupportedOperationException | IOException cannotCreateSymlink) {
+      Assumptions.abort(
+          "Symbolic links are not supported/permitted: " + cannotCreateSymlink.getMessage());
+      return;
+    }
+    ArtifactService service = serviceFor(artifactsRoot, RunStatus.SUCCEEDED, entry("a", "test-1"));
+
+    assertThatThrownBy(() -> service.download(RUN_ID, "a"))
+        .isInstanceOf(ArtifactManifestCorruptException.class)
+        .satisfies(
+            exception ->
+                assertThat(((ArtifactManifestCorruptException) exception).diagnosticReason())
+                    .contains("symbolic link"));
   }
 
   private static ArtifactService serviceFor(

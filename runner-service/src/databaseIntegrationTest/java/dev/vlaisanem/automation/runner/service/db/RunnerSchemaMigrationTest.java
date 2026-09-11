@@ -25,21 +25,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D2.1 - proves {@code V1__create_runner_schema.sql} is correct against a real PostgreSQL, not just
- * readable SQL: a fresh container migrates cleanly, migrating twice is a no-op, and every
- * constraint the migration declares actually rejects what it claims to. Deliberately a real {@code
- * postgres} Testcontainers image, never H2 - see this module's own {@code build.gradle} comment and
- * docs/DEPLOYMENT_ARCHITECTURE.md's "Technology choices" for why.
- *
- * <p>One container shared across most test methods via {@code @Container} (JUnit 5's
- * {@code @Testcontainers} extension starts it once before any test and stops it once after all of
- * them) - each such method runs inside its own transaction, rolled back afterward (see {@link
- * #withConnection}), so methods never see each other's rows without needing a fresh container per
- * method. Only {@link #migratesCleanlyThenASecondMigrationIsANoOp} needs its own dedicated,
- * separate container, since it specifically asserts on {@code migrationsExecuted} counts that only
- * mean something against a container nothing else has already migrated - reviewed finding: an
- * earlier version of this class started a *third* container for that assertion alone (one shared,
- * two separate "fresh" ones) - merged into one now.
+ * Proves {@code V1__create_runner_schema.sql} against real PostgreSQL (never H2 - see this module's
+ * {@code build.gradle} and docs/DEPLOYMENT_ARCHITECTURE.md): migrates cleanly, a second migration
+ * is a no-op, and every declared constraint rejects what it claims to.
  */
 @Testcontainers
 class RunnerSchemaMigrationTest {
@@ -56,6 +44,8 @@ class RunnerSchemaMigrationTest {
 
   @Test
   void migratesCleanlyThenASecondMigrationIsANoOp() throws SQLException {
+    // Own container, not the shared one - migrationsExecuted only means something against a
+    // container nothing else has already migrated.
     try (PostgreSQLContainer<?> fresh = new PostgreSQLContainer<>("postgres:17-alpine")) {
       fresh.start();
       Flyway freshFlyway =
@@ -65,10 +55,7 @@ class RunnerSchemaMigrationTest {
 
       MigrateResult first = freshFlyway.migrate();
       assertThat(first.success).isTrue();
-      // V1 (the four core tables) + V2 (D2.4's runs.artifacts_ingestion_incomplete column) + V3
-      // (D2.5's idx_runs_non_terminal partial index) + V4 (D4.1's retention columns/constraints/
-      // indexes) - update this count whenever a new migration is added, same as the table/column
-      // list below.
+      // Update this count when adding a new migration.
       assertThat(first.migrationsExecuted).isEqualTo(4);
       assertThat(tableNames(fresh))
           .containsExactlyInAnyOrder(
@@ -104,10 +91,9 @@ class RunnerSchemaMigrationTest {
   }
 
   /**
-   * One case per named constraint (or, for the four artifact NOT NULL columns the P1 review finding
-   * added, the column name Postgres's own NOT NULL violation message names instead of a constraint)
-   * - every constraint this migration declares is exercised here, not just the ones an earlier pass
-   * happened to think of.
+   * One case per named constraint - plus, for artifact NOT NULL columns, the column name Postgres's
+   * own violation message uses instead of a constraint name. Every constraint this migration
+   * declares is exercised here.
    */
   @ParameterizedTest(name = "{0}")
   @MethodSource("constraintViolations")
@@ -127,14 +113,9 @@ class RunnerSchemaMigrationTest {
     OffsetDateTime beforeStarted = afterRequested.minusSeconds(1);
 
     return Stream.of(
-        // Deliberately asserts the generic "chk_runs_" prefix, not "chk_runs_status" specifically:
-        // a status value outside the known set also fails to satisfy either disjunct of
-        // chk_runs_started_at_by_status/chk_runs_finished_at_by_status (neither the "required"
-        // nor the "forbidden" branch's IN-list matches an unrecognized value, so both evaluate to
-        // false) - it therefore violates more than one of this table's CHECK constraints at once
-        // (real defense in depth, not a bug), and PostgreSQL does not guarantee which one it
-        // reports first. Proving it's rejected by one of *this schema's own* constraints, not
-        // pinning down exactly which, is what actually matters here.
+        // Asserts only the generic "chk_runs_" prefix: an unknown status also fails
+        // started_at_by_status/finished_at_by_status simultaneously (real defense in depth), and
+        // Postgres doesn't guarantee which constraint it reports first.
         Arguments.of(
             "unknown run status",
             (ConnectionAction)

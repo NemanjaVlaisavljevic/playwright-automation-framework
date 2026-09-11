@@ -58,10 +58,9 @@ class BookingJourneyTest {
 
     try (ManagedRoom room =
         steps.call("Provision an available room", () -> ManagedRoom.create(rooms))) {
-      // The calendar widget's day cells do not affect what gets submitted, so this navigates
-      // straight to the reservation page with a date far from "today" — combined with a
-      // room this test just created, no other guest of this shared public target can collide
-      // with it.
+      // Calendar day cells don't affect what's submitted, so navigate straight to the
+      // reservation page; a far-future date on a freshly created room avoids colliding with
+      // other guests on this shared target.
       LocalDate checkin = LocalDate.now().plusDays(180);
       LocalDate checkout = checkin.plusDays(1);
 

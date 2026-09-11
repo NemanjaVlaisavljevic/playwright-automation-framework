@@ -129,11 +129,10 @@ not by the JUnit listener - additionally carries `stepId`/`stepName`:
   (default 15s) while a connection is idle, to keep intermediary proxies from timing it out.
 - The service holds one canonical journal per run in PostgreSQL (`RunLifecycleStore`, in production
   `JdbcRunStore` - a real transaction per write; see `docs/DEPLOYMENT_ARCHITECTURE.md` section 3),
-  not in memory - the now-retired `FileBackedRunEventJournal`/in-memory `RunRepository` this section
-  used to describe were replaced at Faza D2.3's cutover. Both the REST-visible run history and SSE
-  replay read from this same durable store, so a restart no longer loses either, and a client
-  reconnecting after a restart still gets a real `200`/replay for a run that existed before it,
-  never a `404` for that reason alone. A run still `QUEUED`/`STARTING`/`RUNNING` at the moment of a
+  not in memory. Both the REST-visible run history and SSE replay read from this same durable store,
+  so a restart never loses either, and a client reconnecting after a restart still gets a real
+  `200`/replay for a run that existed before it, never a `404` for that reason alone. A run still
+  `QUEUED`/`STARTING`/`RUNNING` at the moment of a
   crash/restart is reconciled to `ERROR` (with a same-transaction `RUN_FINISHED(ERROR)` event)
   before the service accepts any new run submissions or SSE subscriptions (Faza D2.5) - a client
   reconnecting to that specific run after such a restart sees it as `ERROR`, not a resumed `RUNNING`

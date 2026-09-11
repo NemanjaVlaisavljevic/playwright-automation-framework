@@ -9,9 +9,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * D4.2 - {@code runner.rawEventMaxBytes} resolution must fail closed on an implausible value
- * (non-numeric, non-positive, or too tiny to ever hold even one event) rather than silently
- * producing a writer that overflows its very first write with no obvious cause.
+ * {@code runner.rawEventMaxBytes} resolution must fail closed on an implausible value (non-numeric,
+ * non-positive, or too tiny for even one event), not silently overflow on the first write.
  */
 class RunnerEventWriterRegistryTest {
 

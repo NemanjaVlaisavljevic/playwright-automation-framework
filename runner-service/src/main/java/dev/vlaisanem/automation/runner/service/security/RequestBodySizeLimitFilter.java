@@ -20,35 +20,20 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Caps the request body size (D3.3) - registered early in both {@link SecurityConfig} chains,
- * unlike {@link AbuseRateLimitFilter}: this is a resource-protection mechanism, not an auth-
- * adjacent one, so there is no reason it should differ between local dev and production. Applies to
- * every request, not just {@code POST /api/v1/runs} - the one endpoint with a real JSON body today,
- * but a future mutating endpoint gets this protection for free.
+ * Caps the request body size - registered early in both {@link SecurityConfig} chains, unlike
+ * {@link AbuseRateLimitFilter}: this is resource protection, not auth-adjacent, so it should not
+ * differ between local dev and production. Applies to every request, not just {@code POST
+ * /api/v1/runs}, so a future mutating endpoint gets this protection for free.
  *
- * <p><strong>The whole body is read and bounded-checked here, before {@code filterChain.doFilter}
- * is ever called - never a passive stream wrapper hoping a downstream read failure surfaces
- * usefully (a review finding).</strong> An earlier version wrapped the input stream to throw {@code
- * IOException} once the cap was exceeded mid-read, then let {@code filterChain.doFilter} proceed -
- * but by the time such an exception surfaces from inside Jackson's own read (deep inside {@code
- * DispatcherServlet}'s handler invocation), Spring MVC's own exception resolution has already
- * caught and resolved it internally (typically to a plain {@code 400}, via {@code
- * HttpMessageNotReadableException}) and committed a response - it never propagates back up far
- * enough for this filter's own {@code try/catch} around {@code doFilter} to ever see it. That made
- * the {@code 413} contract non-uniform: a declared over-cap {@code Content-Length} got a clean
- * {@code 413}, but a chunked or falsified-{@code Content-Length} body - the more important case,
- * since it is exactly what an attacker controls - never reliably did.
- *
- * <p>Reading the whole body up front and checking it before ever invoking the rest of the chain
- * closes that gap entirely: {@code Content-Length} is still rejected immediately when it already
- * declares an over-cap size (avoiding even attempting to read a body that will only be discarded),
- * but a request with no reliable {@code Content-Length} at all is bounded the same way, by actual
- * bytes read, and a genuine {@code 413} is written directly by this filter in both cases - {@code
- * filterChain.doFilter} (and therefore any deserialization/controller code) is never reached at all
- * for an oversized body, checked either way. Buffering the whole body in memory is safe at this
- * cap's scale (16 KiB by default - a real {@code CreateRunRequest} payload is well under it) and
- * for a `GET` request with no body at all, the very first read immediately returns end-of-stream,
- * so this adds no meaningful overhead there (including for a long-lived SSE `GET`).
+ * <p>The whole body is read and bounded-checked here, before {@code filterChain.doFilter} is ever
+ * called, rather than via a stream wrapper that throws mid-read: an exception thrown that deep
+ * (inside Jackson, inside {@code DispatcherServlet}) gets caught and resolved by Spring MVC's own
+ * exception handling before it ever reaches this filter's {@code try/catch}, so a chunked or
+ * falsified-{@code Content-Length} body - exactly what an attacker controls - would never reliably
+ * get a clean {@code 413}. Reading up front closes that gap for both cases, and {@code
+ * filterChain.doFilter} is never reached at all for an oversized body. Buffering in memory is safe
+ * at this cap's scale (16 KiB by default), and a bodyless {@code GET} (including long-lived SSE)
+ * sees immediate end-of-stream, so this adds no meaningful overhead there.
  */
 public class RequestBodySizeLimitFilter extends OncePerRequestFilter {
 

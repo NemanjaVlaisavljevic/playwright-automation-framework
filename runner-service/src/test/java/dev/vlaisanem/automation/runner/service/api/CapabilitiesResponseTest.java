@@ -10,11 +10,9 @@ import dev.vlaisanem.automation.runner.service.domain.Suite;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link CapabilitiesResponse#current(RunAvailabilityPolicy)} must mirror {@code
- * RunRequestValidator}'s real allowlist, not a hand-copied duplicate of it - these assertions are
- * deliberately written against the same combinations {@code RunCatalog}/{@link
- * RunAvailabilityPolicy} actually allow, so a future allowlist change that forgets to also touch
- * this class fails here.
+ * Assertions mirror the real allowlist {@code RunCatalog}/{@link RunAvailabilityPolicy} enforce,
+ * not a hand-copied duplicate, so a future allowlist change that forgets to touch this class fails
+ * here.
  */
 class CapabilitiesResponseTest {
 
@@ -24,8 +22,8 @@ class CapabilitiesResponseTest {
 
     assertThat(response.apiVersion()).isEqualTo("v1");
     assertThat(response.eventSchemaVersion()).isEqualTo(RunnerEvent.CURRENT_SCHEMA_VERSION);
-    // Environment.PUBLIC before Environment.LOCAL - enum declaration order, which
-    // CapabilitiesResponse.current() deliberately sorts by (see its own compareTo call).
+    // PUBLIC before LOCAL: enum declaration order, which CapabilitiesResponse.current()
+    // deliberately sorts by.
     assertThat(response.environments())
         .extracting(CapabilitiesResponse.EnvironmentCapabilities::name)
         .containsExactly(Environment.PUBLIC, Environment.LOCAL);
@@ -38,16 +36,15 @@ class CapabilitiesResponseTest {
             Suite.REGRESSION,
             Suite.FIXTURE,
             Suite.CUSTOM);
-    // LOCAL only ever runs mutation-safe against a manually-started local stack for JOURNEY today -
-    // see RunCatalog and Environment.LOCAL's own Javadoc for why this is deliberately narrow.
+    // LOCAL only ever runs JOURNEY (mutation-safe, manually-started local stack) - see
+    // RunCatalog/Environment.LOCAL for why this is deliberately narrow.
     assertThat(response.environments().get(1).suites()).containsExactly(Suite.JOURNEY);
   }
 
   /**
-   * The portfolio deployment's whole point (see {@code docs/DEPLOYMENT_ARCHITECTURE.md}'s "LOCAL is
-   * out of scope for the portfolio deployment" section): {@code /api/v1/capabilities} must never
-   * advertise {@link Environment#LOCAL} at all, not merely with an empty suite list - a dashboard
-   * iterating {@code environments} should never even see the name.
+   * {@code /api/v1/capabilities} must never advertise {@link Environment#LOCAL} at all - not just
+   * with an empty suite list - since PORTFOLIO deployments are out of scope for LOCAL (see {@code
+   * docs/DEPLOYMENT_ARCHITECTURE.md}).
    */
   @Test
   void omitsLocalEntirelyUnderPortfolio() {

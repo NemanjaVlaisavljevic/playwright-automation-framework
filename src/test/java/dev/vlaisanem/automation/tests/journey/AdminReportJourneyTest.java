@@ -62,10 +62,8 @@ class AdminReportJourneyTest {
 
     try (ManagedRoom room =
         steps.call("Provision an available room", () -> ManagedRoom.create(rooms))) {
-      // The report calendar defaults to the current month - pick an offset guaranteed to stay
-      // within it, favoring a look-back near month-end (the API already accepts past-dated
-      // bookings - see BookingDateRulesApiTest's documented known gap for that) over a look-ahead
-      // that could roll into next month.
+      // Keep the booking within the report's current-month calendar view: look back near
+      // month-end rather than risk a look-ahead rolling into next month.
       LocalDate today = LocalDate.now();
       int daysLeftInMonth = today.lengthOfMonth() - today.getDayOfMonth();
       LocalDate checkin = daysLeftInMonth >= 2 ? today.plusDays(2) : today.minusDays(2);
@@ -120,9 +118,7 @@ class AdminReportJourneyTest {
               assertThat(matchingEvent.end()).isEqualTo(checkout);
             });
 
-        // The report data itself proves the dates are correct (above) - this only additionally
-        // confirms the calendar actually renders that event, which it can only do within its
-        // currently-displayed month (see the month-boundary-safe offset chosen above).
+        // Confirms the calendar actually renders the event (dates already verified above).
         steps.run(
             "Verify report calendar renders the event",
             () -> reportPage.assertEventVisible(expectedEventText));

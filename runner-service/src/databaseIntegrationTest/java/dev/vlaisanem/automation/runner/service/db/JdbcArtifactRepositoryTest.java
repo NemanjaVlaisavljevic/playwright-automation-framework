@@ -23,13 +23,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D2.4 - proves {@link JdbcArtifactRepository} against a real Postgres: a round trip through the
- * {@code artifacts} table preserves every {@link ArtifactManifestEntry} field exactly, {@code
- * ingest}'s {@code ON CONFLICT (artifact_id) DO NOTHING} genuinely makes re-ingesting the same
- * entry a no-op (never overwriting whatever was already ingested for that {@code artifactId}), and
- * {@code findForRun} both filters by {@code testId} and orders deterministically. Every entry needs
- * a real parent {@code runs} row first - {@code fk_artifacts_run} enforces that, same as {@code
- * run_events}' own parent-row requirement in {@link JdbcRunStoreTest}.
+ * Verifies {@link JdbcArtifactRepository} against a real Postgres: fields round-trip exactly,
+ * {@code ingest} is a no-op on an identical re-ingest, and {@code findForRun} filters/orders
+ * deterministically. Each entry requires a parent {@code runs} row ({@code fk_artifacts_run}).
  */
 @Testcontainers
 class JdbcArtifactRepositoryTest {
@@ -79,12 +75,9 @@ class JdbcArtifactRepositoryTest {
   }
 
   /**
-   * [P1] fix - a genuine re-read of the exact same entry (the legitimate case: an incremental pass
-   * and the final drain both seeing the same manifest line) must stay a silent no-op. Reusing the
-   * exact same {@link ArtifactManifestEntry} instance (not just an equal one) makes the "identical"
-   * half of this claim unambiguous - see {@link
-   * #ingestRejectsTheSameArtifactIdWithDifferentMetadata} for the other half: the same id with
-   * genuinely different metadata must now throw instead of silently winning or losing.
+   * A genuine re-read of the exact same entry (e.g. an incremental pass then the final drain) must
+   * stay a silent no-op. See {@link #ingestRejectsTheSameArtifactIdWithDifferentMetadata} for the
+   * differing-metadata case.
    */
   @Test
   void ingestIsIdempotentForAGenuinelyIdenticalReingest() {
@@ -107,11 +100,8 @@ class JdbcArtifactRepositoryTest {
   }
 
   /**
-   * [P1] fix - idempotency only actually applies to a byte-for-byte-identical re-read of the same
-   * entry. A prior version of {@link JdbcArtifactRepository#ingest} used a bare {@code ON CONFLICT
-   * (artifact_id) DO NOTHING}, which silently accepted this case too even though {@code
-   * sizeBytes}/{@code testDisplayName} genuinely differ - durably losing the second write's real
-   * metadata with no signal at all. Now it must throw instead.
+   * Idempotency applies only to a byte-for-byte-identical re-read; the same id with different
+   * metadata must throw rather than silently overwrite or lose the second write.
    */
   @Test
   void ingestRejectsTheSameArtifactIdWithDifferentMetadata() {
@@ -151,12 +141,8 @@ class JdbcArtifactRepositoryTest {
   }
 
   /**
-   * [P2] fix - the manifest writer records {@code Instant.now()} at nanosecond precision, but
-   * {@code TIMESTAMPTZ} only stores microseconds; without normalizing before comparison, a
-   * genuinely-identical re-ingest of an entry with real nanosecond precision would otherwise look
-   * like a conflict purely from a precision difference that was never a real one. The earlier
-   * whole-second-only test fixtures never actually exercised this - real manifest timestamps do
-   * carry sub-microsecond digits.
+   * {@code TIMESTAMPTZ} stores only microsecond precision; nanosecond timestamps must be normalized
+   * before comparison, or an identical re-ingest could look like a false conflict.
    */
   @Test
   void ingestNormalizesNanosecondPrecisionCreatedAtSoAnIdenticalReingestIsStillANoOp() {
@@ -210,9 +196,7 @@ class JdbcArtifactRepositoryTest {
     String runId = newRunAndId();
     Instant earlier = Instant.parse("2026-01-01T00:00:00Z");
     Instant later = Instant.parse("2026-01-01T00:00:05Z");
-    // "a-"/"z-"/"m-" prefixes on a globally-unique artifactId still sort in the expected relative
-    // order: string comparison is lexicographic, so the leading character alone ('a' < 'm' < 'z')
-    // decides ordering regardless of whatever random suffix follows it.
+    // Prefixes sort lexicographically ('a' < 'm' < 'z') regardless of the random UUID suffix.
     String idA = uniqueArtifactId("a");
     String idZ = uniqueArtifactId("z");
     String idM = uniqueArtifactId("m");
@@ -289,12 +273,9 @@ class JdbcArtifactRepositoryTest {
   }
 
   /**
-   * {@code artifact_id} is the table's own primary key - globally unique, not scoped per run - and
-   * every test method here shares one static Testcontainers Postgres/schema. A bare literal like
-   * {@code "a"} reused across two different test methods would silently collide: the second test's
-   * insert would hit {@code ON CONFLICT (artifact_id) DO NOTHING} against a leftover row from an
-   * earlier, unrelated test - exactly the real bug this suffix exists to rule out (confirmed live:
-   * two tests failed with an empty result before this fix was added).
+   * {@code artifact_id} is globally unique and every test method shares one static schema, so a
+   * bare literal would collide across tests via {@code ON CONFLICT DO NOTHING}; the random suffix
+   * avoids that.
    */
   private static String uniqueArtifactId(String label) {
     return label + "-" + UUID.randomUUID();

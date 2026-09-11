@@ -26,10 +26,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * HTTP contract only - all path/symlink safety and manifest trust decisions live in {@link
- * ArtifactService}. {@code testId} is a query parameter, not a path variable: a real {@code testId}
- * (JUnit's own unique-ID format, e.g. {@code [engine:junit-jupiter]/[class:Foo]/[method:bar()]})
- * contains {@code /} characters, which would make it an unusable REST path segment.
+ * HTTP contract only - path/symlink safety and manifest trust decisions live in {@link
+ * ArtifactService}. {@code testId} is a query parameter, not a path variable, because a real JUnit
+ * test ID contains {@code /} characters and can't be a path segment.
  */
 @RestController
 @RequestMapping("/api/v1/runs")
@@ -77,12 +76,8 @@ public class ArtifactController {
             .map(ArtifactSummaryResponse::from)
             .toList();
     ResponseEntity.BodyBuilder response = ResponseEntity.ok();
-    // D2.4 review finding - an empty body alone cannot distinguish "this run genuinely has zero
-    // artifacts" from "artifact ingestion for this run has not finished yet" (its final drain
-    // failed and a bounded background reconciliation hasn't recovered it - see
-    // ArtifactIngestionService). A response header, not a body-shape change: keeps this endpoint's
-    // existing array response (and generated OpenAPI schema) unchanged for every client that
-    // doesn't care about this distinction.
+    // A header, not a body-shape change: an empty array alone can't distinguish "zero artifacts"
+    // from "ingestion hasn't finished yet" (see ArtifactIngestionService).
     if (artifactService.isIngestionIncomplete(runId)) {
       response.header("X-Artifacts-Ingestion-Incomplete", "true");
     }
@@ -138,11 +133,8 @@ public class ArtifactController {
   }
 
   /**
-   * Never {@code entry.mediaType()} - a value that came from the manifest file, which {@link
-   * ArtifactService}'s own Javadoc already treats as untrusted input. {@link ArtifactType} is a
-   * fixed, closed enum this controller fully controls, so switching on it (rather than trusting any
-   * string value, however it was validated) is what actually keeps the response's real {@code
-   * Content-Type} header safe.
+   * Switches on the closed {@link ArtifactType} enum rather than trusting {@code
+   * entry.mediaType()}, which comes from the manifest file and is untrusted input.
    */
   private static MediaType contentTypeFor(ArtifactType type) {
     return switch (type) {

@@ -1,14 +1,11 @@
-# Local/D0-spike-only override. The base docker-compose.yml already publishes web's 80/443 itself
-# (D1) - this override only adds loopback-only, bypass-Caddy access to runner-service, for
-# measurement/debugging (e.g. `docker stats`/curl during a resource-measurement pass). Never use
-# this in a real deployment.
+# Local-only override. The base docker-compose.yml already publishes web's 80/443 itself - this
+# override only adds loopback-only, bypass-Caddy access to runner-service, for measurement/
+# debugging (e.g. `docker stats`/curl). Never use this in a real deployment.
 #
 #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.debug.yml \
 #     --env-file deploy/.env up --build
 services:
   runner-service:
-    # Direct, loopback-only access to runner-service for measurement/debugging without going
-    # through Caddy - e.g. `docker stats`/curl during a resource-measurement pass. Never published
-    # on anything but loopback, even here.
+    # Never published on anything but loopback, even here.
     ports:
       - "127.0.0.1:${RUNNER_SERVICE_DEBUG_PORT:-8080}:8080"

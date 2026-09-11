@@ -55,18 +55,15 @@ class ListenerEventIngestorTest {
     assertThat(forwarded)
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.TEST_STARTED, EventType.TEST_PASSED);
-    // Canonical sequence, assigned by the appender - deliberately independent of the raw source
-    // sequence the listener itself assigned (also 1 and 2 here, but never guaranteed to match).
+    // Canonical sequence, assigned by the appender - independent of the raw source sequence the
+    // listener assigned (also 1 and 2 here, but never guaranteed to match).
     assertThat(forwarded).extracting(RunnerEvent::sequence).containsExactly(1L, 2L);
   }
 
   /**
-   * D4.3.3 review finding - this ingestor's own background thread is distinct from whichever one
-   * constructed it, so MDC does not carry {@code runId} onto it automatically. Proven through the
-   * real collaborator this thread already invokes for every forwarded event ({@link
-   * RunEventAppender#append}) rather than a test-only field on the production class itself: {@code
-   * RecordingRunEventAppender} (already a test double) captures {@code MDC.get("runId")} at the
-   * exact point its own {@code append} is called.
+   * The ingestor's own background thread is distinct from whichever one constructed it, so MDC does
+   * not carry {@code runId} onto it automatically; this asserts it is set on the thread that
+   * actually calls {@link RunEventAppender#append}.
    */
   @Test
   void theIngestorsOwnThreadCarriesTheRealRunIdInItsOwnMdc(@TempDir Path dir) throws IOException {
@@ -84,11 +81,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Proves event-vocabulary coexistence at the ingestion boundary (Faza B): every event below
-   * carries the same {@code schemaVersion} - a run mixing an ordinary test (no steps) with one that
-   * used the {@code Steps} API (interleaved {@code STEP_*} events) must ingest both patterns side
-   * by side under one strictly monotonic canonical sequence - see {@code EventType}'s own Javadoc
-   * on why {@code STEP_*} is additive, not a breaking change.
+   * A run mixing an ordinary test (no steps) with one using the {@code Steps} API (interleaved
+   * {@code STEP_*} events) must ingest both patterns side by side under one strictly monotonic
+   * canonical sequence.
    */
   @Test
   void forwardsInterleavedStepAndTestLevelEventsFromTheSameRun(@TempDir Path dir)
@@ -131,8 +126,8 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: the ingestor must poll for new bytes rather than read
-   * the file only once, since WatchService-style notification can coalesce rapid writes on Windows.
+   * The ingestor polls for new bytes rather than relying on file-watch notifications, since those
+   * can coalesce rapid writes on Windows.
    */
   @Test
   void picksUpLinesWrittenIncrementallyWhilePolling(@TempDir Path dir) throws Exception {
@@ -157,10 +152,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the agreed ingestion-outcome rule: a trailing fragment left behind by a
-   * force-kill must be discarded, not treated as a validation failure, when ingestion is stopped
-   * (rather than completed naturally via the marker) - {@link RunService} alone decides whether the
-   * resulting missing marker is tolerable for CANCELLED/TIMED_OUT.
+   * A trailing fragment left by a force-kill is discarded, not treated as a validation failure,
+   * when ingestion stops without a marker; {@link RunService} alone decides whether a missing
+   * marker is tolerable for CANCELLED/TIMED_OUT.
    */
   @Test
   void toleratesATrailingIncompleteLineWhenStoppedWithoutAMarker(@TempDir Path dir)
@@ -265,9 +259,8 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code new String(bytes, UTF_8)} silently replaces an
-   * invalid byte sequence with U+FFFD instead of failing - invalid UTF-8 is stream corruption and
-   * must be rejected, not papered over into JSON that still happens to parse.
+   * Invalid UTF-8 is stream corruption and must be rejected outright, not silently replaced with
+   * U+FFFD by naive decoding and papered over as parseable JSON.
    */
   @Test
   void rejectsInvalidUtf8ByteSequences(@TempDir Path dir) throws IOException {
@@ -294,10 +287,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: two concurrent {@code stopAndAwaitFinished} calls -
-   * one of which cancels the underlying task on timeout - must never let a {@code
-   * CancellationException} escape uncaught, and must converge on the same terminal result rather
-   * than each independently reporting something different.
+   * Two concurrent {@code stopAndAwaitFinished} calls, one of which times out and cancels the
+   * underlying task, must never let a {@code CancellationException} escape uncaught, and must
+   * converge on the same terminal result.
    */
   @Test
   void concurrentStopAndAwaitFinishedCallsNeverThrowAndConvergeOnTheSameResult(@TempDir Path dir)
@@ -344,10 +336,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: the real writer always creates the data file before
-   * anything else and only creates the marker after closing cleanly, so a marker with no data file
-   * at all can only mean corruption (a deleted file, a bad deploy) - it must not be silently
-   * treated as "zero test events".
+   * The real writer always creates the data file before the marker, so a marker with no data file
+   * at all can only mean corruption (a deleted file, a bad deploy) - never silently "zero test
+   * events".
    */
   @Test
   void rejectsAnOrphanMarkerWithNoDataFileAtAll(@TempDir Path dir) throws IOException {
@@ -366,8 +357,8 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * The legitimate "zero test events" case: the data file genuinely exists (empty) alongside the
-   * marker - matching what the real writer's constructor always does before anything else.
+   * The legitimate "zero test events" case: an empty data file exists alongside the marker,
+   * matching what the real writer's constructor always does.
    */
   @Test
   void treatsAnEmptyButExistingDataFileWithAMarkerAsValid(@TempDir Path dir) throws IOException {
@@ -387,9 +378,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: the marker is only ever created after the writer
-   * closes cleanly, so a trailing, never-terminated line coexisting with it can only mean
-   * corruption - unlike the tolerated case above (stopped without a marker), this must fail.
+   * The marker is only created after the writer closes cleanly, so a trailing unterminated line
+   * alongside it can only mean corruption - unlike the tolerated case above (stopped without a
+   * marker).
    */
   @Test
   void rejectsATrailingIncompleteLineWhenTheMarkerExists(@TempDir Path dir) throws IOException {
@@ -410,11 +401,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * D4.2 - the writer creates {@code .tests.overflow} instead of {@code .tests.complete} once its
-   * configured byte cap is hit (see {@code RunnerEventJsonlWriter}'s own Javadoc). This must be an
-   * explicit, unconditional validation failure - never folded into the generic "stopped without a
-   * marker" tolerance, which exists for a genuinely different case (an abrupt kill) and must not be
-   * credited with the wrong cause regardless of the run's own eventual process outcome.
+   * The writer creates {@code .tests.overflow} instead of {@code .tests.complete} once its
+   * configured byte cap is hit. This must be an explicit validation failure, never folded into the
+   * generic "stopped without a marker" tolerance meant for an abrupt kill.
    */
   @Test
   void treatsAnOverflowMarkerAsAnExplicitValidationFailure(@TempDir Path dir) throws IOException {
@@ -457,10 +446,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: each byte chunk used to be decoded to a String
-   * independently, so a multi-byte UTF-8 character split across a chunk boundary would silently
-   * become a corrupted replacement character on each side. A tiny maxChunkBytes deterministically
-   * forces the boundary to land inside a multi-byte character's own bytes.
+   * A tiny maxChunkBytes deterministically forces a chunk boundary to land inside a multi-byte
+   * UTF-8 character, proving decoding does not corrupt it into a replacement character on each
+   * side.
    */
   @Test
   void doesNotCorruptAMultiByteUtf8CharacterSplitAcrossAChunkBoundary(@TempDir Path dir)
@@ -494,10 +482,9 @@ class ListenerEventIngestorTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code Future.cancel(true)} on a bare {@code
-   * CompletableFuture.supplyAsync} task does not actually interrupt it, so a stuck poll loop would
-   * keep running (and could still append an event) long after stopAndAwaitFinished gave up waiting.
-   * A real {@code ExecutorService.submit} task must be genuinely interrupted instead.
+   * {@code Future.cancel(true)} on a bare {@code CompletableFuture.supplyAsync} does not actually
+   * interrupt it; the ingestor's poll loop must run on a real {@code ExecutorService} task that
+   * stops for real once cancelled.
    */
   @Test
   void aTimedOutIngestorNeverForwardsALateEventAfterward(@TempDir Path dir) throws Exception {
@@ -546,9 +533,8 @@ class ListenerEventIngestorTest {
             appender,
             OBJECT_MAPPER,
             Duration.ofSeconds(10));
-    // Deterministically let the background loop reach and enter its 10-second sleep before
-    // signalling stop - otherwise the stop flag could be set before the loop's very first check,
-    // letting it return immediately instead of exercising the timeout path this test targets.
+    // Let the background loop enter its 10-second sleep before signalling stop, otherwise the stop
+    // flag could be set before the loop's first check and skip the timeout path this test targets.
     Thread.sleep(200);
 
     IngestionResult result = ingestor.stopAndAwaitFinished(Duration.ofMillis(200));

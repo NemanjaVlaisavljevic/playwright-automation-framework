@@ -72,13 +72,8 @@ import org.slf4j.MDC;
  * against a {@link FakeProcessLauncher} rather than a real Gradle invocation, so the tricky
  * concurrent parts (cancel racing completion, timeout, queue-full) are deterministic and fast.
  *
- * <p>D2.3 cutover: rewritten against {@link FakeRunLifecycleStore} (behaviorally faithful to {@code
- * JdbcRunStore}, proven separately against a real Postgres in {@code databaseIntegrationTest})
- * instead of the retired in-memory {@code RunRepository}/file-backed {@code RunEventAppender} pair.
- * Every event-bearing test now goes through a real {@link RunEventBroker} wrapping that fake store
- * (the same production wiring, minus only the live Hub publish's actual transport), so {@code
- * service}'s own event assertions read the fake store directly rather than a separate recording
- * appender.
+ * <p>Event-bearing tests go through a real {@link RunEventBroker} wrapping {@link
+ * FakeRunLifecycleStore} - the same production wiring minus the live Hub publish's transport.
  */
 class RunServiceTest {
 
@@ -88,11 +83,9 @@ class RunServiceTest {
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
   /**
-   * None of this class's scenarios ever produce a real {@code TEST_FAILED}/{@code TEST_ABORTED}/
-   * {@code RUN_FINISHED} manifest to ingest, so {@link RunEventBroker}'s and {@link
-   * RunLifecycleCoordinator}'s own D2.4 artifact-ingestion hooks never do anything observable here
-   * - a real {@link ArtifactIngestionService} wired to an in-memory {@link FakeArtifactRepository}
-   * satisfies each constructor without needing a real manifest file or database.
+   * No scenario here produces a real manifest to ingest, so {@link RunEventBroker}'s and {@link
+   * RunLifecycleCoordinator}'s artifact-ingestion hooks never do anything observable - an in-memory
+   * {@link FakeArtifactRepository} is enough to satisfy each constructor.
    */
   private static ArtifactIngestionService noopArtifactIngestionService(
       RunnerProperties properties) {
@@ -100,13 +93,9 @@ class RunServiceTest {
   }
 
   /**
-   * D2.5 - {@code RunService#submit} now requires {@link
-   * RunRecoveryService#requireRecoveryComplete} to have already passed. None of this class's
-   * scenarios exercise recovery itself (that lives in {@code RunRecoveryServiceTest}), so this runs
-   * the real, one-time recovery pass immediately against the given (already fully set up)
-   * store/coordinator - against an empty or already-terminal-only store, it finds nothing to
-   * recover and completes instantly, exactly as it would against a real fresh Postgres with no
-   * stale runs.
+   * {@code RunService#submit} requires {@link RunRecoveryService#requireRecoveryComplete} to have
+   * already passed. Recovery itself is covered by {@code RunRecoveryServiceTest}; against an empty
+   * or already-terminal-only store this pass finds nothing to recover and completes instantly.
    */
   private static RunRecoveryService recoveryAlreadyComplete(
       RunLifecycleStore store, RunLifecycleCoordinator lifecycle, RunnerMetrics metrics) {
@@ -116,11 +105,9 @@ class RunServiceTest {
   }
 
   /**
-   * A {@link DiskUsageService} that never touches a real filesystem/database - its real constructor
-   * only resolves configured directory paths (no I/O), and {@code snapshot()} is overridden here so
-   * the real {@code FileStore}/{@code JdbcTemplate} calls it would otherwise make are never
-   * reached. Mirrors this file's existing {@code FakeRunLifecycleStore}/{@code FakeProcessLauncher}
-   * style for a collaborator this test suite needs to fully control.
+   * A {@link DiskUsageService} that never touches a real filesystem/database: the constructor only
+   * resolves paths (no I/O), and {@code snapshot()} is overridden so the real disk/DB calls are
+   * never reached.
    */
   private static DiskUsageService fixedDiskUsageService(DiskUsageSnapshot fixed) {
     return new DiskUsageService(minimalDiskUsageProperties(), null) {
@@ -142,10 +129,8 @@ class RunServiceTest {
   }
 
   /**
-   * Returns {@code snapshots} in order, one per call, then repeats the last one forever - used to
-   * prove the pre-launch guard is a genuinely separate check from the submit-time one: a run that
-   * passed the first (submit-time) snapshot can still be terminalized if a later (pre-launch)
-   * snapshot reports disk has since dropped below threshold.
+   * Returns {@code snapshots} in order, one per call, then repeats the last one forever - proves
+   * the pre-launch disk guard is a separate check from the submit-time one.
    */
   private static DiskUsageService sequencedDiskUsageService(DiskUsageSnapshot... snapshots) {
     RunnerProperties minimalProperties = minimalDiskUsageProperties();
@@ -222,8 +207,8 @@ class RunServiceTest {
 
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
     awaitStatus(submitted.runId(), RunStatus.RUNNING);
-    // The real listener always creates the data file before the marker - an ingestor now rejects a
-    // marker with no data file at all as an orphan, so the fake here must match that invariant.
+    // The real listener creates the data file before the marker; the ingestor rejects a marker with
+    // no data file as an orphan, so the fake here must match that invariant.
     Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.jsonl"));
     Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.complete"));
     launcher.lastProcess().exitNow(0);
@@ -235,12 +220,8 @@ class RunServiceTest {
   }
 
   /**
-   * D4.3.3 review finding - the first draft's own planned test ("every captured event has {@code
-   * runId}") could have vacuously passed against an empty capture list if {@code RunService}
-   * happened to emit no {@code INFO} line for a given run - this asserts the exact expected *count*
-   * of concrete lifecycle events first ({@code RunLifecycleCoordinator}'s own commit-gated "Run
-   * queued"/"Run started"/"Run finished" lines, D4.3.3), then that every one of them carries the
-   * real {@code runId}.
+   * Asserts the exact count of lifecycle log lines first, then that each carries the real {@code
+   * runId} - checking runId alone could vacuously pass against an empty capture list.
    */
   @Test
   void everyRunProducesExactlyItsThreeCommitAwareLifecycleLogLinesWithTheRealRunId(
@@ -279,14 +260,10 @@ class RunServiceTest {
   }
 
   /**
-   * D4.3.3 review finding - proves the actual regression {@code MdcScope}'s previous-value restore
-   * exists to prevent: this executor is a bounded single-worker pool that reuses its one thread
-   * across every sequential run, so a leaked {@code runId} would otherwise bleed into the next
-   * run's own log lines the moment it starts on that same thread. Proven through the real
-   * collaborator RunService's own worker thread already invokes to launch every run ({@link
-   * ProcessLauncher#start}) rather than a test-only field on RunService itself - {@code
-   * FakeProcessLauncher} (already a test double) captures {@code MDC.get("runId")} at the exact
-   * point its own {@code start} is called.
+   * The executor is a bounded single-worker pool that reuses its one thread across runs, so a
+   * leaked {@code runId} would otherwise bleed into the next run's log lines. {@code
+   * FakeProcessLauncher} captures {@code MDC.get("runId")} at the real call site ({@link
+   * ProcessLauncher#start}) rather than via test-only instrumentation on {@code RunService}.
    */
   @Test
   void theReusedWorkerThreadNeverCarriesAPriorRunsRunIdIntoTheNextRun(@TempDir Path eventsDir)
@@ -317,12 +294,9 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code SuiteCommandFactoryTest} proves {@code
-   * RunCatalog} maps {@code LOCAL}+{@code JOURNEY} to {@code localJourneyTest} in isolation, but
-   * nothing previously proved {@code RunService.submit} actually carries the caller's chosen {@link
-   * Environment} through {@code executeRun} into the command it hands the launcher - every other
-   * test here submits {@link Environment#PUBLIC}. Confirms the launched command names the dedicated
-   * local task and never the public {@code journeyTest} task.
+   * {@code SuiteCommandFactoryTest} proves the mapping in isolation; this proves {@code
+   * RunService.submit} actually carries the caller's chosen {@link Environment} through to the
+   * launched command - every other test here submits {@link Environment#PUBLIC}.
    */
   @Test
   void submitPassesTheSelectedLocalEnvironmentThroughToTheLaunchedCommand(@TempDir Path eventsDir)
@@ -339,11 +313,10 @@ class RunServiceTest {
   }
 
   /**
-   * Full-chain regression test for the review's finding: nothing previously exercised catalog load
-   * -> {@code CustomTestSelectionValidator} -> immutable {@link SelectedTestSnapshot} -> the actual
-   * launched {@code customTest --tests ...} command together. A second, unselected catalog entry
-   * proves the launched command carries exactly the selected filter and nothing else - not a
-   * coincidentally-passing full {@code customTest} invocation.
+   * Exercises the full chain: catalog load -> {@code CustomTestSelectionValidator} -> {@link
+   * SelectedTestSnapshot} -> the launched {@code customTest --tests ...} command. A second,
+   * unselected catalog entry proves the command carries exactly the selected filter and nothing
+   * else.
    */
   @Test
   void submitsACustomRunWithExactlyTheSelectedTestsAndNothingElse(
@@ -388,13 +361,10 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: an invalid {@code CUSTOM} selection must fail before
-   * any of a run's usual side effects happen - {@code submit()}'s own code path only generates a
-   * {@code runId} and calls {@code lifecycle.queue} (which is what emits {@code RUN_QUEUED}) after
-   * {@code CustomTestSelectionValidator.validate} has already succeeded, so a rejected selection
-   * must leave the store empty (which, thanks to the real schema's own foreign key, structurally
-   * implies no event could possibly exist either) and (implicitly, since no runId or {@code
-   * ActiveRun} is ever created) nothing tracked in {@code activeRuns}.
+   * An invalid {@code CUSTOM} selection must fail before any side effects: {@code submit()} only
+   * generates a {@code runId} and calls {@code lifecycle.queue} after {@code
+   * CustomTestSelectionValidator.validate} succeeds, so a rejected selection leaves the store empty
+   * and nothing tracked in {@code activeRuns}.
    */
   @Test
   void anInvalidCustomSelectionNeverSavesARunOrEmitsAnyEvent(
@@ -429,18 +399,9 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: every other test in this class constructs {@code
-   * RunService} with {@link RunAvailabilityPolicy#localDev()}, so nothing here previously proved
-   * that {@code submit()} actually consults the deployment's own policy at all - a future change
-   * that accidentally dropped {@code RunRequestValidator.validate(availabilityPolicy, ...)} from
-   * {@code RunService.submit} would have left {@code RunAvailabilityPolicyTest}/ {@code
-   * RunRequestValidatorTest}/{@code CapabilitiesResponseTest} all still green, since none of them
-   * exercise {@code RunService} itself. Mirrors {@link
-   * #anInvalidCustomSelectionNeverSavesARunOrEmitsAnyEvent}'s own shape: the rejection happens
-   * before a {@code runId} is even generated (see {@code RunService.submit}'s own ordering), so no
-   * run is saved, no {@code RUN_QUEUED} event is emitted, and the process launcher is never invoked
-   * - nothing is left to assert about {@code activeRuns} directly since no entry for it could
-   * possibly have been created yet.
+   * Proves {@code submit()} actually consults {@link RunAvailabilityPolicy} - every other test here
+   * uses {@code localDev()}, so a dropped {@code RunRequestValidator.validate} call in {@code
+   * RunService.submit} would otherwise go undetected by any test in this suite.
    */
   @Test
   void rejectsALocalSubmissionUnderThePortfolioProfileWithNoSideEffects(@TempDir Path eventsDir)
@@ -463,9 +424,8 @@ class RunServiceTest {
   }
 
   /**
-   * The companion half of {@link #rejectsALocalSubmissionUnderThePortfolioProfileWithNoSideEffects}
-   * - proves the portfolio profile narrows {@code LOCAL} specifically, not every submission, by
-   * running a real {@code PUBLIC} request all the way to a launched process under the same policy.
+   * Companion to {@link #rejectsALocalSubmissionUnderThePortfolioProfileWithNoSideEffects} - proves
+   * the portfolio profile narrows {@code LOCAL} specifically, not every submission.
    */
   @Test
   void allowsAPublicSubmissionUnderThePortfolioProfile(@TempDir Path eventsDir) throws Exception {
@@ -498,9 +458,8 @@ class RunServiceTest {
     Path expectedDir = eventsDir.resolve("artifacts").resolve(submitted.runId());
     assertThat(launcher.startedEnvironments.get(0))
         .containsEntry("ARTIFACTS_DIR", expectedDir.toString());
-    // Actually created on disk, not just computed - see reserveArtifactsDirectory's own atomic
-    // Files.createDirectory, the fix for the review's finding that a plain Files.exists check left
-    // a check-then-act race between two callers.
+    // Actually created on disk, not just computed - reserveArtifactsDirectory uses an atomic
+    // Files.createDirectory to avoid a check-then-act race between two callers.
     assertThat(expectedDir).isDirectory();
   }
 
@@ -518,11 +477,9 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: the previous {@code Files.exists} check followed by a
-   * separate creation left a window in which two callers could both see "does not exist yet" and
-   * both proceed. {@code Files.createDirectory} is atomic - exactly one of any number of concurrent
-   * callers for the same {@code runId} can ever succeed, which this drives with a real race (both
-   * threads released by the same latch) rather than trusting the atomicity claim un-exercised.
+   * {@code Files.createDirectory} is atomic - exactly one of any number of concurrent callers for
+   * the same {@code runId} can succeed. Drives a real race (both threads released by the same
+   * latch) rather than trusting the atomicity claim unexercised.
    */
   @Test
   void exactlyOneOfTwoConcurrentReservationsForTheSameRunIdSucceeds(@TempDir Path eventsDir)
@@ -569,16 +526,9 @@ class RunServiceTest {
   }
 
   /**
-   * D2.3 cutover: replaces the pre-cutover "emergency ERROR" test for this same failure point. With
-   * one atomic store transaction, a permanently failing {@code RUN_FINISHED} write can no longer be
-   * worked around by a separate, always-available side channel the way the old repository-only
-   * emergency write could - see {@code RunLifecycleCoordinator}'s own Javadoc for why removing that
-   * mechanism is a deliberate consequence of the cutover, not an oversight. Both the original
-   * SUCCEEDED write and {@code executeRun}'s own fallback ERROR write need a {@code RUN_FINISHED}
-   * event, so both fail identically here, leaving the run stuck at its last known-good status
-   * (RUNNING) - never falsely SUCCEEDED, which is the one invariant this test still exists to
-   * prove. The process is still terminated as part of cleanup, and - proving the failure is scoped
-   * to this one run's write, not a global "journal closed" flag the way the old mechanism worked -
+   * Both the original SUCCEEDED write and the fallback ERROR write need a {@code RUN_FINISHED}
+   * event, so a permanently failing write leaves the run stuck at RUNNING - never falsely
+   * SUCCEEDED. The process is still terminated, and the failure is scoped to this run's write only:
    * a different run can still be submitted normally afterward.
    */
   @Test
@@ -720,16 +670,11 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: previously, when termination failed during cancel,
-   * the worker thread stayed blocked inside {@code awaitCompletion} on the same (unkillable)
-   * process and would not notice for up to the full configured timeout - tying up the single worker
-   * even though the run already reports as finished. A failed termination also now correctly
-   * degrades the runner (see {@link
-   * #degradedRunnerRejectsSubmissionsUntilTheSurvivorExitsThenRecovers} for that concern in
-   * isolation), so a submission cannot succeed immediately after cancel() the way it could before
-   * that safeguard existed - what this test isolates instead is that recovery, once the survivor
-   * actually exits, happens within a short deadline rather than only after the full ~10-minute
-   * timeout the (still-)stuck worker would otherwise need to notice on its own.
+   * When termination fails during cancel, the worker must not stay blocked in {@code
+   * awaitCompletion} for the full configured timeout even though the run already reports finished.
+   * Degradation itself is covered by {@link
+   * #degradedRunnerRejectsSubmissionsUntilTheSurvivorExitsThenRecovers}; this isolates that
+   * recovery, once the survivor exits, happens within a short deadline.
    */
   @Test
   void cancelInterruptsTheWorkerWhenTerminationFailsSoRecoveryDoesNotWaitTheFullTimeout(
@@ -746,24 +691,19 @@ class RunServiceTest {
     Run cancelResult = service.cancel(stuck.runId());
     assertThat(cancelResult.status()).isEqualTo(RunStatus.ERROR);
 
-    // Once the survivor actually exits, recovery - and therefore a new run reaching RUNNING -
-    // must happen within a short deadline. If the worker were still stuck inside the 10-minute
-    // awaitCompletion wait, the reaper flipping availability back on its own would not be enough:
-    // the queued run would still have no free worker to pick it up for the rest of that timeout.
+    // Once the survivor exits, recovery - and a new run reaching RUNNING - must happen within a
+    // short deadline; a worker still stuck in the 10-minute awaitCompletion wait would leave no
+    // free worker to pick up the queued run regardless of the reaper flipping availability back.
     survivor.exitNow(0);
     Run next = awaitRecoveredSubmit(Environment.PUBLIC, Suite.SMOKE);
     awaitStatus(next.runId(), RunStatus.RUNNING);
   }
 
   /**
-   * Cleanup must not depend on the canonical store remaining writable. D2.3 cutover: if both
-   * process termination and the {@code RUN_FINISHED} write fail, {@code cancel()} now propagates
-   * whatever the store itself throws (there is no longer a dedicated {@code
-   * RunEventPersistenceException} wrapper - see {@code RunLifecycleCoordinator}'s own Javadoc), and
-   * - since the fallback {@code ERROR} write needs the same {@code RUN_FINISHED} event type and
-   * therefore also fails - the run is left stuck non-terminal rather than falsely recorded as
-   * {@code ERROR}. What still matters, and is still proven here, is that the worker thread itself
-   * is not left blocked for the configured timeout regardless.
+   * Cleanup must not depend on the canonical store remaining writable. If both process termination
+   * and the {@code RUN_FINISHED} write fail, {@code cancel()} propagates whatever the store throws,
+   * and the run is left stuck non-terminal rather than falsely recorded as {@code ERROR} - but the
+   * worker thread itself must not stay blocked for the configured timeout regardless.
    */
   @Test
   void cancelStillInterruptsTheWorkerWhenTerminationAndTerminalEventPersistenceBothFail(
@@ -787,10 +727,9 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for two related races. First, a slow cancel must not retain a stale worker
-   * reference and later interrupt an unrelated run after the executor reuses its thread. Second,
-   * and more importantly, that unrelated run must not launch at all while termination is still
-   * unresolved: the failure and its DEGRADED incident have to be registered under the same
+   * Two invariants: a slow cancel must not retain a stale worker reference and later interrupt an
+   * unrelated run after the executor reuses its thread; and that unrelated run must not launch
+   * while termination is still unresolved - the DEGRADED incident must register under the same
    * lifecycle gate before the next process can start.
    */
   @Test
@@ -845,13 +784,11 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: a cancellation racing in during the window between
-   * markRunning/ingestor setup and activeRun.process() being published must still be honored
-   * promptly by this thread's own post-publish check - not only once awaitCompletion's full (here,
-   * 10-minute) timeout eventually elapses. Blocks the worker exactly inside {@code
-   * ListenerEventIngestorFactory.start} - before the ingestor is attached to activeRun and
-   * therefore before the process is published either - to deterministically land a concurrent
-   * cancel() call in that window, where it cannot yet see (or act on) the process directly.
+   * A cancellation racing in during the window between markRunning/ingestor setup and {@code
+   * activeRun.process()} being published must still be honored promptly by the post-publish check,
+   * not only once {@code awaitCompletion}'s full timeout elapses. Blocks the worker inside {@code
+   * ListenerEventIngestorFactory.start} to deterministically land a concurrent cancel() in that
+   * window, before the process is visible to it.
    */
   @Test
   void cancelRacingRightBeforeProcessPublicationStillTerminatesPromptly(@TempDir Path eventsDir)
@@ -930,9 +867,8 @@ class RunServiceTest {
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
     assertThat(ingestorStartEntered.await(5, TimeUnit.SECONDS)).isTrue();
 
-    // The process is not yet published to activeRun at all here - this cannot see or terminate it
-    // directly, so it can only set cancelRequested for the worker's own post-publish check to
-    // honor once it resumes.
+    // The process is not yet published to activeRun here - this cannot see or terminate it
+    // directly, so it can only set cancelRequested for the post-publish check to honor on resume.
     Thread cancelThread = new Thread(() -> service.cancel(submitted.runId()));
     cancelThread.start();
     cancelThread.join(5000);
@@ -954,10 +890,10 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: a known-surviving process from a failed termination
-   * must not simply free up the single-worker slot, or a new run could execute concurrently with it
-   * and break single-run isolation. The runner must refuse new submissions until the survivor is
-   * confirmed gone, then recover on its own once the background reaper notices.
+   * A known-surviving process from a failed termination must not simply free up the single-worker
+   * slot, or a new run could execute concurrently with it and break single-run isolation. The
+   * runner refuses new submissions until the survivor is confirmed gone, then recovers once the
+   * background reaper notices.
    */
   @Test
   void degradedRunnerRejectsSubmissionsUntilTheSurvivorExitsThenRecovers(@TempDir Path eventsDir)
@@ -984,7 +920,7 @@ class RunServiceTest {
     awaitStatus(recovered.runId(), RunStatus.RUNNING);
   }
 
-  /** D4.2 - submit() itself must refuse a new run outright once disk is already below threshold. */
+  /** submit() itself must refuse a new run outright once disk is already below threshold. */
   @Test
   void submitRejectsWithDiskSpaceLowExceptionWhenDiskIsAlreadyBelowThreshold(
       @TempDir Path eventsDir) {
@@ -998,10 +934,9 @@ class RunServiceTest {
   }
 
   /**
-   * D4.2 - a submit()-time check alone does not protect a run that was already queued: disk can
-   * drop below threshold in the window between accepting the submission and the single worker
-   * actually getting to it. The pre-launch guard (immediately before {@code processLauncher.start})
-   * must catch this and terminalize the run as {@code ERROR}, never silently launch it anyway.
+   * A submit()-time check alone does not protect a run that was already queued: disk can drop below
+   * threshold before the single worker gets to it. The pre-launch guard (immediately before {@code
+   * processLauncher.start}) must catch this and terminalize the run as {@code ERROR}.
    */
   @Test
   void aQueuedRunTerminalizesAsErrorWhenDiskDropsBelowThresholdBeforeLaunch(@TempDir Path eventsDir)
@@ -1028,12 +963,10 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code submit()}'s own availability check only guards
-   * against a <em>new</em> submission - a run already dequeued by the worker before degradation
-   * existed must not slip through and launch its own process while a survivor from a previous run
-   * might still be alive. This queues the second run while the runner is still healthy (so {@code
-   * submit()} legitimately accepts it), then triggers the degradation and confirms the second run
-   * does not reach {@code RUNNING} until the survivor actually exits.
+   * {@code submit()}'s availability check only guards a <em>new</em> submission - a run already
+   * queued before degradation existed must not slip through and launch while a survivor might still
+   * be alive. Queues the second run while healthy, then triggers degradation and confirms it does
+   * not reach RUNNING until the survivor exits.
    */
   @Test
   void aRunAlreadyQueuedBeforeDegradationDoesNotStartUntilTheSurvivorExits(@TempDir Path eventsDir)
@@ -1065,10 +998,9 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the event-contract requirement: a run cancelled while it is still waiting
-   * out a DEGRADED runner (never having reached RUNNING) must have a canonical timeline of exactly
-   * {@code RUN_QUEUED} followed by {@code RUN_FINISHED(CANCELLED)} - no {@code RUN_STARTED} and no
-   * {@code TEST_*} event in between, with a continuous sequence.
+   * A run cancelled while waiting out a DEGRADED runner (never reaching RUNNING) must have a
+   * canonical timeline of exactly RUN_QUEUED then RUN_FINISHED(CANCELLED) - no RUN_STARTED, no
+   * TEST_* event, sequence continuous.
    */
   @Test
   void cancellingARunWhileItWaitsForDegradedRecoveryEmitsOnlyQueuedThenFinishedCancelled(
@@ -1168,8 +1100,8 @@ class RunServiceTest {
     service = newService(launcher, eventsDir, 5);
     Run submitted = service.submit(Environment.PUBLIC, Suite.SMOKE);
     awaitStatus(submitted.runId(), RunStatus.RUNNING);
-    // The real listener always creates the data file before the marker - an ingestor now rejects a
-    // marker with no data file at all as an orphan, so the fake here must match that invariant.
+    // The real listener creates the data file before the marker; the ingestor rejects a marker with
+    // no data file as an orphan, so the fake here must match that invariant.
     Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.jsonl"));
     Files.createFile(eventsDir.resolve(submitted.runId() + ".tests.complete"));
     launcher.lastProcess().exitNow(0);
@@ -1189,8 +1121,8 @@ class RunServiceTest {
     awaitStatus(occupying.runId(), RunStatus.RUNNING);
     service.submit(Environment.PUBLIC, Suite.API); // fills the single queue slot
 
-    // D4.3.2 review finding - runner.executor.active/queued must reflect this real
-    // one-running-one-queued state, not just be registered at 0.
+    // runner.executor.active/queued must reflect this real one-running-one-queued state, not just
+    // be registered at 0.
     assertThat(meterRegistry.find("runner.executor.active").gauge().value()).isEqualTo(1.0);
     assertThat(meterRegistry.find("runner.executor.queued").gauge().value()).isEqualTo(1.0);
 
@@ -1199,11 +1131,9 @@ class RunServiceTest {
   }
 
   /**
-   * Regression test for the review's finding: previously, any unexpected {@link RuntimeException}
-   * from a collaborator (here, {@code awaitCompletion}) would escape {@code executeRun} on the
-   * executor's worker thread with no terminal transition and no {@code activeRuns} cleanup ever
-   * recorded, leaving the run stuck non-terminal forever. It must now be recorded as {@code ERROR}
-   * and the process terminated as part of cleanup.
+   * An unexpected {@link RuntimeException} from a collaborator (here, {@code awaitCompletion}) must
+   * not escape {@code executeRun} and leave the run stuck non-terminal - it is recorded as {@code
+   * ERROR} and the process terminated as part of cleanup.
    */
   @Test
   void anUnexpectedFailureDuringAwaitIsRecordedAsErrorInsteadOfLeavingTheRunStuck(
@@ -1617,11 +1547,9 @@ class RunServiceTest {
     private final CountDownLatch startEntered = new CountDownLatch(1);
     private final CountDownLatch allowProcessStart = new CountDownLatch(1);
     private final CountDownLatch awaitCompletionFinished = new CountDownLatch(1);
-    // D4.3.3 review finding - captured here rather than via a test-only field on RunService
-    // itself: this is already the real collaborator RunService's own worker thread invokes to
-    // launch every run, so observing MDC at that exact call is proof enough that runId is really
-    // set on the thread that matters, with no test-only mutable state added to any production
-    // object.
+    // Captured here rather than via a test-only field on RunService: this is the real call site
+    // RunService's worker thread invokes to launch every run, so observing MDC here is proof
+    // enough without adding test-only mutable state to any production object.
     private volatile String observedRunIdInMdcDuringStart;
 
     @Override

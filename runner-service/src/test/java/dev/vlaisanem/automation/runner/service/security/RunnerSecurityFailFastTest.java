@@ -14,15 +14,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.SpringApplication;
 
 /**
- * Proves the review finding this class is named for: a {@code PORTFOLIO} instance that is
- * misconfigured in any of the ways {@link RunnerSecurityEnvironmentPostProcessor} checks must never
- * open a listening socket at all, not merely fail shortly after opening one. Runs the real {@link
- * RunnerServiceApplication} via {@link SpringApplication#run} - not a {@code @SpringBootTest} slice
- * - specifically so a real embedded Tomcat would have to try to bind the port for this test to be
- * meaningful; the post-processor throwing during environment preparation, before the {@code
- * ApplicationContext} is even created, means no {@code DataSource}/Flyway/web- server bean is ever
- * attempted either - this genuinely never reaches the point D2.3 made every other startup depend on
- * a real Postgres, so no Testcontainers/real database is needed here.
+ * A misconfigured {@code PORTFOLIO} instance ({@link RunnerSecurityEnvironmentPostProcessor}'s
+ * checks) must never open a listening socket, not merely fail after opening one. Runs the real
+ * {@link RunnerServiceApplication} via {@link SpringApplication#run} (not a {@code @SpringBootTest}
+ * slice) so a real embedded Tomcat would have to bind the port before the fail-fast check can be
+ * proven.
  */
 class RunnerSecurityFailFastTest {
 
@@ -43,10 +39,8 @@ class RunnerSecurityFailFastTest {
   }
 
   /**
-   * Regression test for the review finding: comparing the raw profile value against the literal
-   * {@code "PORTFOLIO"} string would silently skip this check for a lowercase {@code portfolio} -
-   * Spring's own enum conversion (used later by {@code RunAvailabilityConfig}'s {@code @Value})
-   * accepts it case-insensitively, so both spellings must fail closed identically here too.
+   * Case-insensitive: Spring's own enum conversion accepts {@code portfolio} lowercase too, so
+   * comparing against the literal {@code "PORTFOLIO"} string alone would silently skip this check.
    */
   @ParameterizedTest
   @ValueSource(strings = {"PORTFOLIO", "portfolio"})
@@ -58,11 +52,8 @@ class RunnerSecurityFailFastTest {
   }
 
   /**
-   * Regression test for the review finding: a {@code PORTFOLIO} instance whose session cookie would
-   * not be {@code Secure} (e.g. a local Compose acceptance override left in place by mistake - see
-   * {@code deploy/docker-compose.yml}'s {@code SESSION_COOKIE_SECURE}) must fail closed exactly the
-   * same way as missing GitHub credentials, not silently serve a non-Secure-cookie production
-   * session.
+   * A non-Secure session cookie (e.g. a local Compose override left in place by mistake) must fail
+   * closed exactly like missing GitHub credentials, not silently serve a production session.
    */
   @org.junit.jupiter.api.Test
   void portfolioProfileWithANonSecureCookieNeverOpensAListeningSocket() throws IOException {
@@ -87,9 +78,8 @@ class RunnerSecurityFailFastTest {
     assertThatThrownBy(() -> SpringApplication.run(RunnerServiceApplication.class))
         .hasStackTraceContaining(expectedMessageFragment);
 
-    // The real proof: the port must still be genuinely free. If the embedded server had ever
-    // started listening - even briefly, before some later check tore it down - binding it here
-    // from a completely independent socket would fail.
+    // If the embedded server had ever started listening, even briefly, binding the port here from
+    // an independent socket would fail.
     try (ServerSocket confirmNeverBound = new ServerSocket(port)) {
       assertThat(confirmNeverBound.isBound()).isTrue();
     }

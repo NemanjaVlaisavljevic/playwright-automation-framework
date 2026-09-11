@@ -7,12 +7,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * D4.1 - admin-only operational tooling, not a dashboard feature, so this is {@link Hidden} from
- * the public OpenAPI document the same way {@code CurrentUserController}/{@code CsrfController}
- * already are: a simple, internal, rarely-changing shape not worth {@code npm run
- * api:check:contract} churn. Both routes require {@code ROLE_ADMIN} (see {@code SecurityConfig}'s
- * own enumerated route list) - {@code POST .../run} additionally requires a valid CSRF token,
- * identical protection to {@code POST /api/v1/runs}/{@code .../cancel}.
+ * Admin-only operational tooling, not a dashboard feature, so {@link Hidden} from the public
+ * OpenAPI document. Both routes require {@code ROLE_ADMIN}; {@code POST .../run} additionally
+ * requires a valid CSRF token, same as {@code POST /api/v1/runs}/{@code .../cancel}.
  */
 @Hidden
 @RestController

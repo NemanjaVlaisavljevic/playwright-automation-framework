@@ -33,65 +33,28 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * D2.2 (docs/DEPLOYMENT_ARCHITECTURE.md section 3) - the single component that owns the whole
- * {@code runs}/{@code run_events} atomic sequence the replay-atomicity protocol requires: {@code
+ * The single component owning the whole {@code runs}/{@code run_events} atomic sequence: {@code
  * SELECT ... FOR UPDATE} &rarr; validate/apply the transition &rarr; allocate {@code sequence} from
- * the same locked row &rarr; insert the event &rarr; update the run &rarr; commit. Reviewed finding
- * this class exists specifically to satisfy: the old {@code RunRepository}/{@code RunEventAppender}
- * split (a repository holding an in-process per-key lock, calling out to a separate event-appending
- * collaborator inside its {@code beforeCommit}) cannot be mechanically carried over to Postgres,
- * because true cross-table atomicity requires one transaction, not two independently-lockable
+ * the same locked row &rarr; insert the event &rarr; update the run &rarr; commit, all in one
+ * transaction - true cross-table atomicity needs this, not two independently-lockable
  * collaborators.
  *
- * <p><strong>What the DB row lock does and does not give you (a second review round corrected this
- * class's own earlier claim here)</strong>: {@code SELECT ... FOR UPDATE} serializes concurrent
- * <em>database writers</em> on the same {@code runId} - two transactions racing to finalize the
- * same run can never corrupt each other's sequence allocation or row update, which is everything
- * this class's own tests prove. It is released at {@code COMMIT}, though, so it is <em>not</em> by
- * itself the complete per-run lock the protocol's "publish after commit, before unlock" rule needs
- * - that rule is about coordinating this store's commit with the live in-process {@code
- * RunEventHub} subscribe path, which a DB row lock cannot reach at all. D2.3 must wrap a call into
- * this store <em>and</em> the resulting Hub publish inside one external, in-process per-run lock,
- * shared with {@code Subscribe} - exactly the design this class deliberately supports rather than
- * pre-empts: every write method here returns a {@link CommittedRunChange} carrying the exact {@link
- * RunnerEvent} that was actually committed (not just the {@link Run} snapshot), so that future lock
- * wrapper has everything it needs to publish without re-deriving or re-reading anything.
+ * <p>{@code SELECT ... FOR UPDATE} only serializes concurrent database writers on the same {@code
+ * runId} and releases at {@code COMMIT}, so it is not by itself the "publish after commit, before
+ * unlock" guarantee the in-process {@code RunEventHub} subscribe path needs - that requires an
+ * external per-run lock wrapping both this store's commit and the Hub publish. Every write method
+ * here returns the exact {@link RunnerEvent} committed (via {@link CommittedRunChange}) so that
+ * lock wrapper never has to re-derive or re-read anything.
  *
- * <p><strong>Wired into the live application as of D2.3</strong>: a real Spring {@code @Component}
- * now that {@code DataSourceAutoConfiguration}/{@code FlywayAutoConfiguration} are no longer
- * excluded on {@code RunnerServiceApplication} - {@link JdbcTemplate} comes from Spring Boot's own
- * {@code JdbcTemplateAutoConfiguration}, {@link TransactionTemplate} from {@code
- * TransactionAutoConfiguration}'s {@code TransactionTemplateConfiguration} (given the single {@code
- * PlatformTransactionManager} {@code DataSourceTransactionManagerAutoConfiguration} creates for the
- * auto-configured {@code DataSource}), and {@link ObjectMapper} from the existing {@code
- * spring-boot-starter-json} autoconfiguration already relied on elsewhere in this service - no
- * manual {@code @Bean} wiring needed for any of the three. {@code databaseIntegrationTest} still
- * constructs its own instance directly against a Testcontainers Postgres, entirely independent of
- * this Spring wiring.
+ * <p>Every write method validates its caller-supplied event factory's output before it reaches SQL
+ * (see {@link RunEventValidation}), since a mismatched {@code runId}/sequence or a type/outcome
+ * that doesn't match the transition would otherwise silently corrupt the row/event correlation.
  *
- * <p>Every write method validates the event its caller-supplied factory produces before it ever
- * reaches SQL: the factory receives the sequence this class allocated and is trusted to build a
- * {@link RunnerEvent} for it, but a factory that returns a mismatched {@code runId}/{@code
- * sequence}, or an event type/outcome that does not match the lifecycle transition actually being
- * recorded, would otherwise silently corrupt the row/event correlation (the {@code run_id} column
- * and the JSON payload's own {@code runId} could disagree; {@code next_event_sequence} could be
- * incremented once while a stale sequence number lands in the payload). See {@link
- * {@code RunEventValidation#requireMatchingEvent}/{@code RunEventValidation#requireLifecycleEventMatches}.
- *
- * <p>Only {@link Run}'s own timestamp columns ({@code requestedAt}/{@code startedAt}/{@code
- * finishedAt}, backed by {@code TIMESTAMPTZ}) are truncated to microseconds ({@link
- * #truncateToMicros}) before use - {@code TIMESTAMPTZ} only stores microsecond precision, so a
- * caller-supplied {@link Instant} with finer (nanosecond) precision would otherwise make the
- * in-memory {@link Run}/{@link CommittedRunChange} this class returns disagree with what a later
- * {@link #findById} re-read of the same row produces. Truncating once, at the point each value is
- * first used, keeps every returned {@link Run} byte-for-byte consistent with what is actually
- * persisted from the very start, rather than only after an explicit round trip. This does
- * <strong>not</strong> extend to {@link RunnerEvent#timestamp()}: it is stored twice - verbatim, at
- * full nanosecond precision, inside the {@code jsonb payload} (the authoritative copy, round-tripped
- * exactly through {@link ObjectMapper}), and separately, truncated to microseconds, in {@code
- * run_events.occurred_at} (a secondary index column only, never re-parsed back into a {@link
- * RunnerEvent} - see {@link #readEventsAfter}/{@link #latestEvent}, which read {@code payload}
- * alone).
+ * <p>{@link Run}'s timestamp columns are truncated to microseconds ({@link #truncateToMicros})
+ * since {@code TIMESTAMPTZ} only stores that precision - otherwise a nanosecond {@link Instant}
+ * would make the returned {@link Run} disagree with a later re-read. {@link
+ * RunnerEvent#timestamp()} is exempt: it's stored verbatim in the authoritative {@code jsonb
+ * payload}, with a truncated copy only in the secondary {@code occurred_at} index column.
  */
 @Component
 public class JdbcRunStore implements RunLifecycleStore {
@@ -159,17 +122,12 @@ public class JdbcRunStore implements RunLifecycleStore {
 
   /**
    * Atomically re-reads {@code runId} under {@code SELECT ... FOR UPDATE}, applies {@code
-   * transition} (via {@link Run#transitionTo}, which validates through {@code RunStateMachine} the
-   * same way every other caller of that method already does), optionally allocates and inserts one
-   * event, and updates the row - all inside one transaction. Returns empty without writing anything
-   * when the run is already terminal (a benign lost race, mirroring {@code
-   * RunRepository#transitionIfNonTerminal}'s own contract), and never allocates a sequence or
-   * inserts an event in that case either.
+   * transition}, optionally allocates and inserts one event, and updates the row - all in one
+   * transaction. Returns empty without writing anything when the run is already terminal (a benign
+   * lost race).
    *
    * @param eventFactory builds the event for the allocated sequence, or {@code null} to transition
-   *     with no event at all (mirrors {@code RunLifecycleCoordinator#markStarting}, which
-   *     deliberately emits nothing). When present, the produced event must actually match the
-   *     transition being recorded - see {@code RunEventValidation#requireLifecycleEventMatches}.
+   *     with no event at all.
    * @throws NoSuchElementException if no run exists for {@code runId}.
    */
   @Override
@@ -204,16 +162,11 @@ public class JdbcRunStore implements RunLifecycleStore {
   }
 
   /**
-   * Appends exactly one {@code TEST_*}/{@code STEP_*} event under the same {@code SELECT ... FOR
-   * UPDATE} row lock as every other write here, without touching the run's own status, timestamps,
-   * or {@code version} - only {@code next_event_sequence} advances. A separate method from {@link
-   * #transitionIfNonTerminal} on purpose, per review: reusing an identity transition as a
-   * workaround would still run a full {@code UPDATE runs} (bumping {@code version} and rewriting
-   * every lifecycle column) for every single test/step event a run ever produces, which is wrong -
-   * this method's whole point is that a test/step event carries no lifecycle change at all. Returns
-   * empty, appending nothing, once the run is already terminal - a run's canonical timeline may
-   * carry no event after its own {@code RUN_FINISHED} (mirrors {@code RunEventAppender}'s own
-   * already-closed-journal contract, the same invariant enforced here instead).
+   * Appends exactly one {@code TEST_*}/{@code STEP_*} event under the same row lock as every other
+   * write here, without touching the run's status, timestamps, or {@code version} - only {@code
+   * next_event_sequence} advances. Kept separate from {@link #transitionIfNonTerminal}: an identity
+   * transition would still run a full {@code UPDATE runs} for every test/step event, which carries
+   * no lifecycle change at all. Returns empty, appending nothing, once the run is already terminal.
    *
    * @throws NoSuchElementException if no run exists for {@code runId}.
    */
@@ -239,9 +192,9 @@ public class JdbcRunStore implements RunLifecycleStore {
   }
 
   /**
-   * D4.1 - the {@code AND cleanup_started_at IS NULL} filter is what makes a tombstoned run
-   * disappear from every public read path (including SSE replay, which resolves its runId through
-   * this same method) immediately once cleanup starts, not only once its files are actually gone.
+   * The {@code cleanup_started_at IS NULL} filter is what makes a tombstoned run disappear from
+   * every public read path (including SSE replay) immediately once cleanup starts, not only once
+   * its files are actually gone.
    */
   @Override
   public Optional<Run> findById(String runId) {
@@ -253,12 +206,7 @@ public class JdbcRunStore implements RunLifecycleStore {
     return matches.stream().findFirst().map(row -> row.toRun(selectedTestsFor(runId)));
   }
 
-  /**
-   * Loads every run's own selected tests in one query, not one query per run - a review finding:
-   * the original version called {@link #selectedTestsFor} once per row, an N+1 pattern that gets
-   * expensive as run history grows, for a query this class's own contract already documents as
-   * "sort/list everything."
-   */
+  /** Loads every run's own selected tests in one query, not one query per run (avoids N+1). */
   @Override
   public List<Run> findAll() {
     List<RunRow> rows =
@@ -275,16 +223,10 @@ public class JdbcRunStore implements RunLifecycleStore {
   }
 
   /**
-   * D2.5 review [P2] - the {@code IN (?, ?, ?)} form this originally used bound the three statuses
-   * as query parameters, which a generic prepared-statement plan (PostgreSQL's own planner may
-   * switch to one after a handful of executions) cannot reliably prove implies {@code
-   * idx_runs_non_terminal}'s own literal predicate - partial-index predicate matching happens
-   * during planning, against constant expressions, not parameter placeholders (see PostgreSQL's own
-   * partial indexes documentation). Since these three statuses are a fixed part of the recovery
-   * protocol, never caller-supplied, this literal {@code IN} list matches the migration's predicate
-   * exactly instead, so the planner can always use the index regardless of which plan it picks.
-   * Verified via {@code EXPLAIN} against a real table (see {@code
-   * RunRecoveryServiceJdbcAcceptanceTest}).
+   * A literal {@code IN} list, not bound query parameters: PostgreSQL's partial-index predicate
+   * matching happens during planning against constant expressions, not placeholders, so a bound-
+   * parameter form can't reliably prove it implies {@code idx_runs_non_terminal}'s predicate. These
+   * three statuses are fixed, never caller-supplied, so a literal list is safe here.
    */
   private static final String NON_TERMINAL_STATUS_LIST =
       "'"
@@ -296,11 +238,9 @@ public class JdbcRunStore implements RunLifecycleStore {
           + "'";
 
   /**
-   * D4.1 - the exact literal set {@code chk_runs_cleanup_only_when_terminal}/{@code
-   * chk_runs_artifacts_purge_only_when_terminal} already enforce as a DB invariant, built from
-   * {@link RunStatus#isTerminal()} so it can never silently drift out of sync with that enum - same
-   * reasoning as {@link #NON_TERMINAL_STATUS_LIST} being a literal, not a bound parameter (see that
-   * field's own Javadoc on partial-index predicate matching).
+   * The literal set {@code chk_runs_cleanup_only_when_terminal} already enforces as a DB invariant,
+   * built from {@link RunStatus#isTerminal()} so it can't drift out of sync with that enum - same
+   * literal-not-bound-parameter reasoning as {@link #NON_TERMINAL_STATUS_LIST}.
    */
   private static final String TERMINAL_STATUS_LIST =
       java.util.Arrays.stream(RunStatus.values())
@@ -309,11 +249,9 @@ public class JdbcRunStore implements RunLifecycleStore {
           .collect(java.util.stream.Collectors.joining(", "));
 
   /**
-   * D2.5 - backs {@code RunRecoveryService}'s startup pass with a dedicated, indexed query (see
-   * {@code idx_runs_non_terminal}) instead of {@link #findAll} plus a Java-side filter, which would
-   * otherwise load every historical run's own {@code run_selected_tests} just to discard the
-   * terminal majority of them - recovery time would then grow with the whole run history instead of
-   * with the (normally tiny) number of runs actually left to recover.
+   * Backs {@code RunRecoveryService}'s startup pass with a dedicated, indexed query instead of
+   * {@link #findAll} plus a Java-side filter, so recovery time scales with the (normally tiny)
+   * number of runs left to recover, not the whole run history.
    */
   @Override
   public List<Run> findNonTerminal() {
@@ -327,11 +265,9 @@ public class JdbcRunStore implements RunLifecycleStore {
   }
 
   /**
-   * D2.3 - backs {@code RunEventBroker#replayAndSubscribe}'s replay half, reading from {@code
-   * run_events} instead of the file-backed journal. Deserializes each row's own {@code payload}
-   * (jsonb) back into a {@link RunnerEvent} via the same {@link ObjectMapper} every write goes
-   * through - the column values ({@code event_type}/{@code occurred_at}) are a secondary index, not
-   * re-parsed here, since the payload alone is the complete, authoritative record.
+   * Backs {@code RunEventBroker#replayAndSubscribe}'s replay half. Deserializes each row's {@code
+   * payload} (jsonb) via the same {@link ObjectMapper} every write uses - the column values are a
+   * secondary index, never re-parsed here.
    */
   @Override
   public List<RunnerEvent> readEventsAfter(String runId, long afterSequence) {
@@ -352,7 +288,7 @@ public class JdbcRunStore implements RunLifecycleStore {
     return matches.stream().findFirst();
   }
 
-  /** D4.1 - see {@code RunLifecycleStore}'s own Javadoc for the exact eligibility rule. */
+  /** See {@code RunLifecycleStore}'s Javadoc for the exact eligibility rule. */
   @Override
   public List<String> findEligibleForCleanup(Instant now, Duration maxAge, int maxCount) {
     Instant cutoff = now.minus(maxAge);

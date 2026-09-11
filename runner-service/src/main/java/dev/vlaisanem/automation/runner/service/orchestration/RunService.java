@@ -20,6 +20,7 @@ import dev.vlaisanem.automation.runner.service.exception.RunLogNotFoundException
 import dev.vlaisanem.automation.runner.service.exception.RunNotFoundException;
 import dev.vlaisanem.automation.runner.service.exception.RunQueueFullException;
 import dev.vlaisanem.automation.runner.service.exception.RunnerDegradedException;
+import dev.vlaisanem.automation.runner.service.filesystem.RunFilePaths;
 import dev.vlaisanem.automation.runner.service.logging.MdcScope;
 import dev.vlaisanem.automation.runner.service.metrics.RunnerMetrics;
 import dev.vlaisanem.automation.runner.service.process.ProcessLauncher;
@@ -32,6 +33,7 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -55,38 +57,29 @@ import org.springframework.stereotype.Service;
 
 /**
  * Orchestrates a run's whole lifecycle: validates the request, queues it behind a single active run
- * (a bounded, single-worker executor - see {@link RunnerProperties#queueCapacity()}), launches the
- * Gradle process, tracks it for cancellation, and records the terminal outcome.
+ * (a bounded, single-worker executor), launches the Gradle process, tracks it for cancellation, and
+ * records the terminal outcome.
  *
  * <p>{@code cancel()} and the background {@code executeRun()} task run on different threads and can
- * race to finalize the same run (e.g. a run finishes normally the instant before a cancel request
- * arrives, or vice versa). Every terminal transition here goes through {@link
- * RunLifecycleCoordinator}, which tolerates losing that <em>specific</em> race (backed by {@code
- * RunLifecycleStore#transitionIfNonTerminal}) without swallowing every other kind of failure:
- * {@code executeRun}'s single try/catch/finally boundary converts anything else (a genuine bug, a
- * store error, an unexpected exception from any collaborator) into a best-effort terminal {@code
- * ERROR}. The {@code finally} block independently guarantees {@code activeRuns} cleanup; failure of
- * the fallback store transition is logged rather than allowed to hide the original execution error.
+ * race to finalize the same run. Every terminal transition goes through {@link
+ * RunLifecycleCoordinator}, which tolerates losing that race; {@code executeRun}'s own
+ * try/catch/finally converts any other failure into a best-effort terminal {@code ERROR} and always
+ * cleans up {@code activeRuns}.
  *
- * <p>A {@link ProcessTerminationException} means a process from some run is <em>known</em> to still
- * be alive despite our best effort to kill it. Simply freeing the single-worker slot at that point
- * would let a new run execute concurrently with that survivor, breaking single-run isolation - so
- * the runner instead enters {@link Availability#DEGRADED}, rejecting new submissions, until a
- * background reaper confirms every survivor has actually exited. {@code submit()}'s own
- * availability check only rejects a <em>new</em> submission early and can go stale by the time the
- * worker actually gets to it; the real guarantee lives in the process-lifecycle gate shared by
- * launch and termination. No new process can start while termination is unresolved, and a failed
- * termination registers its degradation incident before releasing that gate. Multiple independent
- * incidents are tracked separately, so recovery from one cannot hide a survivor from another.
+ * <p>A {@link ProcessTerminationException} means a process is known to still be alive despite our
+ * best effort to kill it. The runner enters {@link Availability#DEGRADED} and rejects new
+ * submissions until a background reaper confirms every survivor has exited - enforced by the shared
+ * process-lifecycle gate between launch and termination, not just {@code submit()}'s (staleness-
+ * prone) early check. Multiple incidents are tracked separately, so one recovering can't hide
+ * another.
  */
 @Service
 public class RunService {
 
   private static final Logger log = LoggerFactory.getLogger(RunService.class);
 
-  // Bounds cancel()'s wait for executeRun's process()-publish (see ActiveRun#awaitProcessPublished)
-  // - only ever needs to cover a single ingestor-thread startup, so this is a generous, fixed
-  // safety margin rather than an operational tuning knob.
+  // Bounds cancel()'s wait for executeRun's process()-publish - a fixed safety margin, not a
+  // tuning knob, since it only ever needs to cover one ingestor-thread startup.
   private static final Duration PROCESS_PUBLISH_WAIT_TIMEOUT = Duration.ofSeconds(2);
 
   private enum Availability {
@@ -121,15 +114,12 @@ public class RunService {
   private final Map<String, ActiveRun> activeRuns = new ConcurrentHashMap<>();
   private final AtomicReference<Availability> availability =
       new AtomicReference<>(Availability.AVAILABLE);
-  // Identity semantics are deliberate: two exceptions may describe overlapping process handles,
-  // but each failed termination is an independently reaped incident. Access is guarded exclusively
-  // by processLifecycleLock.
+  // Identity semantics: two exceptions may share overlapping process handles, but each failed
+  // termination is its own reaped incident. Guarded exclusively by processLifecycleLock.
   private final Set<ProcessTerminationException> degradationIncidents =
       Collections.newSetFromMap(new IdentityHashMap<>());
-  // Linearizes process launch against the whole termination attempt, not merely the later
-  // AVAILABLE -> DEGRADED state flip. A failed termination is registered while this lock is still
-  // held, closing the window in which another worker could otherwise launch before learning that a
-  // survivor exists.
+  // Linearizes process launch against the whole termination attempt (not just the later
+  // AVAILABLE->DEGRADED flip), since a failed termination is registered while still held.
   private final Object processLifecycleLock = new Object();
 
   public RunService(
@@ -165,16 +155,14 @@ public class RunService {
     this.artifactMaxBytes = properties.artifactMaxBytes();
     this.runMaxTotalArtifactBytes = properties.runMaxTotalArtifactBytes();
     this.manifestMaxBytes = properties.manifestMaxBytes();
-    // D4.2 - derived, not independently configured: the producer's own pre-trace-capture
-    // free-space floor must be at least as conservative as "the submit-time guard's own floor,
-    // plus room for one more artifact" - never a smaller, independently-drifting number.
+    // Derived, not independently configured, so it can never drift below the submit-time floor
+    // plus room for one more artifact.
     this.traceCaptureMinFreeBytes = properties.diskMinFreeBytes() + properties.artifactMaxBytes();
     this.executor =
         new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity));
-    // D4.3.2 - named for what this single-worker executor actually reflects (STARTING + RUNNING +
-    // in-flight cleanup), not assumed to equal "runs with RunStatus.RUNNING" - reads the
-    // executor's own already-tracked state directly, no separate counter to keep in sync.
+    // Reflects STARTING + RUNNING + in-flight cleanup, not just RunStatus.RUNNING - read directly
+    // from the executor's own state, with no separate counter to keep in sync.
     Gauge.builder("runner.executor.active", executor, ThreadPoolExecutor::getActiveCount)
         .register(meterRegistry);
     Gauge.builder("runner.executor.queued", executor, e -> e.getQueue().size())
@@ -245,38 +233,50 @@ public class RunService {
   }
 
   /**
-   * D4.3 - used by {@code RunnerAvailabilityHealthIndicator} to report a temporary, self-resolving
-   * {@code OUT_OF_SERVICE} (the background reaper clears this on its own once every known-surviving
-   * process actually exits) rather than {@code DOWN} - never throws the way {@link #submit} does
-   * when degraded.
+   * Non-throwing query (unlike {@link #submit}) - used by {@code RunnerAvailabilityHealthIndicator}
+   * to report {@code OUT_OF_SERVICE} rather than {@code DOWN}.
    */
   public boolean isDegraded() {
     return availability.get() == Availability.DEGRADED;
   }
 
   public Path processLog(String runId) {
-    find(runId);
-    Path logFile = processLogPath(runId);
-    if (!Files.isRegularFile(logFile)) {
+    final String safeRunId;
+    try {
+      safeRunId = RunFilePaths.requireSafeRunId(runId);
+    } catch (IllegalArgumentException exception) {
       throw new RunLogNotFoundException(runId);
     }
-    return logFile;
+    find(safeRunId);
+    Path logFile;
+    try {
+      logFile = processLogPath(safeRunId);
+      if (Files.isSymbolicLink(logFile)
+          || !Files.isRegularFile(logFile, LinkOption.NOFOLLOW_LINKS)) {
+        throw new IOException("process log is missing or is not a regular file");
+      }
+      Path realLogsDir = logsDir.toRealPath();
+      Path realLogFile = logFile.toRealPath();
+      if (!realLogFile.startsWith(realLogsDir)
+          || !Files.isRegularFile(realLogFile, LinkOption.NOFOLLOW_LINKS)) {
+        throw new IOException("process log resolves outside the configured logs directory");
+      }
+      return realLogFile;
+    } catch (IllegalArgumentException | IOException exception) {
+      throw new RunLogNotFoundException(safeRunId);
+    }
   }
 
   /**
-   * Requests cancellation. For a run whose process has already been launched, this synchronously
-   * sends the kill signal but returns whatever status the run happens to have at that instant - the
-   * worker thread's {@code executeRun} still has to notice the process died and record the terminal
-   * transition, so the returned {@link Run} may still show {@code RUNNING} even though cancellation
-   * is already in flight. A caller that needs the confirmed final status should poll {@link #find}.
-   * A run that is successfully removed from the executor queue is the one case this returns
-   * synchronously as {@code CANCELLED}, since no worker or process remains to acknowledge it.
+   * Requests cancellation. If the process has already launched, this sends the kill signal
+   * synchronously but returns whatever status the run has at that instant - {@code executeRun}
+   * still has to notice and record the terminal transition, so the result may still show {@code
+   * RUNNING}; poll {@link #find} for the confirmed final status. A run removed from the executor
+   * queue is the one case returned synchronously as {@code CANCELLED}.
    */
   public Run cancel(String runId) {
-    // D4.3.3 - the whole method's own body stays unchanged below; only wrapped so every log
-    // statement it (or anything it calls synchronously, e.g. terminateWithinLifecycleGate) emits
-    // on this HTTP thread carries the real runId as a structured MDC field, not just embedded in
-    // whatever text a given message happens to include.
+    // Wrapped so every log statement this (or anything it calls, e.g.
+    // terminateWithinLifecycleGate) emits carries the real runId as a structured MDC field.
     return MdcScope.withMdc("runId", runId, () -> cancelInternal(runId));
   }
 
@@ -295,34 +295,29 @@ public class RunService {
     if (process == null) {
       Runnable queuedTask = activeRun.queuedTask().getAndSet(null);
       if (queuedTask != null) {
-        // Still sitting in the queue - nothing to kill, just remove it. If executor.remove() loses
-        // this race (the worker just claimed the same task), executeRun()'s own cancelRequested
-        // check before launching (see its own comment) records CANCELLED momentarily on its own;
-        // nothing further for this call to do.
+        // Still queued - nothing to kill, just remove it. If executor.remove() loses the race (the
+        // worker just claimed it), executeRun's own cancelRequested check records CANCELLED itself.
         if (executor.remove(queuedTask)) {
           try {
             lifecycle.finishIfLive(
                 runId, RunStatus.CANCELLED, null, "Run was cancelled while queued", Instant.now());
           } finally {
-            // The executor no longer owns this task, so active tracking must be released even when
-            // the terminal event cannot be persisted and finishIfLive propagates that failure.
+            // The executor no longer owns this task, so tracking must be released even if
+            // finishIfLive fails to persist the terminal event.
             activeRuns.remove(runId, activeRun);
           }
         }
         return find(runId);
       }
-      // queuedTask was already null: the worker had already cleared it at executeRun's own start
-      // and is actively launching this run - process() publish is only instants away (see
-      // executeRun's own publish-ordering comment). Wait briefly so this call can still terminate
-      // the process synchronously, rather than silently no-op'ing and leaving termination to the
-      // worker's own best-effort post-publish check, which cannot report a result back to this
-      // caller - this is exactly the window a real crash-recovery review round found could let a
-      // concurrent cancel() lose the race and return a stale RUNNING/STARTING status.
+      // queuedTask already null: the worker cleared it at executeRun's start and is actively
+      // launching, so the process publish is only instants away. Wait briefly to still terminate
+      // it synchronously here, rather than silently no-op'ing and returning a stale
+      // RUNNING/STARTING status.
       process = activeRun.awaitProcessPublished(PROCESS_PUBLISH_WAIT_TIMEOUT);
     }
     if (process == null) {
-      // Genuinely never launched (e.g. cancelled/errored while waiting on availability, or
-      // start() itself failed) - the worker already recorded its own terminal status.
+      // Never launched (cancelled/errored while waiting on availability, or start() failed) - the
+      // worker already recorded its own terminal status.
       return find(runId);
     }
     try {
@@ -332,13 +327,10 @@ public class RunService {
           .addKeyValue("runId", runId)
           .setCause(exception)
           .log("Could not terminate the process tree for cancelled run");
-      // This run's own worker may be stuck arbitrarily long inside awaitCompletion() on the same
-      // (unkillable) process, so its ingestor (if one was ever started) may still be forwarding
-      // legitimately-occurred test events. Stopping and draining it here, from this thread,
-      // before closing the canonical journal below - rather than leaving that to the worker,
-      // which might not get there for a while - is what stops the emergency finalization from
-      // racing ahead of, and silently dropping, those events. Idempotent if the worker later
-      // drains the same ingestor itself.
+      // The worker may be stuck indefinitely in awaitCompletion() on the same unkillable process,
+      // so its ingestor may still be forwarding events. Drain it here, before closing the journal
+      // below, so the emergency finalization can't race ahead and silently drop them. Idempotent
+      // if the worker later drains the same ingestor itself.
       ListenerEventIngestor runIngestor = activeRun.ingestor().get();
       if (runIngestor != null) {
         runIngestor.stopAndAwaitFinished(ingestionDrainTimeout);
@@ -352,12 +344,10 @@ public class RunService {
                 + exception.survivingPids(),
             Instant.now());
       } finally {
-        // This run's own worker is likely still blocked inside awaitCompletion() on this same
-        // (unkillable) process and would otherwise not notice for up to the full configured
-        // timeout. Cleanup is unconditional even if recording ERROR fails: the journal failure
-        // is propagated, but must not strand the only worker. interruptWorkerIfAttached() is
-        // synchronized against that worker's own detach, so this can never land on a different
-        // run's worker after this one finishes and the pool thread gets reused (see ActiveRun).
+        // The worker is likely still blocked in awaitCompletion() on the same unkillable process
+        // and would otherwise not notice for the full timeout - interrupt it unconditionally, even
+        // if recording ERROR above failed. interruptWorkerIfAttached() is synchronized against
+        // detach, so this can't land on a different run's worker after thread-pool reuse.
         activeRun.interruptWorkerIfAttached();
       }
     }
@@ -376,8 +366,8 @@ public class RunService {
     try {
       activeRun.queuedTask().set(null);
       if (activeRun.cancelRequested().get()) {
-        // The worker won the race to take this task from the queue before cancel() could remove it;
-        // it therefore owns the terminal acknowledgement even though no process was launched.
+        // The worker won the race to claim this task before cancel() could remove it, so it owns
+        // the terminal acknowledgement even though no process was launched.
         lifecycle.finishIfLive(
             runId,
             RunStatus.CANCELLED,
@@ -402,36 +392,28 @@ public class RunService {
               selectedTests);
       process = awaitAvailableThenStart(runId, activeRun, command);
       if (process == null) {
-        // Already recorded a terminal status (CANCELLED while waiting, or ERROR from a start()
-        // failure) inside the helper - nothing left to do.
+        // Already recorded a terminal status (CANCELLED while waiting, or ERROR from start()
+        // failing) inside the helper - nothing left to do.
         return;
       }
 
-      // Started only once RUN_STARTED is confirmed durable - never before, or a TEST_* event
-      // already sitting in the raw file could be forwarded (and canonically sequenced) by the
-      // ingestor thread before this thread's own RUN_STARTED append wins the race. The tailer
-      // always reads from byte 0, so nothing already written before this point is lost by waiting.
+      // Started only once RUN_STARTED is durable - otherwise a TEST_* event already in the raw
+      // file could be forwarded by the ingestor before RUN_STARTED wins the sequencing race. The
+      // tailer reads from byte 0, so nothing written before this point is lost by waiting.
       boolean stillLive = lifecycle.markRunning(runId, Instant.now());
       if (stillLive) {
         ingestor = ingestorFactory.start(runId);
-        // Attached before activeRun.process() is published just below - never after - so cancel()
-        // on a different thread can never observe this run's process without also being able to
-        // find and drain its ingestor. Without that ordering, a cancellation racing in right after
-        // publish but before this line could see a live process, fail to terminate it, find no
-        // ingestor yet, and close the canonical journal while the ingestor (started moments later)
-        // is still forwarding legitimately-occurred test events into it.
+        // Attached before activeRun.process() is published, never after, so cancel() on another
+        // thread can never see this run's process without also being able to find and drain its
+        // ingestor - otherwise a cancel racing in between publish and this line could close the
+        // journal while the ingestor is still forwarding events into it.
         activeRun.ingestor().set(ingestor);
       }
       activeRun.publishProcess(process);
-      // Checked immediately after publish - not before it, and only once, not twice. From the
-      // instant activeRun.process() becomes visible, cancel() on a different thread can act on it
-      // directly; this check is what covers every cancellation that arrived any time earlier
-      // (queued before launch, during awaitAvailableThenStart, or during markRunning/ingestor
-      // setup above), when the process was not yet visible to cancel() at all. Checking before
-      // publish instead - or checking twice, once before and once after - would leave exactly the
-      // gap between that earlier check and this publish unmonitored by either side: cancel() could
-      // not yet see the process, and this thread would not check again, so a cancellation landing
-      // in that gap would only be noticed once awaitCompletion's full timeout elapsed.
+      // Checked once, immediately after publish: this covers every cancellation that arrived
+      // earlier (queued, during awaitAvailableThenStart, or during the setup above), before the
+      // process was visible to cancel() at all. Any other placement leaves a gap where neither
+      // side notices until awaitCompletion's full timeout elapses.
       if (activeRun.cancelRequested().get()) {
         terminateWithinLifecycleGate(process);
       }
@@ -442,10 +424,9 @@ public class RunService {
         // nothing left to record, and no ingestor was ever started to clean up.
         return;
       }
-      // Stopped/drained before this run's own RUN_FINISHED below - so RUN_FINISHED is always the
-      // last event in a run's canonical timeline, never preceded by a TEST_* event forwarded after
-      // the fact. Safe to call even if cancel() already stopped this same ingestor concurrently
-      // (see above) - stopAndAwaitFinished is idempotent once the ingestor has actually finished.
+      // Stopped/drained before RUN_FINISHED below, so RUN_FINISHED is always the last event in a
+      // run's timeline. Safe even if cancel() already stopped this ingestor concurrently -
+      // stopAndAwaitFinished is idempotent once finished.
       IngestionResult ingestion = ingestor.stopAndAwaitFinished(ingestionDrainTimeout);
 
       RunStatus finalStatus = classify(outcome, activeRun.cancelRequested().get());
@@ -454,25 +435,22 @@ public class RunService {
           finalStatus == RunStatus.CANCELLED || finalStatus == RunStatus.TIMED_OUT;
 
       if (!ingestion.valid()) {
-        // A malformed line, a source-sequence gap/duplicate, or a wrong-runId/non-test event means
-        // the raw stream's own internal consistency broke down - trusting any classification built
-        // from it (including the process's own exit code) is no longer defensible.
+        // A malformed line, a sequence gap/duplicate, or a wrong-runId/non-test event means the
+        // raw stream's own consistency broke down - no classification built from it, including
+        // the exit code, is trustworthy any more.
         finalStatus = RunStatus.ERROR;
         detail = "Listener event ingestion failed: " + ingestion.detail();
       } else if (!ingestion.sawCompletionMarker()) {
         if (interruptedOutcome) {
-          // Expected: the JVM may have been killed before the listener closed its writer. The raw
-          // stream up to that point was still fully validated and forwarded above - only note that
-          // it may be incomplete, don't discard an otherwise-legitimate CANCELLED/TIMED_OUT result.
+          // Expected: the JVM may have been killed before the listener closed its writer. Note the
+          // stream may be incomplete, but don't discard an otherwise-legitimate result.
           detail =
               (detail == null ? "" : detail + "; ")
                   + "raw event stream is incomplete because the process was interrupted before the"
                   + " listener closed it";
         } else if (finalStatus == RunStatus.SUCCEEDED) {
-          // A SUCCEEDED classification (exit 0) is only trustworthy if the listener's own event log
-          // agrees the run actually completed - exit 0 with a missing marker means something went
-          // wrong that the exit code alone doesn't reveal. A non-zero (FAILED) exit already proves
-          // failure on its own and needs no such confirmation.
+          // A SUCCEEDED (exit 0) classification is only trustworthy if the event log agrees the
+          // run completed; a non-zero exit already proves failure without this check.
           finalStatus = RunStatus.ERROR;
           detail =
               "Process exited "
@@ -486,9 +464,8 @@ public class RunService {
     } catch (RuntimeException unexpected) {
       log.error("Run {} failed unexpectedly, marking it ERROR", runId, unexpected);
       if (ingestor != null) {
-        // Best-effort: the run is already being recorded as ERROR regardless of what (if anything)
-        // was ingested, but the ingestion thread must not be left running past this run's own
-        // lifecycle.
+        // Best-effort: the run is already being recorded ERROR regardless, but the ingestion
+        // thread must not outlive this run's own lifecycle.
         ingestor.stopAndAwaitFinished(ingestionDrainTimeout);
       }
       Process finalProcess = process;
@@ -520,14 +497,11 @@ public class RunService {
   }
 
   /**
-   * Blocks the worker - which has nothing useful to do until this run either launches or is
-   * cancelled/interrupted anyway - while the runner is {@link Availability#DEGRADED}, then
-   * atomically re-confirms {@link Availability#AVAILABLE} and launches under the same lifecycle
-   * gate used by termination. A termination already in progress therefore finishes first; if it
-   * fails, its degradation incident is visible before this method can reacquire the gate. The run
-   * stays visible as {@code STARTING} for as long as this waits. Returns {@code null} once a
-   * terminal status has already been recorded (cancelled while waiting, interrupted, or a {@code
-   * start()} failure) - the caller has nothing further to do in that case.
+   * Blocks the worker while the runner is {@link Availability#DEGRADED}, then atomically
+   * re-confirms {@link Availability#AVAILABLE} and launches under the same lifecycle gate used by
+   * termination, so an in-progress termination always finishes (and its incident becomes visible)
+   * first. Returns {@code null} once a terminal status was already recorded (cancelled,
+   * interrupted, or a {@code start()} failure) - the caller has nothing further to do.
    */
   private Process awaitAvailableThenStart(String runId, ActiveRun activeRun, List<String> command) {
     while (true) {
@@ -560,12 +534,10 @@ public class RunService {
           // go back and wait properly rather than launching into a now-unsafe window.
           continue;
         }
-        // A submit()-time disk check alone does not protect a run that was already queued: with a
-        // bounded queue and a single worker, several requests can each pass that earlier check
-        // before the first actually consumes disk. Re-checked here, immediately before the process
-        // that would actually consume it starts - unlike DEGRADED above, this never loops/retries:
-        // disk pressure isn't something this service resolves on its own schedule, so a queued run
-        // that can't safely start is terminalized now, not launched and not waited out.
+        // submit()-time's disk check alone doesn't protect an already-queued run: several requests
+        // can pass it before the first actually consumes disk. Re-checked here, right before
+        // launch; unlike DEGRADED above this never loops/retries - a run that can't safely start
+        // is terminalized now, not launched or waited out.
         DiskUsageSnapshot preLaunchUsage = diskUsageService.snapshot();
         if (preLaunchUsage.belowThreshold()) {
           metrics.recordDiskRejection(RunnerMetrics.DiskRejectionPhase.PRE_LAUNCH);
@@ -583,11 +555,9 @@ public class RunService {
           return null;
         }
         try {
-          // D4.2 - threaded down from this same RunnerProperties-sourced config so a
-          // dashboard-launched run's producer-side limits (enforced in the main framework/
-          // runner-listener child process) always agree with the consumer-side limits it's later
-          // checked against - a standalone Gradle invocation this service never launched falls
-          // back to TestConfig's own defaults instead.
+          // Threaded down from this same RunnerProperties config so a dashboard-launched run's
+          // producer-side limits always agree with the consumer-side limits checked later; a
+          // standalone Gradle invocation falls back to TestConfig's own defaults instead.
           Map<String, String> environment =
               Map.of(
                   "ARTIFACTS_DIR", reserveArtifactsDirectory(runId).toString(),
@@ -595,19 +565,14 @@ public class RunService {
                   "RUN_MAX_TOTAL_ARTIFACT_BYTES", String.valueOf(runMaxTotalArtifactBytes),
                   "MANIFEST_MAX_BYTES", String.valueOf(manifestMaxBytes),
                   "TRACE_CAPTURE_MIN_FREE_BYTES", String.valueOf(traceCaptureMinFreeBytes),
-                  // An environment variable, not a -D flag: it must reach
-                  // RunnerEventWriterRegistry inside the forked JUnit test-worker JVM itself, and
-                  // (unlike system properties) an env var set here on the spawned build JVM is
-                  // inherited automatically by that forked worker - no build.gradle forwarding
-                  // needed, unlike -Drunner.allureResultsDir= below.
+                  // An env var, not a -D flag, so it's inherited automatically by the forked JUnit
+                  // worker JVM that RunnerEventWriterRegistry runs in - no build.gradle forwarding
+                  // needed.
                   "RUNNER_RAW_EVENT_MAX_BYTES", String.valueOf(rawEventMaxBytes),
                   "ALLURE_ATTACHMENTS_ENABLED", "false",
-                  // D4.2 - video recording never goes through ArtifactManifestWriter at all (it is
-                  // written directly by Playwright on browser-context close, with no producer-side
-                  // cap/manifest-entry/delete-on-reject the way screenshots and traces get), so it
-                  // is not a supported artifact type on this execution path - forced off
-                  // regardless of the host environment's own RECORD_VIDEO setting, rather than
-                  // silently letting an unbounded video file bypass every D4.2 budget.
+                  // Video recording bypasses ArtifactManifestWriter's caps entirely (Playwright
+                  // writes it directly on context close), so it's forced off here regardless of
+                  // the host's own RECORD_VIDEO setting.
                   "RECORD_VIDEO", "false");
           return processLauncher.start(
               runId, command, repoRoot, processLogPath(runId), environment);
@@ -644,22 +609,16 @@ public class RunService {
   }
 
   /**
-   * Every run gets its own isolated subdirectory - never reused, never shared - so screenshots/
-   * traces from two different runs (sequential today; concurrent if this runner is ever scaled past
-   * its current single-worker executor) can never land in the same directory. {@code Files.exists}
-   * followed by a separate creation would leave a check-then-act race between two callers; {@code
-   * Files.createDirectory} is atomic - exactly one caller for a given {@code runId} ever succeeds,
-   * whether the race is against another run or (once {@code runId} is always a fresh UUID, as it is
-   * today) a genuine collision/reuse bug. On a start failure right after this succeeds, the
-   * now-empty directory is deliberately left in place - it belongs to that run's own {@code ERROR}
-   * outcome and may still gain a manifest/diagnostic entry later, so nothing here ever removes it.
+   * Every run gets its own isolated, never-reused subdirectory. Uses {@code Files.createDirectory}
+   * (atomic) rather than exists-then-create, so exactly one caller for a given {@code runId} ever
+   * succeeds. Left in place on a later start failure - it belongs to that run's {@code ERROR}
+   * outcome and may still gain a diagnostic entry.
    */
-  // Package-private, not private: RunServiceTest exercises the reservation directly (see
-  // reservesADistinctArtifactsDirectoryPerRun) - triggering every case (first caller wins a genuine
-  // race, not just a UUID collision) through the full async submit() flow isn't deterministic.
+  // Package-private so RunServiceTest can exercise the reservation race directly, since triggering
+  // it through the full async submit() flow isn't deterministic.
   Path reserveArtifactsDirectory(String runId) throws IOException {
     Files.createDirectories(artifactsRootDir);
-    Path dir = artifactsRootDir.resolve(runId);
+    Path dir = RunFilePaths.artifactsDirectory(artifactsRootDir, runId);
     try {
       return Files.createDirectory(dir);
     } catch (FileAlreadyExistsException exception) {
@@ -669,7 +628,7 @@ public class RunService {
   }
 
   private Path processLogPath(String runId) {
-    return logsDir.resolve(runId + ".log");
+    return RunFilePaths.processLog(logsDir, runId);
   }
 
   /**

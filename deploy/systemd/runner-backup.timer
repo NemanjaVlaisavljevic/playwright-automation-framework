@@ -1,22 +1,19 @@
-# D4.6 - daily trigger for runner-backup.service. Chosen over cron per the user's own explicit D4.5
-# review-round preference: Persistent=true catches a run missed while the host was down (a plain cron
-# entry silently skips it until the next scheduled minute), a real per-run timeout lives on the
-# paired .service unit, the unit's own exit status is unambiguous (`systemctl status
-# runner-backup.service`), and every run's output lands in journald for free (`journalctl -u
-# runner-backup.service`) - no separate log file/rotation to manage.
+# Daily trigger for runner-backup.service. Chosen over cron: Persistent=true catches a run missed
+# while the host was down (a plain cron entry silently skips it until the next scheduled minute),
+# a real per-run timeout lives on the paired .service unit, the unit's exit status is unambiguous
+# (`systemctl status runner-backup.service`), and every run's output lands in journald for free.
 [Unit]
 Description=Daily timer for runner-backup.service (D4.5)
 
 [Timer]
-# 03:15 - a plausible low-traffic window for a single-admin portfolio deployment; adjust to whatever
-# the real host's own actual low-traffic hours are. In the server's local time by default - pin an
-# explicit UTC schedule instead (`OnCalendar=*-*-* 03:15:00 UTC`) if the host's timezone might change.
+# 03:15 - a plausible low-traffic window for a single-admin portfolio deployment; adjust to the
+# real host's actual low-traffic hours. Server's local time by default - pin an explicit UTC
+# schedule instead (`OnCalendar=*-*-* 03:15:00 UTC`) if the host's timezone might change.
 OnCalendar=*-*-* 03:15:00
-# Runs the missed backup as soon as the host is back up if it was off/asleep through 03:15 - the
-# whole reason this is a systemd timer and not a plain cron entry.
+# Runs the missed backup as soon as the host is back up if it was off/asleep through 03:15.
 Persistent=true
-# Spreads real-world load if this unit file is ever reused across more than one host - harmless,
-# a no-op difference for a single-host deployment.
+# Spreads real-world load if this unit file is ever reused across more than one host - a no-op
+# for a single-host deployment.
 RandomizedDelaySec=300
 
 [Install]

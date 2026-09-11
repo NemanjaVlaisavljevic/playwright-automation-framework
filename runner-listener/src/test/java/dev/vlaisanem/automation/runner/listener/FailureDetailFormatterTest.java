@@ -15,8 +15,7 @@ class FailureDetailFormatterTest {
 
   @Test
   void fallsBackToJustTheExceptionClassWhenThereIsNoMessage() {
-    // The exception is never thrown, so its stack trace is effectively empty/irrelevant here -
-    // this only asserts the first line carries no ": <message>" suffix, not the whole string.
+    // Only asserts the first line carries no ": <message>" suffix, not the whole string.
     String detail = FailureDetailFormatter.format(new IllegalStateException());
 
     assertThat(detail.split("\n", 2)[0]).isEqualTo("java.lang.IllegalStateException");
@@ -70,9 +69,7 @@ class FailureDetailFormatterTest {
 
   @Test
   void redactsASetCookieHeaderValueEntirelyIncludingLaterAttributes() {
-    // A real Set-Cookie value contains ';' as part of the value itself (separating Path/HttpOnly/
-    // etc from the actual cookie pair), not a boundary to an unrelated field - every attribute
-    // after
+    // A real Set-Cookie value contains ';' as part of the value itself, so every attribute after
     // the first ';' must be redacted too, not just the first cookie pair.
     String detail =
         FailureDetailFormatter.format(

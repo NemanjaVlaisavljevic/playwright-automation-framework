@@ -48,10 +48,9 @@ public class GradleProcessRunner implements ProcessLauncher {
       Path outputFile,
       Map<String, String> environment)
       throws IOException {
-    // Built and populated BEFORE the output file is opened below - putAll() can throw (a null map,
-    // or - platform-dependently - an invalid variable name/value) and must not leave an open file
-    // handle behind if it does (observed live on Windows: a leaked handle keeps the log file locked
-    // for the rest of the JVM's life).
+    // Built and populated before the output file is opened below - putAll() can throw (a null map,
+    // or an invalid variable name/value), and must not leave an open file handle behind if it does
+    // (a leaked handle keeps the log file locked for the rest of the JVM's life on Windows).
     ProcessBuilder builder =
         new ProcessBuilder(command).directory(workingDirectory.toFile()).redirectErrorStream(true);
     builder.environment().putAll(environment);
@@ -99,18 +98,11 @@ public class GradleProcessRunner implements ProcessLauncher {
   }
 
   /**
-   * Iterative collect-and-kill: a single snapshot (even taken twice) cannot fully protect against a
-   * descendant that spawns its own child moments before dying and getting reparented away - once
-   * reparented, it is no longer visible through {@code process.descendants()} at all. Discovery
-   * (via the root AND every still-alive already-known handle, which can reveal a grandchild the
-   * root's own view misses) and the matching kill signal both repeat on every poll tick of the wait
-   * itself - see {@link #allDeadWithin} - not just once per pass, so a process that only appears
-   * mid-wait is still caught, and a fresh discovery-and-kill always immediately precedes the check
-   * that decides success. Each pass still always kills the root only after every currently-known
-   * descendant, but does not guarantee an ordering among the descendants themselves (e.g. a
-   * grandchild before its own child) - {@code known} preserves discovery order, not tree depth.
-   * This narrows the race rather than eliminating it - a Windows Job Object / POSIX process group
-   * would be the airtight fix, deferred as a deliberate follow-up rather than attempted here.
+   * Iterative collect-and-kill: a single snapshot can miss a descendant that spawns its own child
+   * and gets reparented away moments later. {@link #allDeadWithin} re-discovers and re-kills on
+   * every poll tick, not just once, so a process that appears mid-wait is still caught. This
+   * narrows the race rather than eliminating it - a Windows Job Object / POSIX process group would
+   * be the airtight fix, deferred as a follow-up.
    */
   @Override
   public void terminate(Process process) {
@@ -144,10 +136,9 @@ public class GradleProcessRunner implements ProcessLauncher {
   }
 
   /**
-   * Adds any not-yet-known descendant of {@code process}, or of any still-alive already-known
-   * handle, into {@code known} (keyed by PID to dedupe). Scanning every known-alive handle's own
-   * descendants too - not just the root's - is what can still catch a grandchild after its
-   * immediate parent has already been reparented away from {@code process}'s view.
+   * Adds any not-yet-known descendant of {@code process}, or of any still-alive known handle, into
+   * {@code known} (keyed by PID). Scanning every known handle's own descendants, not just the
+   * root's, is what still catches a grandchild reparented away from {@code process}'s view.
    */
   private void discoverNewDescendants(Process process, Map<Long, ProcessHandle> known) {
     process.descendants().forEach(handle -> known.putIfAbsent(handle.pid(), handle));
@@ -157,11 +148,9 @@ public class GradleProcessRunner implements ProcessLauncher {
   }
 
   /**
-   * Waits up to {@code timeout} for everything in {@code known} (plus {@code process} itself) to
-   * die, re-discovering descendants and re-applying {@code killEverything} on every poll tick - not
-   * just once at entry - so a process that appears only during the wait is still found and killed,
-   * and the very last discovery-and-kill always happens immediately before the final aliveness
-   * check, whichever way it comes out.
+   * Waits up to {@code timeout} for everything in {@code known} (plus {@code process}) to die,
+   * re-discovering descendants and re-applying {@code killEverything} on every poll tick so a
+   * process that appears mid-wait is still found and killed.
    */
   private boolean allDeadWithin(
       Process process, Map<Long, ProcessHandle> known, Duration timeout, Runnable killEverything) {
@@ -259,11 +248,9 @@ public class GradleProcessRunner implements ProcessLauncher {
   }
 
   /**
-   * Test seam, mirroring {@code RunEventHubTest}'s own protected-method-override pattern - a
-   * normal, successful drain never itself logs anything observable from the drainer thread (the two
-   * log statements above only fire on an I/O error), so this is the only way to prove {@code runId}
-   * is really set in this thread's own MDC at the point production code relies on it, without
-   * forcing an artificial failure just to manufacture a log line to observe.
+   * Test seam - a successful drain logs nothing observable from the drainer thread, so this is the
+   * only way to verify {@code runId} is set in this thread's MDC without forcing an artificial
+   * failure.
    */
   void afterDrainerThreadMdcEstablished() {}
 }

@@ -105,10 +105,9 @@ class CustomTestSelectionValidatorTest {
   }
 
   /**
-   * Regression test for a review's finding: the map-building step used to overwrite a duplicate
-   * catalog {@code testKey} silently (last one wins) instead of failing fast - defense-in-depth for
-   * a corrupt/hand-edited catalog reaching this far despite {@code TestCatalogContentValidator}
-   * already guarding {@code TestCatalogService} against exactly this.
+   * A duplicate catalog {@code testKey} must fail fast rather than silently keep one (last one
+   * wins) - defense-in-depth for a corrupt/hand-edited catalog, even though {@code
+   * TestCatalogContentValidator} already guards {@code TestCatalogService} against this.
    */
   @Test
   void failsFastOnADuplicateTestKeyInTheCatalogItselfInsteadOfSilentlyKeepingOne() {

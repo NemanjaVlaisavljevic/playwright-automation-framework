@@ -16,52 +16,29 @@ import java.util.logging.Logger;
 
 /**
  * Appends {@link RunnerEvent}s as JSON Lines to a single file, one JSON object per line, assigning
- * each event's sequence number itself. {@link #write} is safe to call from multiple threads
- * concurrently - this project runs test classes concurrently (see junit-platform.properties), so
- * JUnit Platform can invoke listener callbacks for different tests on different threads at the same
- * time.
+ * each event's sequence number itself. {@link #write} is thread-safe (JUnit Platform can invoke
+ * listener callbacks for concurrent test classes on different threads); sequence assignment happens
+ * inside the same lock as the write, so numbers can never land on disk out of order.
  *
- * <p>Sequence assignment happens inside the same lock as the actual write - assigning it a step
- * earlier (e.g. an {@link AtomicLong} in the caller, read before calling {@link #write}) would let
- * two threads race between "take a sequence number" and "append to the file", so a lower sequence
- * number could physically land after a higher one on disk even though numbers stay unique.
+ * <p>Uses a hardcoded {@code "\n"} separator (not the platform one), since JSON Lines is consumed
+ * by other processes and a stray {@code "\r"} would corrupt a naive line-splitting reader. Opens
+ * with {@link StandardOpenOption#CREATE_NEW}, not {@code APPEND}: a runId must be unique per run,
+ * so an existing file means a duplicate/stale writer and should fail loudly rather than interleave
+ * or duplicate sequence numbers (depends on build.gradle's {@code maxParallelForks = 1}).
  *
- * <p>Uses a hardcoded {@code "\n"} line separator rather than the platform line separator, since
- * JSON Lines is a line-oriented format consumed by other processes - a stray {@code "\r"} on
- * Windows would corrupt the last field of every line for a naive line-splitting reader.
+ * <p>{@link #close()} creates {@code completionMarker} only once the writer closes cleanly - its
+ * existence is what tells a consumer the run's event log is actually complete, since a non-empty
+ * file alone doesn't prove the JVM didn't crash mid-write. A failed {@link #write} permanently
+ * "poisons" the writer: {@link #close()} still closes the file cleanly but skips the marker, since
+ * JUnit Platform only logs (never rethrows) an exception from a listener callback.
  *
- * <p>Opens with {@link StandardOpenOption#CREATE_NEW}, not {@code APPEND}: a runId is meant to be
- * unique per run, so a file that already exists means either two writers targeting the same runId
- * (this class's in-JVM lock cannot protect against a second, separate JVM process doing the same)
- * or a caller reusing a stale runId - both would otherwise silently interleave or duplicate
- * sequence numbers instead of failing loudly. See the build.gradle {@code maxParallelForks = 1}
- * guarantee this depends on.
- *
- * <p>{@link #close()} creates the given {@code completionMarker} file once the writer itself is
- * closed - a non-empty JSONL file alone does not prove the run actually finished (the JVM could
- * have crashed mid-write), so a consumer should require this marker before trusting the file as
- * complete. The marker path is taken explicitly rather than derived from {@code file} (e.g. by
- * suffixing {@code ".complete"}), since callers may want a marker name that does not simply extend
- * the data file's own name - see {@code RunnerEventTestExecutionListener}'s {@code raw/} layout. If
- * any {@link #write} call ever failed, the writer is permanently "poisoned": {@link #close()} still
- * closes the underlying file cleanly (so a caller can always close it safely) but deliberately
- * skips creating the marker, since JUnit Platform catches and merely logs an exception thrown from
- * a listener callback - without this, a failed write could be silently swallowed by JUnit while the
- * marker still claimed the run's event log was complete.
- *
- * <p>D4.2 - {@code maxBytes} bounds this stream's own growth. A naive cap that simply stopped
- * writing while still creating the normal {@code completionMarker} would defeat {@code
- * ListenerEventIngestor}'s own documented contract (its marker's mere existence is its
- * "unconditional promise that the raw stream is complete and internally consistent") - a run could
- * finish reporting success despite silently missing test/step events. Instead, the first write that
- * would breach the cap is dropped (logged once, not per dropped event) and {@link #close()} creates
- * a distinct {@code overflowMarker} in place of the normal {@code completionMarker} - a signal the
- * consumer must check for and treat as failure, never as a clean completion.
+ * <p>{@code maxBytes} bounds the stream's growth: the first write that would breach it is dropped
+ * (logged once, not per event) and {@link #close()} creates {@code overflowMarker} instead of
+ * {@code completionMarker} - a signal consumers must treat as failure, never a clean completion.
  */
 final class RunnerEventJsonlWriter implements AutoCloseable {
 
-  // java.util.logging, not slf4j - this module deliberately has no logging-framework dependency
-  // (it runs inside the main framework's own JVM, on the JDK's classpath alone).
+  // java.util.logging, not slf4j: this module has no logging-framework dependency of its own.
   private static final Logger log = Logger.getLogger(RunnerEventJsonlWriter.class.getName());
 
   private final ObjectMapper objectMapper;
@@ -88,11 +65,8 @@ final class RunnerEventJsonlWriter implements AutoCloseable {
     this.overflowMarker = overflowMarker;
     this.maxBytes = maxBytes;
     try {
-      // CREATE_NEW below only protects file. A stale/orphan completion marker left behind without
-      // its data file (e.g. a runId reused after manual cleanup that missed the marker) would
-      // otherwise let a brand new writer open cleanly while that marker still falsely claims it is
-      // already complete - checked explicitly, and before creating anything, so a rejected open
-      // never leaves a fresh data file behind either.
+      // CREATE_NEW on file alone doesn't catch a stale marker left behind without its data file -
+      // checked explicitly, before creating anything, so a rejected open leaves nothing behind.
       if (Files.exists(completionMarker)) {
         throw new FileAlreadyExistsException(
             completionMarker.toString(), null, "stale completion marker for " + file);
@@ -115,8 +89,7 @@ final class RunnerEventJsonlWriter implements AutoCloseable {
   void write(LongFunction<RunnerEvent> eventFactory) {
     synchronized (lock) {
       if (overflowed) {
-        // Already logged once, below, the first time this was hit - every later dropped event
-        // must stay silent, not spam a log line per event.
+        // Already logged once below; stay silent for every later dropped event.
         return;
       }
       try {

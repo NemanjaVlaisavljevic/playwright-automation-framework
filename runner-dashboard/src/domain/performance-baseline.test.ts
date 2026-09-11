@@ -3,15 +3,9 @@ import baselineJson from "../../public/performance/baseline.json";
 import { PerformanceBaseline } from "./performance-baseline";
 
 /**
- * D4.4.3b - contract-validation test: proves the actually-committed `public/performance/
- * baseline.json` parses through the real schema, field-for-field. This is deliberately separate
- * from `summarize-baseline-core.test.mjs`'s own golden-output test (which proves the *generator* is
- * correct/deterministic against a small fixture, independent of whatever the real file currently
- * contains) - this test instead proves the *currently committed* file is valid, independent of
- * whether the generator that produced it has since changed. Importing the real file directly (not a
- * fixture) is deliberate: a future edit to `baseline.json` that doesn't go through
- * `summarize-baseline.mjs` - or a schema change here that the real file no longer satisfies - must
- * fail this test immediately.
+ * Proves the actually-committed `public/performance/baseline.json` parses through the real schema.
+ * Separate from `summarize-baseline-core.test.mjs`'s golden-output test, which checks the
+ * generator against a fixture rather than the real committed file.
  */
 describe("PerformanceBaseline - contract validation", () => {
   it("parses the committed public/performance/baseline.json", () => {
@@ -35,10 +29,8 @@ describe("PerformanceBaseline - contract validation", () => {
   });
 
   it("every required (thresholdRequired) metric reports passed:true, never null or false", () => {
-    // A schema-level sanity check mirroring the generator's own fail-closed intent: this file can
-    // only ever be committed from a run where every gated metric genuinely passed, so `passed`
-    // should never be anything but `true` or `null` (the latter only for the small, deliberately
-    // ungated set - see scenario-configs.mjs's own `thresholdRequired: false` metrics).
+    // `passed` should never be `false` here: this file is only committed from a run where every
+    // gated metric passed. `null` is expected for the ungated metrics (`thresholdRequired: false`).
     const baseline = PerformanceBaseline.parse(baselineJson);
 
     for (const scenario of baseline.scenarios) {

@@ -24,11 +24,9 @@ reachable only via a real GitHub OAuth2 browser login that produces a session co
 (`docs/DEPLOYMENT_ARCHITECTURE.md` section 4). A `curl` command against an admin-only endpoint (disk
 usage, retention) needs that same session, extracted from a real logged-in browser.
 
-**Never put the session cookie or CSRF token in a `-b`/`-H` command-line argument** - a review
-finding: either would sit in the operator's own shell history, and briefly in the process list, for
-the duration of a real admin session. Use `curl`'s own `-K`/`--config` file instead - real curl
-functionality (verified directly: `Cookie`/`X-Xsrf-Token` headers both arrive correctly), not
-anything invented here:
+**Never put the session cookie or CSRF token in a `-b`/`-H` command-line argument** - either would
+sit in the operator's own shell history, and briefly in the process list, for the duration of a real
+admin session. Use `curl`'s own `-K`/`--config` file instead:
 
 1. Log in through the dashboard in a real browser ("Login with GitHub" control).
 2. Open browser devtools -> Application/Storage -> Cookies for the site, and copy the values of two
@@ -38,18 +36,12 @@ anything invented here:
 3. Write them into a locked-down, temporary curl config file - with an editor, not a shell command
    that would itself put the values on a command line or in history. Paste this whole block as one
    unit into an interactive shell - it runs in a **subshell** (`( ... )`) with `set -euo pipefail`, an
-   `EXIT`-only cleanup function, and separate `HUP`/`INT`/`TERM` handlers that actually `exit` (never
-   just a single `trap '...' EXIT HUP INT TERM`) - a review finding: `trap cleanup EXIT HUP INT TERM`
-   registers `cleanup` to *catch and handle* `HUP`/`INT`/`TERM` too, which replaces bash's own default
-   signal disposition (terminate the process) - after the handler returns, execution **continues with
-   the next command** instead of stopping, confirmed with a real `kill -INT` test against the
-   subshell's own PID showing `CONTINUED` printed after the signal. Against the cross-target restore
-   example below, a Ctrl-C
-   landing mid-`read -rsp` under the old pattern could delete the file, then let the script continue
-   straight into re-creating it with an **empty** password and attempting the restore anyway - cleanup
-   ran, but the interruption itself was silently swallowed. `set -euo pipefail` is also required in
-   every one of these blocks - without it, `curl -K ... | jq`'s own exit status is `jq`'s, not
-   `curl`'s, so a failed `curl` inside a pipeline can be masked by a successful `jq`:
+   `EXIT`-only cleanup function, and separate `HUP`/`INT`/`TERM` handlers that actually `exit` (never a
+   single `trap '...' EXIT HUP INT TERM`, which would catch those signals and let execution continue
+   with the next command instead of stopping - risking, e.g., a Ctrl-C mid-`read -rsp` deleting the
+   file and then continuing into recreating it with an empty value). `set -euo pipefail` is also
+   required - without it, `curl -K ... | jq`'s exit status is `jq`'s, not `curl`'s, so a failed `curl`
+   inside a pipeline can be masked by a successful `jq`:
    ```bash
    (
      set -euo pipefail
@@ -79,12 +71,10 @@ anything invented here:
    ```
    `"${EDITOR:-vi}" "$curl_config"` pauses the subshell for the operator to type the config contents
    above and save; `curl` then runs automatically once the editor exits. `HUP`/`INT`/`TERM` each
-   `exit` with the signal's own conventional exit code (128+signal, e.g. `130` for `SIGINT`) instead of
-   handling and continuing - `exit` itself then triggers the separate `EXIT` trap, so `cleanup()` still
-   always runs (deleting `$curl_config` and deregistering the trap before the operator's prompt
-   returns), but the script now genuinely stops instead of racing ahead into whatever command was
-   next. Every `curl -K ...` example elsewhere in this runbook (sections 8, 9) follows this same
-   subshell pattern, abbreviated there to just the two relevant config lines.
+   `exit` with the signal's own conventional exit code (128+signal, e.g. `130` for `SIGINT`), which
+   still triggers the `EXIT` trap so `cleanup()` runs, but stops the script instead of continuing.
+   Every `curl -K ...` example elsewhere in this runbook (sections 8, 9) follows this same subshell
+   pattern, abbreviated there to just the two relevant config lines.
 
 Cookie values expire with the session (4h idle timeout, `application.yml`'s own
 `server.servlet.session.timeout`) - repeat the login/copy step if a command starts returning `401`.
@@ -132,7 +122,7 @@ preserved anywhere once replaced - `git checkout` + rebuild (below) is the only 
 and it is only ever safe under the condition in the next paragraph.
 
 **A `git checkout` + rebuild rollback is only safe when the schema the new code already applied is
-backward-compatible with the older code being rolled back to** - a review finding. Every Flyway
+backward-compatible with the older code being rolled back to.** Every Flyway
 migration a bad deploy already ran (section 14) stays applied to the real database regardless of
 which application version is running afterward; Flyway has no notion of "roll a migration back," and
 an older application binary was never written against columns/constraints a later migration added. A
@@ -199,14 +189,13 @@ here means a *specific*, persistent problem, not random flakiness.
 - If the first message appears: fix Postgres reachability first (section 12) - nothing else about
   this failure mode is actionable until the DB read itself can succeed.
 - If the second message appears: it names the failing run id(s). **Never hand-write a `SQL UPDATE`
-  against `runs` to force it terminal** - a review finding: the recovery write
-  (`RunRecoveryService`/`RunLifecycleCoordinator#finishIfLive`) is not just a status column change,
-  it is one atomic transaction that *also* inserts the run's own `RUN_FINISHED` event, advances
-  `next_event_sequence`, and bumps the optimistic-lock `version` column together. A raw `UPDATE
-  runs SET status = 'ERROR' ...` skips all three: the next startup correctly stops retrying it (the
-  row is now terminal), but no `RUN_FINISHED` event ever exists for it, so any SSE client replaying
-  that run's history waits forever for a terminal event that will never arrive - trading one visible
-  failure (the crash-loop) for a quieter, worse one.
+  against `runs` to force it terminal.** The recovery write
+  (`RunRecoveryService`/`RunLifecycleCoordinator#finishIfLive`) is one atomic transaction that also
+  inserts the run's `RUN_FINISHED` event, advances `next_event_sequence`, and bumps the
+  optimistic-lock `version` column together. A raw `UPDATE runs SET status = 'ERROR' ...` skips all
+  three: the row becomes terminal so retries stop, but no `RUN_FINISHED` event ever exists, so any SSE
+  client replaying that run's history waits forever for a terminal event that will never arrive -
+  trading one visible failure (the crash-loop) for a quieter, worse one.
 
   The recovery write is a normal, constraint-checked transition - a failure here almost always means
   a genuine, specific data problem with that one row (get the full exception first, not just the
@@ -233,12 +222,11 @@ here means a *specific*, persistent problem, not random flakiness.
   correct path (real `RUN_FINISHED` event, real sequence/version bump).
 
   **If the specific problem cannot be identified and fixed this way, this is a genuine, currently
-  unclosed gap** - stated honestly rather than papered over with an unsafe workaround, the same way
-  section 4's rollback gap is: there is no supported "break-glass" tool today that can force a stuck
-  run terminal through the same atomic `RunLifecycleStore` path outside of a real, successful
-  `finishIfLive` call. Building one (an admin-only operation that performs the identical
-  transaction) is a legitimate future improvement; until it exists, a run stuck this way needs the
-  underlying data problem actually understood and fixed, not bypassed.
+  unclosed gap**: there is no supported "break-glass" tool today that can force a stuck run terminal
+  through the same atomic `RunLifecycleStore` path outside of a real, successful `finishIfLive` call.
+  Building one (an admin-only operation that performs the identical transaction) is a legitimate
+  future improvement; until it exists, a run stuck this way needs the underlying data problem actually
+  understood and fixed, not bypassed.
 
 **B. D3.2 fail-closed security startup failure** (`RunnerSecurityEnvironmentPostProcessor`,
 `AdminGithubAllowlist`) - look for `refusing to start` in the logs. Three distinct causes, all fixed
@@ -258,10 +246,9 @@ Both failure classes abort **before any listening socket opens** - this is delib
   *brand-new, empty* data directory; on the real, already-initialized `pgdata` volume it is silently
   ignored on every later start. Rotating it for real needs an actual password change inside Postgres
   itself, not just an env var edit - and **never a plain `ALTER USER ... WITH PASSWORD '<value>'`
-  one-liner** (a review finding): typing the real new password into a shell command leaves it sitting
-  in that shell's own history file and briefly visible in the process list (`ps`) to anyone else on
-  the host, and an apostrophe or other special character in the password would break the SQL string
-  entirely. `psql`'s own `\password` meta-command exists specifically to avoid both problems - it
+  one-liner**: typing the real new password into a shell command leaves it sitting in that shell's own
+  history file and briefly visible in the process list (`ps`), and a special character in the password
+  would break the SQL string entirely. `psql`'s own `\password` meta-command avoids both problems - it
   prompts twice, locally, and sends only the resulting hash, never the plaintext, as a SQL literal:
   1. Stop `runner-service` first (its own pooled connections stay valid through a password change,
      but a stopped app avoids any window where it might open a *new* connection with the
@@ -388,10 +375,10 @@ would do.
 
 Full design in `docs/DEPLOYMENT_ARCHITECTURE.md` section 7 - this section is only the *procedure*.
 
-**Routine backups** run automatically via a systemd timer, not cron (the user's own explicit D4.5
-review-round preference - `Persistent=true` catches a run missed while the host was asleep/down, a
-real per-unit timeout, an unambiguous unit exit status, and journald evidence for every run with no
-separate log file to manage). Three unit files, not two - `runner-backup-alert@.service` fires only
+**Routine backups** run automatically via a systemd timer, not cron: `Persistent=true` catches a run
+missed while the host was asleep/down, plus a real per-unit timeout, an unambiguous unit exit status,
+and journald evidence for every run with no separate log file to manage. Three unit files, not two -
+`runner-backup-alert@.service` fires only
 once the main unit's own bounded retries are genuinely exhausted (see below). Install once, on the
 real production host:
 ```bash
@@ -408,21 +395,18 @@ systemctl list-timers runner-backup.timer
 journalctl -u runner-backup.service --since "1 day ago"
 ```
 
-**A missed-run retry, and how failure actually gets noticed** - two review-round findings.
-`Persistent=true` above fires a missed backup right after the host boots, but Postgres itself may not
-be reachable at that exact moment yet; `runner-backup.service` now allows up to 5 total attempts
-(the initial run plus up to 4 restarts) within any rolling hour, 5 minutes apart
-(`Restart=on-failure`/`RestartSec=300`/`StartLimitIntervalSec`/`StartLimitBurst`) before giving up,
-rather than a single failed attempt
-silently waiting a full day for the next scheduled run. **journald alone is not an alert** - nothing
-pages an operator just because a log line exists. Once retries are genuinely exhausted,
+**A missed-run retry, and how failure actually gets noticed.** `Persistent=true` above fires a missed
+backup right after the host boots, but Postgres itself may not be reachable at that exact moment yet;
+`runner-backup.service` allows up to 5 total attempts (the initial run plus up to 4 restarts) within
+any rolling hour, 5 minutes apart (`Restart=on-failure`/`RestartSec=300`/`StartLimitIntervalSec`/
+`StartLimitBurst`) before giving up, rather than a single failed attempt silently waiting a full day
+for the next scheduled run. **journald alone is not an alert** - nothing pages an operator just
+because a log line exists. Once retries are genuinely exhausted,
 `OnFailure=runner-backup-alert@%n.service` fires a companion unit that today only logs at `crit`
-priority (`journalctl -p crit` surfaces it distinctly) - a real, deliberately minimal mechanism, not a
-full notification pipeline this project has no existing infrastructure for (the same "no paid
-monitoring service" stance D4.3.2 already took). `runner-backup-alert@.service`'s own header names two
-concrete, close-to-zero-infrastructure options worth adding if real paging matters: a dead-man's-switch
-ping service (a missing periodic "still working" ping is what actually alerts someone), or a webhook
-curl into whatever chat channel is already used day to day.
+priority (`journalctl -p crit` surfaces it distinctly) - deliberately minimal; there's no paging
+infrastructure in this project today. `runner-backup-alert@.service`'s own header names two
+close-to-zero-infrastructure options worth adding if real paging matters: a dead-man's-switch ping
+service, or a webhook curl into whatever chat channel is already used day to day.
 
 **A manual, one-off backup** (the identical command the timer itself runs):
 ```bash
@@ -431,11 +415,11 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.backup.yml 
 ```
 
 **Restore against the real production database - a full, ordered procedure, never just the one
-`restore.sh` command in isolation** (a review finding: running the restore alone, with
-`runner-service` still up, lets its own live traffic - HikariCP connections, an in-flight run write -
-race the destructive `pg_restore --clean` and corrupt the outcome). Always a deliberate, one-off
-invocation, never a standing service (the private `age` identity is mounted only for this one
-command, from wherever it is actually kept at rest - see section 7 above).
+`restore.sh` command in isolation.** Running the restore alone, with `runner-service` still up, lets
+its own live traffic - HikariCP connections, an in-flight run write - race the destructive
+`pg_restore --clean` and corrupt the outcome. Always a deliberate, one-off invocation, never a
+standing service (the private `age` identity is mounted only for this one command, from wherever it
+is actually kept at rest - see section 7 above).
 
 1. **Take a safety backup of the current (about-to-be-overwritten) state first** - even a restore
    being done *because* of a real incident should not destroy the last-known state without a way
@@ -451,12 +435,10 @@ command, from wherever it is actually kept at rest - see section 7 above).
 3. **Run the restore.** `restore.sh` refuses to guess "latest" (name the real object, e.g. via
    `rclone lsf` against the configured remote) and refuses a destructive restore into a non-empty
    target without an acknowledgment tied to the exact database and backup being restored. `restore.sh`
-   connects via the standard libpq `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD` variables, never
-   a connection-string argument (a review finding: an earlier version built a single
-   `TARGET_DATABASE_URL`/`DATABASE_URL` and parsed it with a hand-rolled regex - a raw `@`/`:`/`/`/`%`
-   character in a real password broke that parser outright, e.g. `p@ssword` was misparsed as password
-   `p` and host `ssword@postgres`; passing the five values directly, with no URL syntax to
-   disambiguate, removes that whole class of bug). Two cases:
+   connects via the standard libpq `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD` variables,
+   never a connection-string argument - a raw `@`/`:`/`/`/`%` character in a real password would break
+   URL parsing (e.g. `p@ssword` misparsed as password `p`, host `ssword@postgres`); passing the five
+   values directly removes that whole class of bug. Two cases:
    - **Restoring into the same production database** (the ordinary disaster-recovery case) - no
      override needed at all: `restore.sh` picks up `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/
      `PGPASSWORD` directly from the `backup` service's own ambient environment (the identical values
@@ -475,17 +457,13 @@ command, from wherever it is actually kept at rest - see section 7 above).
      Compose's own `run --env-from-file` (a real flag, not `-e`), never as a literal `-e` argument (the
      password would sit in the operator's own shell history and briefly in the process list). The real
      password still must never even be *typed* as one on a visible line: read it with `read -rsp` (a
-     real, silent, non-echoing prompt - only the `read` invocation itself, never the typed value, ever
+     silent, non-echoing prompt - only the `read` invocation itself, never the typed value, ever
      becomes a history line). Run the whole procedure inside a **subshell** (`( ... )`) with
      `set -euo pipefail`, an `EXIT`-only cleanup function, and separate `HUP`/`INT`/`TERM` handlers that
-     `exit` - never a single `trap '...' EXIT HUP INT TERM` (a review finding: that form makes the
-     `HUP`/`INT`/`TERM` handler *catch and handle* the signal, replacing bash's own default
-     terminate-on-signal behavior - execution then **continues with the next command** instead of
-     stopping, confirmed with a real `kill -INT` test against the subshell's own PID. Against this
-     exact procedure, a Ctrl-C landing
-     mid-`read -rsp` under the old pattern could delete `$target_env`, then continue straight into
-     re-creating it with an **empty** `PGPASSWORD` and attempting the restore anyway - cleanup ran, but
-     the interruption itself was silently swallowed):
+     `exit` - never a single `trap '...' EXIT HUP INT TERM`, which would catch those signals and let
+     execution continue with the next command instead of stopping (e.g. a Ctrl-C landing mid-`read -rsp`
+     could delete `$target_env`, then continue into recreating it with an **empty** `PGPASSWORD` and
+     attempting the restore anyway):
      ```bash
      (
        set -euo pipefail
@@ -583,8 +561,7 @@ runbook's own final acceptance checklist (section 13) includes measuring it for 
 ## 12. Postgres unavailable
 
 Readiness's own `db` check contributes to the aggregate status - it does **not** surface as its own
-visible component (section 5's own `show-details: never`/`show-components: never`; a review finding
-corrects an earlier, contradictory claim here that it did). A real Postgres outage means readiness
+visible component (section 5's own `show-details: never`/`show-components: never`). A real Postgres outage means readiness
 goes `DOWN` overall, with no component name attached - confirm the cause is really Postgres via logs
 and a direct connectivity check, not the readiness response body itself:
 ```bash
@@ -622,12 +599,11 @@ deployment genuinely done (mirrors the same round-based, real-command-and-real-o
 - [ ] A real backup -> restore drill against the real bucket (see section 10's own RPO/RTO note, and
       `docs/DEPLOYMENT_ARCHITECTURE.md` section 7's own "Required for the D5 acceptance pass" list) -
       not the local `rclone type=local` stand-in `BackupRestoreDrillTest` uses.
-- [ ] **The real systemd layer itself, not just the Compose command it runs** - a review finding:
-      D4.6's own verification ran `runner-backup.service`'s exact `ExecStart`/`ExecStopPost` command
-      lines directly (proving the backup mechanism works), but a genuine Docker-Desktop-on-Windows
-      environment limitation (no nested-container access to the real Docker socket - see
-      `docs/RELEASE_EVIDENCE.md`'s D4.6 review-round section) meant `systemctl` itself was never
-      actually exercised. This item is that missing piece, on the real Linux host where it is finally
+- [ ] **The real systemd layer itself, not just the Compose command it runs.** D4.6's verification ran
+      `runner-backup.service`'s exact `ExecStart`/`ExecStopPost` command lines directly (proving the
+      backup mechanism works), but Docker-Desktop-on-Windows has no nested-container access to the
+      real Docker socket, so `systemctl` itself was never exercised (see `docs/RELEASE_EVIDENCE.md`'s
+      D4.6 section). This item is that missing piece, on the real Linux host where it is finally
       possible:
       1. Install all three unit files (`runner-backup.service`, `runner-backup.timer`,
          `runner-backup-alert@.service` - section 10) for real via `systemctl enable --now`.

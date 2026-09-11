@@ -7,10 +7,9 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * `undefined` before a run has actually started (`startedAt` absent - still `QUEUED`), since
- * there's nothing to measure yet. Once started but not yet finished, measures against `now`
- * (defaults to `Date.now()`, overridable so this stays deterministic in tests) - this is what makes
- * a running row's duration keep advancing on each poll-driven re-render without a separate timer.
+ * `undefined` before a run has started. Once started but not finished, measures against `now`
+ * (defaults to `Date.now()`, overridable for tests), letting a running row's duration advance on
+ * each poll-driven re-render without a separate timer.
  */
 export function runDurationMs(
   run: { startedAt?: string; finishedAt?: string },

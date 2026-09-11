@@ -1,12 +1,10 @@
 package dev.vlaisanem.automation.runner.service.exception;
 
 /**
- * Thrown when a request reaches {@code POST /api/v1/runs} or the SSE subscribe endpoint before
- * {@code RunRecoveryService}'s one-time startup recovery pass has finished - see
- * docs/DEPLOYMENT_ARCHITECTURE.md's "Restart behavior" section: recovery must complete before the
- * service accepts any traffic, not run as a background task after startup, so a client can never
- * submit a new run or subscribe to one while a stale, still-{@code RUNNING}-looking run from before
- * the restart is still being rewritten to {@code ERROR} underneath it.
+ * Thrown when a request reaches the submit or SSE-subscribe endpoint before {@code
+ * RunRecoveryService}'s one-time startup recovery pass has finished (see
+ * docs/DEPLOYMENT_ARCHITECTURE.md "Restart behavior"). Recovery must complete before the service
+ * accepts traffic, so a client can't act on a stale run still being rewritten to {@code ERROR}.
  */
 public class RunnerRecoveringException extends RuntimeException {
 

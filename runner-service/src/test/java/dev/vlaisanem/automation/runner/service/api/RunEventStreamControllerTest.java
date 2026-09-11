@@ -42,20 +42,15 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * HTTP-contract tests for {@link RunEventStreamController}: status-code mapping and {@code
- * Last-Event-ID} parsing. The cleanup/atomicity guarantees the review asked for are proven
- * separately and deterministically in {@link DeferredSubscriptionHandleTest} and {@link
- * EmitterGuardTest} - Spring's {@code ResponseBodyEmitter.Handler} is package-private, so it cannot
- * be driven from a test in this package the way a live client connection would.
+ * HTTP-contract tests: status-code mapping and {@code Last-Event-ID} parsing. Cleanup/atomicity
+ * guarantees are proven separately and deterministically in {@link DeferredSubscriptionHandleTest}
+ * and {@link EmitterGuardTest}, since Spring's {@code ResponseBodyEmitter.Handler} is
+ * package-private and can't be driven from a test here.
  */
 @WebMvcTest(controllers = {RunEventStreamController.class, RunExceptionHandler.class})
 @EnableConfigurationProperties(RunnerProperties.class)
-// D3.3 - a real instance, not a MockitoBean: SseConnectionsPerIpTracker#tryAcquire is boolean, and
-// a Mockito mock would default it to false, silently rejecting every existing test here unless
-// explicitly stubbed true everywhere. The real component (only depends on the already-real
-// RunnerProperties bean above, plus a plain MeterRegistry for its D4.4.2b active-slots gauge -
-// see the nested TestMeterRegistryConfig below) behaves exactly as production does, with no such
-// pitfall.
+// Real instance, not a MockitoBean: SseConnectionsPerIpTracker#tryAcquire is boolean, and a mock
+// would default to false, silently rejecting every test here unless stubbed true everywhere.
 @Import({
   SseConnectionsPerIpTracker.class,
   RunEventStreamControllerTest.TestMeterRegistryConfig.class
@@ -68,12 +63,11 @@ class RunEventStreamControllerTest {
 
   @MockitoBean private RunEventBroker broker;
 
-  // D2.5 - requireRecoveryComplete() is a no-op on a plain Mockito mock (void method, nothing
-  // stubbed), so every test here proceeds exactly as it did before this dependency existed.
+  // requireRecoveryComplete() is a no-op on an unstubbed mock (void method), so existing tests
+  // are unaffected by default.
   @MockitoBean private RunRecoveryService recoveryService;
 
-  // D4.3.2 - recordSseRejection is void, so an unstubbed mock here is a safe no-op for every
-  // existing test, exactly like recoveryService above.
+  // recordSseRejection is void, so an unstubbed mock is a safe no-op, like recoveryService above.
   @MockitoBean private RunnerMetrics metrics;
 
   @Test
@@ -84,12 +78,10 @@ class RunEventStreamControllerTest {
   }
 
   /**
-   * Regression test for the D3.3 review finding: one client IP must not be able to occupy every
-   * global SSE slot - real {@code application.yml} default is 3 concurrent connections per IP. Uses
-   * a distinct, reserved-range test IP (not the shared {@code 127.0.0.1} MockMvc default every
-   * other test in this class uses, some of which never close their own connection and would
-   * otherwise leak a permanently-held slot into this test's own budget) so this test's limit state
-   * can never collide with theirs regardless of execution order.
+   * One client IP must not occupy every global SSE slot - {@code application.yml} defaults to 3
+   * concurrent connections per IP. Uses a distinct reserved-range test IP (not the shared {@code
+   * 127.0.0.1} MockMvc default other tests use, some of which never close their connection and
+   * could leak a slot) so this test's limit state can't collide with theirs.
    */
   @Test
   void theFourthConcurrentSseConnectionFromTheSameIpIsRejected() throws Exception {
@@ -189,23 +181,19 @@ class RunEventStreamControllerTest {
   }
 
   /**
-   * D4.4.2b - regression test for the real CI finding: a terminal run's own broker-side {@code
-   * onComplete} must release the per-IP slot immediately, without needing Spring's async servlet
-   * context to separately notice the emitter completed and invoke {@code onCompletion} - see {@code
-   * RunEventStreamController.SseRunEventSubscriber}'s own Javadoc for the full story. This test
-   * never triggers any servlet-level completion callback at all (MockMvc's {@code asyncStarted()}
-   * leaves the request genuinely still open) - the only thing that ever runs is the captured {@link
-   * RunEventSubscriber#onComplete()} itself, exactly mirroring what {@code RunEventHub}'s {@code
-   * Subscription.deliverLoop} calls once it delivers a run's final event.
+   * A terminal run's broker-side {@code onComplete} must release the per-IP slot immediately,
+   * without waiting for Spring's async servlet context to separately notice completion. This test
+   * never triggers a servlet-level callback (MockMvc's {@code asyncStarted()} leaves the request
+   * open) - only the captured {@link RunEventSubscriber#onComplete()} runs, mirroring what {@code
+   * RunEventHub}'s {@code Subscription.deliverLoop} calls on a run's final event.
    */
   @Test
   void aBrokerSideOnCompleteReleasesThePerIpSlotImmediately() throws Exception {
     Run run =
         Run.queued("run-1", Environment.PUBLIC, Suite.API, Instant.parse("2026-08-31T00:00:00Z"));
     when(runService.find("run-1")).thenReturn(run);
-    // A real replayAndSubscribe never returns null (see RunEventBroker's own contract) - stub it
-    // realistically so the DeferredSubscriptionHandle this test exercises actually has a
-    // subscription to close, exactly like production.
+    // replayAndSubscribe never returns null in production; stub it realistically so
+    // DeferredSubscriptionHandle has a subscription to close.
     when(broker.replayAndSubscribe(eq("run-1"), anyLong(), any()))
         .thenReturn(mock(RunEventSubscription.class));
 
@@ -215,8 +203,7 @@ class RunEventStreamControllerTest {
           .andExpect(request().asyncStarted());
     }
 
-    // The cap is now full - a 4th connection from the same IP is rejected, exactly as the
-    // sibling "theFourthConcurrentSseConnectionFromTheSameIpIsRejected" test already proves.
+    // The cap is now full; a 4th connection from the same IP is rejected.
     mockMvc
         .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
         .andExpect(status().isTooManyRequests());
@@ -226,19 +213,18 @@ class RunEventStreamControllerTest {
     verify(broker, times(3)).replayAndSubscribe(eq("run-1"), anyLong(), subscribers.capture());
     RunEventSubscriber firstSubscriber = subscribers.getAllValues().get(0);
 
-    // The broker decides this run's timeline is done and notifies the subscriber directly - no
-    // emitter/servlet callback is ever exercised by this test.
+    // The broker decides the run is done and notifies the subscriber directly; no emitter/servlet
+    // callback runs.
     firstSubscriber.onComplete();
-    // Idempotency: a second terminal notification (e.g. a real onError racing a real onComplete)
-    // must never free a second slot on top of the one already released above.
+    // Idempotency: a second terminal notification must never free a second slot.
     firstSubscriber.onComplete();
 
-    // Exactly one slot was released - one new connection from the same IP now succeeds...
+    // Exactly one slot was released: one new connection from the same IP now succeeds...
     mockMvc
         .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
         .andExpect(request().asyncStarted());
-    // ...but the cap is full again immediately after, proving the double onComplete() above
-    // never released a second slot.
+    // ...but the cap fills again immediately, proving the double onComplete() above didn't
+    // release a second slot.
     mockMvc
         .perform(get("/api/v1/runs/run-1/events").with(remoteAddr("203.0.113.9")))
         .andExpect(status().isTooManyRequests());
@@ -270,14 +256,11 @@ class RunEventStreamControllerTest {
   }
 
   /**
-   * Provides the plain {@link MeterRegistry} {@link SseConnectionsPerIpTracker} now needs for its
-   * {@code runner.sse.client_slots.active} gauge (D4.4.2b) - {@code @WebMvcTest} does not
-   * auto-configure Micrometer, and this slice has no need to assert on the metric itself (that is
-   * covered by {@code SseConnectionsPerIpTrackerTest}). {@code @TestConfiguration}, not a plain
-   * {@code @Configuration}: the latter gets misdetected as the slice's primary user configuration
-   * and silently suppresses {@code @WebMvcTest}'s own controller registration entirely - a real
-   * gotcha hit while writing this test (every request fell through to the default static-resource
-   * handler with no controller mapped at all, despite the context reporting a clean startup).
+   * Provides the plain {@link MeterRegistry} {@link SseConnectionsPerIpTracker} needs for its
+   * gauge; {@code @WebMvcTest} doesn't auto-configure Micrometer. Must be
+   * {@code @TestConfiguration}, not plain {@code @Configuration} - the latter gets misdetected as
+   * the slice's primary configuration and silently drops {@code @WebMvcTest}'s controller
+   * registration entirely.
    */
   @TestConfiguration
   static class TestMeterRegistryConfig {

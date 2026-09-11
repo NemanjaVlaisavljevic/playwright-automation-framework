@@ -40,14 +40,10 @@ import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
 
 /**
- * D2.3 cutover: rewritten against {@link FakeRunLifecycleStore} instead of the retired {@code
- * FileBackedRunEventJournal}. A real Postgres-backed run row is now a hard prerequisite for any
- * event (the {@code fk_run_events_run} foreign key the real schema enforces has no equivalent in
- * the old file journal, which could append to any {@code runId} with no prior record at all) -
- * every test here calls {@link RunEventBroker#queue} first for exactly that reason. The 300-event
- * and 260-event stress tests use {@link RunEventBroker#append} with {@code TEST_STARTED} events
- * (the append-only path, unbounded while a run stays non-terminal) rather than repeatedly "queuing"
- * the same run, which a real run can only do once.
+ * Every test here calls {@link RunEventBroker#queue} first because the real schema enforces a
+ * {@code fk_run_events_run} foreign key - an event cannot exist without a prior run row. The stress
+ * tests append repeated {@code TEST_STARTED} events via {@link RunEventBroker#append} rather than
+ * re-queuing, since a real run can only be queued once.
  */
 class RunEventBrokerTest {
 
@@ -98,13 +94,11 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Stress-test companion to {@link
-   * #replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered} - that test proves
-   * the atomicity guarantee deterministically; this one hammers the same guarantee under real
-   * concurrent load (300 racing appends) to catch anything a single deterministic interleaving
-   * could miss. A subscriber that starts via {@code replayAndSubscribe} while {@code append} calls
-   * are continuously racing on another thread must still receive every event exactly once, in
-   * order, with no gap and no duplicate.
+   * Stress companion to {@link
+   * #replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered}: hammers the same
+   * atomicity guarantee under real concurrent load (300 racing appends) instead of one
+   * deterministic interleaving. A subscriber must receive every event exactly once, in order, with
+   * no gap or duplicate.
    */
   @Test
   void replayAndSubscribeNeverMissesOrDuplicatesAnEventRacingConcurrently() throws Exception {
@@ -122,8 +116,8 @@ class RunEventBrokerTest {
               }
             });
 
-    // Let a handful of appends land first, so there is genuine history to replay, then subscribe
-    // while publishing continues concurrently on the other thread.
+    // Let a few appends land first for genuine replay history, then subscribe while publishing
+    // keeps racing on another thread.
     Thread.sleep(10);
     RunEventHubTest.RecordingSubscriber subscriber = new RunEventHubTest.RecordingSubscriber();
     broker.replayAndSubscribe("run-1", 0, subscriber);
@@ -139,13 +133,10 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Regression test for the review's finding: a slow-consumer disconnect is detected inside {@link
-   * RunEventHub.Subscription#offerLive}, on whatever thread calls {@link RunEventBroker#append} -
-   * here, this test's own thread. If the subscriber's {@code onError} callback ran synchronously on
-   * that path and threw, the exception would propagate out of {@code append} even though the event
-   * was already durably written to the store. Proving {@code append} never throws here, and that
-   * every appended event is still readable afterward, is what proves the callback is fully
-   * decoupled from the publisher.
+   * A slow-consumer disconnect is detected inside {@link RunEventHub.Subscription#offerLive}, on
+   * whatever thread calls {@link RunEventBroker#append}. If {@code onError} ran synchronously there
+   * and threw, the exception would escape {@code append} even though the event was already durably
+   * stored - this proves the callback is fully decoupled from the publisher.
    */
   @Test
   void aSubscriberErrorCallbackThatThrowsNeverFailsAppendOrCorruptsTheStore() throws Exception {
@@ -169,12 +160,10 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Deterministic replacement for a timing-based race test: a custom {@link RunLifecycleStore}
-   * blocks mid-read, while the broker's per-run lock is held, so this test can prove - not just
-   * hope - that a concurrent {@link RunEventBroker#append} cannot complete until the store read is
-   * released and {@code replayAndSubscribe} has registered the subscriber. Once released, the
-   * subscriber must see exactly the pre-existing replay event followed by the one concurrent live
-   * append, with no gap and no duplicate.
+   * A custom {@link RunLifecycleStore} blocks mid-read while the broker's per-run lock is held,
+   * proving deterministically that a concurrent {@link RunEventBroker#append} cannot complete until
+   * {@code replayAndSubscribe} has registered. Once released, the subscriber must see exactly the
+   * pre-existing replay event followed by the live append, with no gap or duplicate.
    */
   @Test
   void replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered() throws Exception {
@@ -215,9 +204,8 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Regression test for the review's finding: resuming from a sequence the store never produced (a
-   * client's {@code Last-Event-ID} claiming to have seen something that does not exist) must be
-   * rejected outright, not silently served as if it were {@code 0} or the latest.
+   * Resuming from a sequence the store never produced (a stale or bogus {@code Last-Event-ID}) must
+   * be rejected outright, not silently served as if it were {@code 0} or the latest.
    */
   @Test
   void replayAndSubscribeRejectsAnAfterSequenceAheadOfTheStore() {
@@ -231,7 +219,7 @@ class RunEventBrokerTest {
         .hasMessageContaining("1");
   }
 
-  /** Same finding, for a runId the store has no record of at all - not just a stale one. */
+  /** Same rule, for a runId the store has no record of at all - not just a stale sequence. */
   @Test
   void replayAndSubscribeRejectsAnAfterSequenceForAnUnknownRun() {
     RunEventBroker broker = newBroker();
@@ -242,9 +230,8 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Regression test for the review's finding: a run the store has no record of at all still accepts
-   * a resume point of {@code 0} (the "give me everything" sentinel) without being rejected as
-   * "ahead of the store" - {@code 0} is never ahead of anything.
+   * A run the store has no record of still accepts a resume point of {@code 0} (the "give me
+   * everything" sentinel) - {@code 0} is never ahead of anything.
    */
   @Test
   void replayAndSubscribeWithZeroIsNeverRejectedEvenForAnUnknownRun() {
@@ -256,9 +243,9 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Regression test for the review's finding: a client reconnecting exactly at a terminal run's
-   * last sequence has nothing left to replay and nothing more will ever be appended - the stream
-   * must complete immediately rather than sit open until the emitter's own timeout.
+   * A client reconnecting exactly at a terminal run's last sequence has nothing left to replay and
+   * nothing more will ever be appended - the stream must complete immediately, not sit open until
+   * the emitter's timeout.
    */
   @Test
   void replayAndSubscribeAtExactlyTheLatestTerminalSequenceCompletesImmediately() throws Exception {
@@ -307,13 +294,11 @@ class RunEventBrokerTest {
   }
 
   /**
-   * [P1] fix - {@code append} used to call {@code hub.publish} before artifact ingestion, and only
-   * after releasing the per-run lock: a client that invalidates its artifacts query the instant it
-   * observes {@code TEST_FAILED}/{@code TEST_ABORTED} over SSE could win that race and see an empty
-   * list, with no further chance to refresh before {@code RUN_FINISHED}. Proves the fix
-   * deterministically: a blocking {@link ArtifactIngestionService} holds ingestion open, and while
-   * it does, a subscriber already registered for live events must not have received the {@code
-   * TEST_FAILED} event yet - only once ingestion is released does the event actually arrive.
+   * {@code append} ingests artifacts before publishing the event, under the same lock - otherwise a
+   * client could observe {@code TEST_FAILED} over SSE and query artifacts before ingestion
+   * finished, seeing an empty list with no further refresh before {@code RUN_FINISHED}. A blocking
+   * {@link ArtifactIngestionService} proves the ordering: while ingestion is held open, a
+   * subscriber must not yet have received {@code TEST_FAILED}.
    */
   @Test
   void appendDoesNotPublishATestFailedEventUntilArtifactIngestionCompletes() throws Exception {
@@ -372,11 +357,10 @@ class RunEventBrokerTest {
   }
 
   /**
-   * None of this test class's scenarios ever append a {@code TEST_FAILED}/{@code TEST_ABORTED}
-   * event (only {@code TEST_STARTED}, via {@link #appendTestEvent}), so {@link RunEventBroker}'s
-   * own D2.4 artifact-ingestion hook never actually fires here - a real {@link
-   * ArtifactIngestionService} wired to an in-memory {@link FakeArtifactRepository} satisfies the
-   * constructor without needing a real manifest file or database.
+   * This test class only appends {@code TEST_STARTED} events, so {@link RunEventBroker}'s
+   * artifact-ingestion hook never fires; a real {@link ArtifactIngestionService} wired to an
+   * in-memory {@link FakeArtifactRepository} satisfies the constructor without needing a real
+   * manifest or database.
    */
   private ArtifactIngestionService noopArtifactIngestionService() {
     return new ArtifactIngestionService(
@@ -465,10 +449,9 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Test double that blocks inside {@link #ingestAvailableEntries} until released, so a test can
-   * deterministically prove {@link RunEventBroker#append}'s own ordering guarantee (ingest, then
-   * publish, under the same lock) - not just usually working out under timing that happens to favor
-   * it.
+   * Blocks inside {@link #ingestAvailableEntries} until released, so a test can deterministically
+   * prove {@link RunEventBroker#append}'s ordering guarantee (ingest then publish, under the same
+   * lock) rather than relying on timing.
    */
   private static final class BlockingArtifactIngestionService extends ArtifactIngestionService {
     private final CountDownLatch entered = new CountDownLatch(1);
@@ -491,12 +474,10 @@ class RunEventBrokerTest {
   }
 
   /**
-   * Test double that blocks inside {@code latestEvent} until released, so a test can
-   * deterministically prove the broker's per-run lock is actually held for the whole "read replay
-   * snapshot" step - not just usually working out under timing that happens to favor it. Blocks in
-   * {@code latestEvent} specifically because {@link RunEventBroker#replayAndSubscribe} calls that
-   * first, to validate the resume point against the current high-water mark before ever reading the
-   * replay batch.
+   * Blocks inside {@code latestEvent} until released, deterministically proving the broker's
+   * per-run lock is held for the whole "read replay snapshot" step. {@code latestEvent}
+   * specifically, because {@link RunEventBroker#replayAndSubscribe} calls it first to validate the
+   * resume point before reading the replay batch.
    */
   private static final class BlockingLifecycleStore implements RunLifecycleStore {
     private final RunLifecycleStore delegate;

@@ -81,10 +81,6 @@ describe("CustomTestPicker", () => {
     ).toBeInTheDocument();
   });
 
-  // Regression test for the review's requirement: refetchIntervalInBackground: true must actually
-  // be honored, not just present in the query options - a backgrounded tab (the common way a
-  // developer leaves this dashboard open across a backend restart) must still recover on its own
-  // rather than only once the tab regains focus.
   it("recovers automatically even while the tab is backgrounded", async () => {
     server.use(http.get("/api/v1/tests", () => HttpResponse.error()));
     const visibilitySpy = vi
@@ -113,9 +109,7 @@ describe("CustomTestPicker", () => {
     renderPicker();
     await screen.findByText("Admin can obtain a non-empty session token");
 
-    // Deliberately not "homepage" - HomePageTest's own *testKey* also matches that
-    // case-insensitively (search matches testKey too, see the next test), which would make this
-    // assertion pass for the wrong reason. "first three" only appears in this one display name.
+    // Not "homepage" - that also matches the testKey, which would pass for the wrong reason.
     await user.type(screen.getByLabelText("Search tests"), "first three");
 
     expect(

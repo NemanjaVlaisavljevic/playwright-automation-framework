@@ -32,33 +32,20 @@ public class OpenApiConfig {
   }
 
   /**
-   * {@code org.springframework.http.ProblemDetail} - used as the error-response schema across every
-   * 4xx/5xx response in this API - carries no Bean Validation / {@code @Schema} annotations of its
-   * own, so springdoc infers no {@code required} array for it at all, unlike {@link
-   * dev.vlaisanem.automation.runner.service.api.RunResponse} and {@link
-   * dev.vlaisanem.automation.runner.service.api.CapabilitiesResponse}, where that same gap was
-   * closed with an explicit {@code @Schema(requiredMode = REQUIRED)} directly on the record. There
-   * is no record to annotate here - {@code ProblemDetail} is a third-party framework class - so
-   * this customizer corrects the generated document after the fact instead.
+   * {@code org.springframework.http.ProblemDetail}, the error-response schema for every 4xx/5xx
+   * response, carries no Bean Validation/{@code @Schema} annotations of its own (it's a third-party
+   * class, so nothing to annotate), so springdoc infers no {@code required} array; this customizer
+   * corrects the generated document after the fact.
    *
-   * <p>{@code title}/{@code status}/{@code detail}/{@code instance} are marked required: every
-   * {@code RunExceptionHandler} branch builds its response via {@code
-   * ProblemDetail.forStatusAndDetail(status, detail)}, which always populates {@code title} (from
-   * the {@code HttpStatus} reason phrase) and {@code status}/{@code detail} explicitly; {@code
-   * instance} is populated by Spring MVC's own {@code ProblemDetail} handling from the request URI
-   * even though nothing in this codebase sets it explicitly - confirmed empirically against a real
-   * {@code 404} response (body: {@code {"detail":"...","instance":"/api/v1/runs/...
-   * ","status":404,"title":"Not Found"}}). {@code type} and {@code properties} are deliberately
-   * left optional: that same response has no {@code type} key at all (Spring omits the {@code
-   * about:blank} default rather than serializing it) and no {@code properties} key (empty extension
-   * map is omitted, not emitted as {@code {}}).
+   * <p>{@code title}/{@code status}/{@code detail}/{@code instance} are marked required since every
+   * {@code RunExceptionHandler} branch populates them via {@code ProblemDetail.forStatusAndDetail}.
+   * {@code type}/{@code properties} stay optional since Spring omits both keys rather than
+   * serializing a default/empty value.
    *
-   * <p>Also fixes {@code instance}'s format: springdoc maps the field's Java {@code java.net.URI}
-   * type to {@code format: uri} (an absolute-URI format), but RFC 7807 defines {@code instance} as
-   * a URI *reference*, and the value above ({@code /api/v1/runs/does-not-exist}) is relative.
-   * typed-openapi maps {@code format: uri} to Zod's {@code z.url()}, which rejects a relative path
-   * outright - output-validating a real error response would then throw. Clearing the format leaves
-   * a plain string, matching the value's actual URI-reference (not absolute-URI) semantics.
+   * <p>Also clears {@code instance}'s {@code format}: springdoc maps its {@code java.net.URI} type
+   * to {@code format: uri} (absolute-URI), but the actual value is a relative URI reference per RFC
+   * 7807, and typed-openapi maps {@code format: uri} to Zod's {@code z.url()}, which rejects a
+   * relative path - so output-validating a real error response would throw.
    */
   @Bean
   public OpenApiCustomizer problemDetailContractCustomizer() {

@@ -3,15 +3,9 @@ package dev.vlaisanem.automation.runner.service.exception;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 
 /**
- * Thrown when {@code artifacts.artifact_id}'s primary key already holds a row for an incoming
- * {@link ArtifactManifestEntry}, but that existing row's own fields do not match the incoming one
- * exactly - {@code ON CONFLICT (artifact_id) DO NOTHING}'s idempotency is only actually correct
- * when the "conflicting" write really is a re-read of the same entry, never when the same id
- * legitimately means two different things (a different {@code runId}, path, type, size, or any
- * other metadata field). Silently accepting the second write with {@code DO NOTHING} would durably
- * lose that second artifact's own metadata with no signal at all - this is deliberately its own
- * exception instead, caught and logged (never served to an HTTP client - ingestion is always a
- * background concern, not a request-path one) by {@code ArtifactIngestionService}.
+ * Thrown when an incoming {@link ArtifactManifestEntry} reuses an existing {@code artifact_id} but
+ * with different metadata, so {@code ON CONFLICT ... DO NOTHING} would silently drop it. Caught and
+ * logged by {@code ArtifactIngestionService}; never served to an HTTP client.
  */
 public class ArtifactIngestionConflictException extends RuntimeException {
 

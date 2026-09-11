@@ -83,11 +83,7 @@ class StepsTest {
     assertThat(steps.stepIdForFailure(failure)).isEqualTo(recorded.get(1).stepId());
   }
 
-  /**
-   * Same broken-writer protection as {@code run}, exercised through {@code call} directly - both
-   * share the exact same lifecycle (see {@link Steps#run}'s own Javadoc), so this proves that
-   * sharing actually holds rather than assuming it from {@code run}'s own coverage alone.
-   */
+  /** Same broken-writer protection as {@code run}, exercised through {@code call} directly. */
   @Test
   void aBrokenWriterOnCallStepFailedNeverReplacesTheOriginalFailure() {
     RuntimeException originalFailure = new RuntimeException("original assertion failure");
@@ -113,12 +109,8 @@ class StepsTest {
   }
 
   /**
-   * Regression test for a real review finding: a step's action can succeed and return a
-   * successfully-created managed resource (a {@code ManagedRoom}/{@code ManagedBooking}/etc.), but
-   * if reporting that success then throws, the caller's {@code try (ManagedRoom room =
-   * steps.call(...))} never even assigns {@code room} - so its try-with-resources can never close
-   * it. {@code call} must close an {@link AutoCloseable} result itself in that case, since it is
-   * the only place left that still can.
+   * If reporting a step's success fails, the caller's try-with-resources never assigns its result,
+   * so {@code call} must close an {@link AutoCloseable} result itself in that case.
    */
   @Test
   void aBrokenWriterOnStepPassedClosesAnAutoCloseableResultBeforeRethrowing() {
@@ -139,11 +131,7 @@ class StepsTest {
     assertThat(resource.closed).isTrue();
   }
 
-  /**
-   * If closing that same resource also fails, the close failure must not replace the original
-   * reporting failure that actually failed the step - same suppressed-exception pattern already
-   * used for a broken {@code STEP_FAILED} write.
-   */
+  /** A failure closing that resource must be attached as suppressed, not replace the original. */
   @Test
   void aFailureClosingTheResourceAfterABrokenStepPassedWriteIsAttachedAsSuppressed() {
     RuntimeException writerFailure = new RuntimeException("writer exploded");
@@ -168,11 +156,8 @@ class StepsTest {
   }
 
   /**
-   * Regression test for a real review finding: a real {@code ManagedRoom}/{@code ManagedBooking}/
-   * {@code ManagedMessage} throws {@link AssertionError} (not {@code RuntimeException}) on an
-   * unexpected cleanup status - catching only {@code Exception} in the cleanup helper would let
-   * that {@code AssertionError} escape and replace the reporting failure it was meant to be
-   * attached to, contradicting the documented suppressed-exception contract.
+   * A {@code Managed*} resource's close() can throw {@link AssertionError}, not just {@code
+   * RuntimeException}; that must also be attached as suppressed, not thrown in place.
    */
   @Test
   void aCloseFailureThatIsAnAssertionErrorIsAlsoAttachedAsSuppressedNotThrownInPlace() {
@@ -214,11 +199,7 @@ class StepsTest {
         .isSameAs(writerFailure);
   }
 
-  /**
-   * Proves {@code run} and {@code call} share one correlation map, not two independent ones - a
-   * step run via {@code run} and another via {@code call} in the same test must both resolve
-   * correctly.
-   */
+  /** Proves {@code run} and {@code call} share one correlation map, not two independent ones. */
   @Test
   void correlatesFailuresAcrossBothRunAndCallOnTheSameSteps() {
     List<RunnerEvent> recorded = new ArrayList<>();
@@ -233,7 +214,7 @@ class StepsTest {
             throw runFailure;
           });
     } catch (RuntimeException caught) {
-      // Deliberately swallowed - see the other correlation tests for why.
+      // Expected - correlation is checked below via stepIdForFailure.
     }
     try {
       steps.call(
@@ -242,7 +223,7 @@ class StepsTest {
             throw callFailure;
           });
     } catch (RuntimeException caught) {
-      // Deliberately swallowed too.
+      // Expected - correlation is checked below via stepIdForFailure.
     }
 
     assertThat(steps.stepIdForFailure(runFailure)).isNotNull();
@@ -251,12 +232,7 @@ class StepsTest {
         .isNotEqualTo(steps.stepIdForFailure(callFailure));
   }
 
-  /**
-   * Regression test for a real review finding: if the STEP_FAILED write itself throws (a broken
-   * writer, a full disk), the original assertion/application failure must still be what propagates
-   * - a reporting-infrastructure failure replacing it would hide the real cause of the test
-   * failure.
-   */
+  /** If the STEP_FAILED write itself throws, the original failure must still propagate. */
   @Test
   void aBrokenWriterOnStepFailedNeverReplacesTheOriginalFailure() {
     RuntimeException originalFailure = new RuntimeException("original assertion failure");
@@ -282,10 +258,8 @@ class StepsTest {
   }
 
   /**
-   * Regression test for a real review finding: a test that catches a step's own failure and then
-   * fails later for a completely different, unrelated reason must not have its artifact
-   * mis-attributed to that earlier, already-handled step - only the exact instance JUnit reports as
-   * the test's own execution exception may ever correlate to a step.
+   * A later, unrelated failure must not correlate to an earlier step failure that was already
+   * caught and handled.
    */
   @Test
   void doesNotCorrelateAnUnrelatedLaterFailureToAPreviouslyCaughtStepFailure() {
@@ -299,8 +273,7 @@ class StepsTest {
             throw stepFailure;
           });
     } catch (RuntimeException caught) {
-      // Deliberately swallowed here, mirroring a test that expects and handles this step's own
-      // failure before going on to fail for a separate reason below.
+      // Expected - the test handles this failure and continues.
     }
     RuntimeException unrelatedFailure = new RuntimeException("a later, unrelated assertion");
 
@@ -309,10 +282,8 @@ class StepsTest {
   }
 
   /**
-   * Regression test for a real review finding: correlation must remember every failed step's own
-   * instance, not just the most recent one. A test can catch step A's failure, then step B's, then
-   * go on to rethrow A's original instance later (e.g. "B was also expected to fail, but what
-   * actually ends the test is A") - that must still resolve back to A, not to B or to nothing.
+   * Correlation must remember every failed step's own instance, not just the most recent: catching
+   * step A's failure, then step B's, then rethrowing A's instance must still resolve to A.
    */
   @Test
   void correlatesEachCaughtStepFailureToItsOwnStepEvenWhenAnEarlierOneIsRethrownLater() {
@@ -328,7 +299,7 @@ class StepsTest {
             throw failureA;
           });
     } catch (RuntimeException caught) {
-      // Deliberately swallowed - mirrors a test that expects and handles step A's own failure.
+      // Expected - the test handles step A's failure and continues.
     }
     try {
       steps.run(
@@ -337,7 +308,7 @@ class StepsTest {
             throw failureB;
           });
     } catch (RuntimeException caught) {
-      // Deliberately swallowed too - both are "expected" failures at this point.
+      // Expected - the test handles step B's failure too.
     }
 
     String stepIdA = steps.stepIdForFailure(failureA);
@@ -346,8 +317,7 @@ class StepsTest {
     assertThat(stepIdA).isNotNull();
     assertThat(stepIdB).isNotNull();
     assertThat(stepIdA).isNotEqualTo(stepIdB);
-    // Rethrowing A's original instance last must still resolve to A, not to B (the most recent
-    // failure) or to nothing.
+    // Rethrowing A's original instance last must still resolve to A, not B.
     assertThat(steps.stepIdForFailure(failureA)).isEqualTo(stepIdA);
   }
 
@@ -357,10 +327,9 @@ class StepsTest {
   }
 
   /**
-   * Stands in for a {@code Managed*} test resource - records whether it was closed. Takes a plain
-   * {@code Runnable} rather than a single exception field so a test can make {@code close()} throw
-   * either a {@code RuntimeException} or an {@code AssertionError} (a real {@code ManagedRoom}/
-   * {@code ManagedBooking}/{@code ManagedMessage} close failure throws the latter, not the former).
+   * Stands in for a {@code Managed*} test resource - records whether it was closed. Takes a {@code
+   * Runnable} so a test can make {@code close()} throw either a {@code RuntimeException} or an
+   * {@code AssertionError}.
    */
   private static final class TrackingCloseable implements AutoCloseable {
     private final Runnable onClose;

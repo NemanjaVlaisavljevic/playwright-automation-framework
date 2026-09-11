@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.service.config.RunnerProperties;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
+import dev.vlaisanem.automation.runner.service.filesystem.RunFilePaths;
 import dev.vlaisanem.automation.runner.service.logging.MdcScope;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -22,51 +23,21 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * D2.4 - reads a run's {@code manifest.jsonl} (the one raw, original piece of evidence {@code
- * ArtifactManifestWriter} produces) and ingests any entries not yet in the {@code artifacts} table
- * into it, via {@link ArtifactRepository#ingest}. Called incrementally, not just once at the end -
- * see docs/DEPLOYMENT_ARCHITECTURE.md's "Artifacts must ingest incrementally" section for why a
- * bulk {@code RUN_FINISHED}-only import would regress the dashboard's already-proven early artifact
- * visibility (a failing test's screenshot/trace shown before the whole run finishes): {@link
- * dev.vlaisanem.automation.runner.service.events.RunEventBroker#append} calls {@link
- * #ingestAvailableEntries} <em>before</em> publishing a {@code TEST_FAILED}/{@code TEST_ABORTED}
- * event to any live subscriber (a review finding: a client that invalidates its artifacts query the
- * instant it observes that event over SSE must never be able to race ahead of this ingestion and
- * see an empty list with no further chance to refresh before {@code RUN_FINISHED}), and {@code
- * RunLifecycleCoordinator#finishIfLive} calls it once more as a final drain immediately before
- * {@code RUN_FINISHED} is recorded (covering a test that failed without a screenshot capture, or
- * any entry the last incremental pass hadn't yet seen).
+ * Reads a run's {@code manifest.jsonl} and ingests any new entries into the {@code artifacts} table
+ * via {@link ArtifactRepository#ingest}. Called incrementally, not just once at the end, so a
+ * failing test's screenshot/trace is visible before the whole run finishes; always re-reads the
+ * whole manifest and relies on {@code ingest}'s own idempotency rather than tracking an offset.
  *
- * <p>Always re-reads the whole manifest and relies on {@link ArtifactRepository#ingest}'s own
- * idempotency, rather than tracking a byte/line offset itself - the same manifest entry may
- * legitimately be re-read by both an incremental pass and the final drain, and re-parsing a whole
- * run's manifest (bounded by how many artifacts one run can produce) is cheap enough that tracking
- * an offset would only add complexity for no real gain.
- *
- * <p><strong>Never throws</strong> - a read/parse/database failure here must never prevent the
- * lifecycle event that triggered it (the {@code TEST_FAILED}/{@code TEST_ABORTED} event still gets
- * appended and published; {@code RUN_FINISHED} still gets recorded) from proceeding; every failure
- * is logged, and {@link #ingestAvailableEntries}'s own {@link ArtifactIngestionOutcome} return
- * value tells the caller which happened.
- *
- * <p><strong>A failed final ({@code runTerminal}) drain is not silently forgotten</strong> (a
- * review finding): it durably flags the run via {@link ArtifactRepository#markIngestionIncomplete},
- * and a bounded background reconciliation pass (started by {@link #startReconciliation()}, a
- * {@code @PostConstruct} hook - deliberately not scheduled from the constructor itself, so a test
- * that constructs this class directly with {@code new}, bypassing Spring, never gets a live
- * background thread it has no way to shut down again) periodically retries every currently-flagged
- * run, up to {@link #MAX_RECONCILIATION_ATTEMPTS} times each, clearing the flag via {@link
- * ArtifactRepository#markIngestionComplete} the moment a retry actually succeeds. A run that still
- * fails after every bounded attempt stays flagged permanently - a genuine, durably visible
- * data-integrity signal ({@code ArtifactService}/{@code ArtifactController} expose it rather than
- * silently reporting "zero artifacts"), not an infinite retry loop against a manifest that will
- * never recover (a deleted artifacts directory, for instance).
+ * <p>Never throws: a read/parse/database failure here must not block the lifecycle event that
+ * triggered it. A failed final ({@code runTerminal}) drain is durably flagged via {@link
+ * ArtifactRepository#markIngestionIncomplete} and retried by a bounded background reconciliation
+ * loop (up to {@link #MAX_RECONCILIATION_ATTEMPTS} times); a run that never recovers stays flagged
+ * as a visible data-integrity signal rather than retried forever.
  */
 @Component
 public class ArtifactIngestionService {
 
   private static final Logger log = LoggerFactory.getLogger(ArtifactIngestionService.class);
-  private static final String MANIFEST_FILE_NAME = "manifest.jsonl";
   private static final Duration RECONCILIATION_INTERVAL = Duration.ofSeconds(30);
   private static final int MAX_RECONCILIATION_ATTEMPTS = 5;
 
@@ -94,9 +65,8 @@ public class ArtifactIngestionService {
   }
 
   /**
-   * Starts the bounded background reconciliation loop - a {@code @PostConstruct} hook, not
-   * constructor logic, so only a real Spring-managed instance ever gets a live background thread;
-   * see this class's own Javadoc for why a test-constructed instance must not.
+   * A {@code @PostConstruct} hook, not constructor logic, so a test that constructs this class
+   * directly with {@code new} never gets a live background thread it can't shut down.
    */
   @PostConstruct
   public void startReconciliation() {
@@ -113,27 +83,24 @@ public class ArtifactIngestionService {
   }
 
   /**
-   * @param runTerminal mirrors {@link ArtifactManifestReader#read}'s own parameter: {@code false}
-   *     for every incremental pass (the writer may still be mid-append), {@code true} only for the
-   *     final drain (and its own later reconciliation retries), called after the run's own process
-   *     has already exited and its manifest can no longer grow. Only a {@code true} call ever marks
-   *     or clears {@link ArtifactRepository#markIngestionIncomplete}/{@link
-   *     ArtifactRepository#markIngestionComplete} - an incremental pass's own failure always has a
-   *     following attempt (another incremental pass, or the final drain) that can still succeed on
-   *     its own, so it needs no separate durable tracking of its own.
+   * @param runTerminal {@code false} for an incremental pass (the writer may still be mid-append),
+   *     {@code true} only for the final drain and its reconciliation retries. Only a {@code true}
+   *     call marks or clears the ingestion-incomplete flag; an incremental pass's failure always
+   *     has a following attempt that can still succeed on its own.
    */
   public ArtifactIngestionOutcome ingestAvailableEntries(String runId, boolean runTerminal) {
     try {
-      Path manifestFile = artifactsRootDir.resolve(runId).resolve(MANIFEST_FILE_NAME);
+      Path runRoot = RunFilePaths.artifactsDirectory(artifactsRootDir, runId);
+      if (Files.isSymbolicLink(runRoot)) {
+        throw new ArtifactManifestCorruptException(
+            runId, "run artifacts directory must not be a symbolic link: " + runRoot);
+      }
+      Path manifestFile = RunFilePaths.artifactManifest(artifactsRootDir, runId);
       List<ArtifactManifestEntry> entries =
           manifestReader.read(manifestFile, runId, runTerminal, manifestMaxBytes);
-      // D4.2 - a real anomaly detector, not routine size enforcement: the producer (the main
-      // automation suite) already deletes an oversized artifact before ever recording it in the
-      // manifest, so a real/manifested size mismatch here can only mean a bug, a race, or
-      // tampering - exactly as untrustworthy as a duplicate artifactId or a runId mismatch the
-      // manifest reader itself already treats as corruption, so this poisons the whole pass the
-      // same way (never auto-deletes the file - unlike the producer's own reject path, an anomaly
-      // here is worth investigating, not silently cleaned up).
+      // The producer already deletes an oversized artifact before recording it in the manifest,
+      // so a real/manifested size mismatch here can only mean a bug, a race, or tampering; treated
+      // as manifest corruption, and the file is never auto-deleted since it's worth investigating.
       for (ArtifactManifestEntry entry : entries) {
         Path resolved = ArtifactFileResolver.resolve(artifactsRootDir, runId, entry);
         long realSize;
@@ -155,11 +122,8 @@ public class ArtifactIngestionService {
                   + " bytes on disk but the manifest claims "
                   + entry.sizeBytes());
         }
-        // D4.2 - the producer is a genuine trust boundary, not this service's own guarantee: an
-        // oversized file that somehow reached disk (a producer bug, a bypassed/older client) must
-        // never be served just because its own manifest entry happens to agree with its real size.
-        // runner-service independently enforces the same limit it advertises, rather than only
-        // trusting the child process to have enforced it.
+        // Independently enforces the per-artifact limit rather than trusting the producer: an
+        // oversized file must not be served just because its manifest entry agrees with its size.
         if (realSize > artifactMaxBytes) {
           throw new ArtifactManifestCorruptException(
               runId,
@@ -181,10 +145,8 @@ public class ArtifactIngestionService {
       }
       return ArtifactIngestionOutcome.SUCCEEDED;
     } catch (RuntimeException e) {
-      // D4.3.3 review finding - runId as a real structured/ECS field, not only interpolated into
-      // the message text, so a reconciliation-pass failure (this method's other caller, on its own
-      // dedicated background thread) is just as searchable/correlatable as an incremental-pass
-      // failure on the run's own worker thread.
+      // runId as a structured/ECS field, not only interpolated into the message, so a
+      // reconciliation-pass failure is just as searchable as an incremental-pass failure.
       log.atWarn()
           .addKeyValue("runId", runId)
           .setCause(e)
@@ -202,42 +164,30 @@ public class ArtifactIngestionService {
   }
 
   /**
-   * One reconciliation pass: retries every run {@link
-   * ArtifactRepository#findRunIdsWithIncompleteIngestion} currently reports, up to {@link
-   * #MAX_RECONCILIATION_ATTEMPTS} times each. Package-private so a test can drive one pass
-   * deterministically instead of waiting on the real {@link #RECONCILIATION_INTERVAL} timer.
+   * One reconciliation pass. Package-private so a test can drive it deterministically instead of
+   * waiting on the real {@link #RECONCILIATION_INTERVAL} timer.
    */
   void reconcileIncompleteRunsOnce() {
     try {
       for (String runId : repository.findRunIdsWithIncompleteIngestion()) {
         int attemptsSoFar = reconciliationAttempts.getOrDefault(runId, 0);
         if (attemptsSoFar >= MAX_RECONCILIATION_ATTEMPTS) {
-          // Bounded, not infinite: a manifest that will never recover (e.g. its artifacts
-          // directory was deleted) must not be retried forever - it stays flagged, a permanent
-          // and genuinely visible signal, rather than burning a background thread on it forever.
+          // A manifest that never recovers must not be retried forever - it stays flagged rather
+          // than burning a background thread on it permanently.
           continue;
         }
         reconciliationAttempts.put(runId, attemptsSoFar + 1);
-        // D4.3.3 review finding - this reconciliation pass runs on its own dedicated executor
-        // thread, distinct from any run's own worker thread, so MDC does not carry runId onto it
-        // automatically; without this, a retry's own failure would have runId only interpolated
-        // in the message above, never as a searchable MDC/ECS field.
+        // Runs on its own executor thread, so MDC doesn't carry runId onto it automatically.
         MdcScope.withMdc("runId", runId, () -> ingestAvailableEntries(runId, true));
       }
     } catch (RuntimeException e) {
-      // The reconciliation loop itself (e.g. findRunIdsWithIncompleteIngestion failing against a
-      // momentarily unreachable database) must never kill the scheduled task permanently -
-      // scheduleWithFixedDelay stops retrying entirely if the task ever throws once.
+      // Must not propagate: scheduleWithFixedDelay stops retrying entirely if the task ever
+      // throws once.
       log.warn("Artifact ingestion reconciliation pass failed: {}", e.getMessage(), e);
     }
   }
 
-  /**
-   * Test-only visibility into the bounded retry counter - package-private, not part of the public
-   * contract, so a test can assert reconciliation actually stops at {@link
-   * #MAX_RECONCILIATION_ATTEMPTS} rather than retrying forever, without needing to observe that
-   * indirectly.
-   */
+  /** Test-only visibility into the bounded retry counter; not part of the public contract. */
   int reconciliationAttemptsFor(String runId) {
     return reconciliationAttempts.getOrDefault(runId, 0);
   }

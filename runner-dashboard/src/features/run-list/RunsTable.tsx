@@ -31,12 +31,8 @@ export function RunsTable({ pollIntervalMs = 2000 }: RunsTableProps = {}) {
   const runs = useQuery({
     queryKey: queryKeys.runs,
     queryFn: listRuns,
-    // Stops on its own once nothing is left to watch - no separate "am I still needed" check, and
-    // no per-row subscription of any kind (an SSE connection per row would not scale). Also keeps
-    // retrying on `pollIntervalMs` while the query has never succeeded at all (`data` is still
-    // `undefined`): `data?.some(...)` alone would be `undefined` (falsy) for that case, silently
-    // stopping the poll forever on the very first failure instead of recovering once the backend
-    // comes back - unlike health/capabilities, which have their own explicit error-state check.
+    // Stops once nothing is left to watch. Also keeps retrying on an error status, since
+    // `data?.some(...)` alone would be falsy (undefined data) and silently stop polling forever.
     refetchInterval: (query) => {
       if (query.state.status === "error") {
         return pollIntervalMs;
@@ -67,13 +63,8 @@ export function RunsTable({ pollIntervalMs = 2000 }: RunsTableProps = {}) {
     return <EmptyState title="No runs yet." />;
   }
 
-  // The currently-selected filter value is always included even if it no longer appears in the
-  // live data (e.g. the one "RUNNING" run just finished) - the <select> must keep showing what is
-  // actually being filtered on. A native <select> can't display a value with no matching <option>,
-  // so dropping a stale value from this list (falling back to a masked "All" display instead of
-  // keeping the option) would make the <select> lie about the filter that's still in effect - and
-  // worse, silently "re-arm" that exact same filter with no user action the moment a run matching
-  // it reappears later, which is exactly the surprising behavior this avoids.
+  // Keeps the current filter value even if it no longer matches live data, so the <select>
+  // doesn't silently fall back to "All" or re-arm the filter later with no user action.
   const statuses = uniqueSorted([
     ...runs.data.map((run) => run.status),
     ...(statusFilter === ALL ? [] : [statusFilter]),
@@ -245,13 +236,7 @@ function compareRuns(sort: { key: SortKey; direction: SortDirection }) {
     factor * a[sort.key].localeCompare(b[sort.key]);
 }
 
-/**
- * Its own component specifically so `cancel` is its own `useMutation` instance, scoped to this one
- * row: a single mutation shared across the whole table only ever remembers the *last* `mutate()`
- * call's state, so cancelling run B while run A's cancel is still in flight would silently re-enable
- * A's button (`variables` now points at B) and lose A's own pending/error state entirely - a real
- * bug found by a concurrent-cancel scenario no test happened to cover yet.
- */
+/** Its own component so `cancel` is a per-row `useMutation` instance - a shared one would mix up state between concurrent cancels. */
 function RunTableRow({
   run,
   canManageRuns,
@@ -267,12 +252,8 @@ function RunTableRow({
   });
 
   const durationMs = runDurationMs(run);
-  // `run.processLogUrl` (from the backend, not recomputed here) is present the moment a run is
-  // accepted, but the file behind it only exists once the process has actually launched - `STARTING`
-  // is not enough (the backend can sit in STARTING while waiting out a DEGRADED runner, before ever
-  // calling ProcessLauncher.start()); `startedAt` is only ever populated once RUNNING is reached
-  // (Run's own constructor forbids it on QUEUED/STARTING), so it's the one field that's actually
-  // safe to gate on.
+  // The log file only exists once the process has launched; `startedAt` (populated only at
+  // RUNNING) is the one field safe to gate on - STARTING alone isn't enough.
   const logAvailable = run.startedAt !== undefined;
 
   return (

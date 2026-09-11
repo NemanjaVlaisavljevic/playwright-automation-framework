@@ -11,11 +11,8 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Reports the current session's effective permission to the frontend - never a token, and never
  * conflating "who is logged in" with "can this caller manage runs" (see {@link
- * CurrentUserResponse}'s own doc comment for why those differ when GitHub OAuth2 is not
- * configured). Kept hand-maintained on the frontend side rather than added to the OpenAPI document
- * (see the {@link Hidden} annotation below), the same treatment as the existing {@code
- * /actuator/health} endpoint: a simple, stable, rarely-changing shape not worth {@code npm run
- * api:check:contract} churn.
+ * CurrentUserResponse}). Excluded from the OpenAPI document as a simple, stable, rarely-changing
+ * shape, like {@code /actuator/health}.
  */
 @Hidden
 @RestController
@@ -30,12 +27,9 @@ public class CurrentUserController {
   }
 
   /**
-   * Derives {@code canManageRuns} from the real {@code ROLE_ADMIN} authority Spring Security itself
-   * grants (and the same authority {@code POST /api/v1/runs}/{@code cancel} require) - never
-   * inferred merely from the principal being an {@link OAuth2User} (a review finding: that indirect
-   * invariant - only relying on {@code GithubOAuth2UserService} never creating a non-admin session
-   * - could silently drift from the actual authorization rule this endpoint is supposed to
-   * describe).
+   * Derives {@code canManageRuns} from the real {@code ROLE_ADMIN} authority (the same one {@code
+   * POST /api/v1/runs}/{@code cancel} require), never merely from the principal being an {@link
+   * OAuth2User}, so it can't drift from the actual authorization rule.
    */
   @GetMapping("/api/v1/auth/me")
   public CurrentUserResponse currentUser(Authentication authentication) {

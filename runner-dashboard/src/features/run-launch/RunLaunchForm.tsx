@@ -34,9 +34,7 @@ export function RunLaunchForm({
   const capabilities = useQuery({
     queryKey: queryKeys.capabilities,
     queryFn: getCapabilities,
-    // The allowlist itself doesn't change mid-session, so this only ever matters while erroring -
-    // see RunListPage's health query for why refetchIntervalInBackground matters here too (a tab
-    // left open, unfocused, across a backend restart must still recover on its own).
+    // Retries only while erroring; refetchIntervalInBackground so an unfocused tab still recovers.
     refetchInterval: (query) =>
       query.state.status === "error" ? capabilitiesRetryIntervalMs : false,
     refetchIntervalInBackground: true,
@@ -45,16 +43,12 @@ export function RunLaunchForm({
   const navigate = useNavigate();
   const canManageRuns = useCanManageRuns({ csrfRetryIntervalMs });
 
-  // Empty string means "no explicit user choice yet" - the actual selected value used for
-  // rendering/submission always falls back to the first available option (see below), so the
-  // dropdown has a sensible default the moment capabilities load without a useEffect to sync it.
+  // Empty string means no explicit choice yet; falls back to the first available option below.
   const [environmentChoice, setEnvironmentChoice] = useState<Environment | "">(
     "",
   );
   const [suiteChoice, setSuiteChoice] = useState<Suite | "">("");
-  // Reset on every environment/suite change (not just when leaving CUSTOM) - a stale selection
-  // from a previous CUSTOM launch must never silently ride along into a new one, including a
-  // same-environment re-selection of CUSTOM itself.
+  // Reset on every environment/suite change so a stale CUSTOM selection never rides along.
   const [selectedTestKeys, setSelectedTestKeys] = useState<ReadonlySet<string>>(
     new Set(),
   );

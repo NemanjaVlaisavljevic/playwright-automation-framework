@@ -59,18 +59,14 @@ import org.springframework.test.web.servlet.setup.ConfigurableMockMvcBuilder;
 import org.springframework.web.filter.ForwardedHeaderFilter;
 
 /**
- * Exercises the real {@link SecurityConfig#oauth2SecurityFilterChain} - not the narrower per-
- * controller slice tests elsewhere, which never import {@link SecurityConfig} at all and so never
- * enforce authorization (confirmed empirically: those tests still pass unmodified after adding
- * {@code spring-boot-starter-security}, since a {@code @WebMvcTest} slice with no {@code
- * SecurityFilterChain} bean visible to it applies no security filtering whatsoever, rather than
- * falling back to Spring Boot's own default-deny chain). This is the one place the actual access
- * matrix is proven end-to-end.
+ * Exercises the real {@link SecurityConfig#oauth2SecurityFilterChain} - the one place the access
+ * matrix is proven end-to-end. Per-controller slice tests elsewhere never import {@code
+ * SecurityConfig} and so enforce no authorization at all (a {@code @WebMvcTest} slice with no
+ * {@code SecurityFilterChain} bean applies no security filtering, rather than falling back to a
+ * default-deny chain).
  *
- * <p>Uses {@code @WithMockUser} to simulate the authenticated-admin/authenticated-non-admin cases
- * directly - this only ever needs to prove the authorization <em>rule</em> (does a caller with/
- * without {@code ROLE_ADMIN} get through), never a real GitHub OAuth round trip; see {@link
- * GithubOAuth2UserServiceTest} for how a real GitHub response maps to that role.
+ * <p>Uses {@code @WithMockUser} to prove the authorization rule only (admin vs non-admin), never a
+ * real GitHub round trip - see {@link GithubOAuth2UserServiceTest} for that mapping.
  */
 @WebMvcTest(
     controllers = {
@@ -81,15 +77,10 @@ import org.springframework.web.filter.ForwardedHeaderFilter;
       DiskUsageController.class
     })
 @Import({
-  // D3.3 - SecurityConfig itself now provides InMemoryRateLimiter/AbuseRateLimitFilter as
-  // explicit @Bean methods (deliberately not bare @Component classes - see
-  // AbuseRateLimitFilter's own Javadoc), so importing SecurityConfig alone is enough; no separate
-  // import needed for either. AbuseRateLimitFilter needs a real RunnerProperties bean too - no
-  // explicit test bean is supplied for it here because @WebMvcTest already implicitly discovers
-  // RunnerServiceApplication as this slice's @SpringBootConfiguration source, and that class's own
-  // @EnableConfigurationProperties(RunnerProperties.class) already binds the real
-  // application.yml defaults - a second, explicit bean here would conflict
-  // (NoUniqueBeanDefinitionException), confirmed empirically.
+  // SecurityConfig provides InMemoryRateLimiter/AbuseRateLimitFilter as @Bean methods, so
+  // importing it alone is enough. RunnerProperties comes from RunnerServiceApplication's own
+  // @EnableConfigurationProperties, already implicitly discovered by @WebMvcTest - an explicit
+  // test bean here would conflict (NoUniqueBeanDefinitionException).
   SecurityConfig.class,
   GithubOAuth2UserService.class,
   ProblemDetailAuthenticationEntryPoint.class,
@@ -109,11 +100,9 @@ class SecurityAccessMatrixTest {
   @MockitoBean private DiskUsageService diskUsageService;
 
   /**
-   * A {@code @WebMvcTest} slice does not retain {@code OAuth2ClientAutoConfiguration} (unlike a
-   * full application context), so {@code oauth2Login()} has no real {@code
-   * ClientRegistrationRepository} to resolve the "github" registration from. This test never
-   * exercises an actual OAuth2 redirect/callback - only the authorization rules around it - so a
-   * minimal fake registration is enough to satisfy the filter chain's own wiring requirements.
+   * A {@code @WebMvcTest} slice has no real {@code ClientRegistrationRepository} to resolve the
+   * "github" registration from - a minimal fake is enough since this class only tests authorization
+   * rules, never an actual OAuth2 redirect/callback.
    */
   @TestConfiguration
   static class FakeClientRegistrationConfig {
@@ -135,32 +124,19 @@ class SecurityAccessMatrixTest {
     }
 
     /**
-     * Without {@code springSecurity()}, {@code @WithMockUser}'s established {@code SecurityContext}
-     * is not honored by the real filter chain during a {@code @WebMvcTest}-composed {@code MockMvc}
-     * dispatch - confirmed empirically (every {@code @WithMockUser} test resolved as anonymous/401
-     * until this was added). {@link ForwardedHeaderFilter} lets {@link
-     * #oauth2LoginRedirectUsesTheForwardedHttpsSchemeAndHost} simulate the effect of trusting
-     * forwarded headers (Caddy terminates TLS and sets {@code X-Forwarded-Proto}/{@code
-     * X-Forwarded-Host}) without actually exercising production's real mechanism - {@code
-     * deploy/runner-service/Dockerfile} sets {@code SERVER_FORWARD_HEADERS_STRATEGY=native} (D3.3),
-     * which activates Tomcat's connector-level {@code RemoteIpValve}, not this servlet {@link
-     * ForwardedHeaderFilter}; {@code MockMvc} dispatches directly to {@code DispatcherServlet} and
-     * never boots a real embedded Tomcat, so it cannot exercise a {@code Valve} at all - this
-     * filter is a same-effect stand-in for the {@code {baseUrl}}-resolution behavior only, not a
-     * proof that {@code RemoteIpValve}'s own trust boundary (its {@code internal-proxies} check in
-     * particular) behaves the same way - {@link PermissiveChainHasNoAbuseRateLimitTest}/{@link
-     * OAuth2ChainAppliesAbuseRateLimitTest} prove the real, embedded-Tomcat chain-scoping fix, and
-     * {@code docs/RELEASE_EVIDENCE.md}'s D3.3 section carries the real Compose-stack proof of the
-     * {@code RemoteIpValve} trust boundary itself - {@code MockMvc} cannot exercise either.
-     * Harmless for every other test here, which never sends those headers.
+     * {@code springSecurity()} is required for {@code @WithMockUser} to be honored under
+     * {@code @WebMvcTest}'s MockMvc dispatch. {@link ForwardedHeaderFilter} only stands in for
+     * MockMvc's {@code {baseUrl}} resolution - it does not exercise production's real trust
+     * boundary (Tomcat's {@code RemoteIpValve}), which is proven separately by {@link
+     * PermissiveChainHasNoAbuseRateLimitTest}/{@link OAuth2ChainAppliesAbuseRateLimitTest} and
+     * {@code docs/RELEASE_EVIDENCE.md}.
      */
     @Bean
     MockMvcBuilderCustomizer securityMockMvcBuilderCustomizer() {
       return (ConfigurableMockMvcBuilder<?> builder) ->
           builder
-              // ForwardedHeaderFilter must run before Spring Security's own filter chain sees the
-              // request - registered first so it wraps the request (recovering the real
-              // X-Forwarded-* scheme/host) before security's {baseUrl} resolution ever runs.
+              // Must run before Spring Security's own chain sees the request, so {baseUrl}
+              // resolution sees the recovered X-Forwarded-* scheme/host.
               .addFilter(new ForwardedHeaderFilter())
               .apply(SecurityMockMvcConfigurers.springSecurity());
     }
@@ -169,9 +145,8 @@ class SecurityAccessMatrixTest {
   private static final String CREATE_BODY = "{\"environment\":\"PUBLIC\",\"suite\":\"SMOKE\"}";
 
   /**
-   * A valid CSRF token is deliberately supplied so this isolates the authentication check itself -
-   * an anonymous POST with no CSRF token at all is rejected earlier, by the CSRF filter (403), a
-   * different and equally legitimate rejection reason covered separately by {@link
+   * Supplies a valid CSRF token to isolate the authentication check - an anonymous POST with no
+   * CSRF token is rejected earlier, by the CSRF filter (403), covered separately by {@link
    * #authenticatedAdminCreateWithoutCsrfIsForbidden}.
    */
   @Test
@@ -249,18 +224,11 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for the review finding: without trusting forwarded headers at all, Spring
-   * Security's {@code {baseUrl}} resolution would see the internal plain-HTTP hop between Caddy and
-   * this service, not the real public {@code https://} origin the browser actually used - producing
-   * a {@code redirect_uri} that never matches the one registered with the GitHub OAuth App. {@link
-   * ForwardedHeaderFilter} (registered on this test's own {@code MockMvc}) makes the simulated
-   * {@code X-Forwarded-Proto}/{@code X-Forwarded-Host} headers - exactly what Caddy's {@code
-   * reverse_proxy} sets by default - authoritative for that resolution here; production itself uses
-   * Tomcat's {@code RemoteIpValve} instead (D3.3, {@code SERVER_FORWARD_HEADERS_STRATEGY=native} -
-   * see {@code deploy/runner-service/Dockerfile}), which this {@code MockMvc}-based test cannot
-   * exercise directly (see {@code FakeClientRegistrationConfig}'s own note on that) - the {@code
-   * {baseUrl}} resolution behavior this test proves is the same either way, just reached through a
-   * different real mechanism.
+   * Without trusting forwarded headers, {@code {baseUrl}} resolution would see the internal
+   * plain-HTTP hop to this service, not the public {@code https://} origin - producing a {@code
+   * redirect_uri} that never matches GitHub OAuth App registration. See {@code
+   * FakeClientRegistrationConfig}'s Javadoc for why {@link ForwardedHeaderFilter} stands in for
+   * production's real Tomcat {@code RemoteIpValve} mechanism here.
    */
   @Test
   void oauth2LoginRedirectUsesTheForwardedHttpsSchemeAndHost() throws Exception {
@@ -281,9 +249,8 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression proof for the default-deny design: a route under the same {@code /api/v1/auth}
-   * namespace that was never explicitly allowlisted must still be denied, confirming there is no
-   * single grouped {@code /api/v1/auth/**} permission covering the whole namespace.
+   * A route under {@code /api/v1/auth} that was never explicitly allowlisted must still be denied -
+   * confirms there is no single grouped {@code /api/v1/auth/**} permission covering the namespace.
    */
   @Test
   void anUnlistedRouteUnderTheAuthNamespaceIsDeniedByDefault() throws Exception {
@@ -291,10 +258,9 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Proves authorization and existing business validation are two independent, composable layers:
-   * an authenticated admin still gets the same 400 an anonymous {@code PUBLIC} caller would have
-   * gotten for an unsupported combination - {@code ROLE_ADMIN} does not bypass {@code
-   * RunAvailabilityPolicy}/{@code RunRequestValidator}.
+   * Authorization and business validation are independent layers - an authenticated admin gets the
+   * same 400 an anonymous caller would for an unsupported combination; {@code ROLE_ADMIN} does not
+   * bypass {@code RunAvailabilityPolicy}/{@code RunRequestValidator}.
    */
   @Test
   @WithMockUser(roles = "ADMIN")
@@ -313,11 +279,9 @@ class SecurityAccessMatrixTest {
 
   /**
    * A real {@link DefaultOAuth2User}, not {@code @WithMockUser} - {@link AbuseRateLimitFilter}'s
-   * admin-keyed surfaces read the numeric GitHub {@code "id"} attribute directly off the principal,
-   * which a plain {@code @WithMockUser}-established {@code UserDetails} principal does not carry at
-   * all (confirmed empirically: with {@code @WithMockUser} alone, every admin-keyed rate limit
-   * check silently no-ops, since the filter treats a missing key as "cannot rate-limit this, let it
-   * through" rather than blocking a request it cannot identify).
+   * admin-keyed limits read the numeric GitHub {@code "id"} off the principal, which
+   * {@code @WithMockUser}'s principal doesn't carry. Without it, a missing key makes the filter let
+   * the request through rather than block it, so admin-keyed rate-limit tests would silently no-op.
    */
   private static Authentication realAdminAuthentication() {
     DefaultOAuth2User oauth2User =
@@ -329,9 +293,8 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for the D3.3 review finding: create-run must be rate-limited per admin (numeric
-   * GitHub id), not left uncapped just because the caller is already authorized. Real {@code
-   * application.yml} default is 3/min - the 4th call in the same window is rejected.
+   * Create-run is rate-limited per admin (numeric GitHub id), not left uncapped just because the
+   * caller is authorized. Real default is 3/min - the 4th call in the window is rejected.
    */
   @Test
   void createRunIsRateLimitedPerAdminAfterTheConfiguredThreshold() throws Exception {
@@ -364,12 +327,10 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for the D3.3 review finding: the largest anonymous surface (public reads) must
-   * itself be rate-limited per client IP, not left uncapped just because it needs no login at all.
-   * Real {@code application.yml} default is 120/min - the 121st call in the same window is
-   * rejected. Uses a distinct, reserved-range test IP (not the shared {@code 127.0.0.1} default
-   * every other test in this class uses) so this test's own limit state can never collide with
-   * theirs regardless of test execution order.
+   * Public reads (the largest anonymous surface) are rate-limited per client IP. Real default is
+   * 120/min - the 121st call is rejected. Uses a distinct reserved-range test IP, not the shared
+   * {@code 127.0.0.1} every other test in this class uses, so limit state can't collide across
+   * tests.
    */
   @Test
   void publicReadsAreRateLimitedPerClientIpAfterTheConfiguredThreshold() throws Exception {
@@ -395,10 +356,9 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for D3.3: an oversized body is rejected by {@code Content-Length} alone, before
-   * any deserialization/CSRF/authorization is even attempted - a request with no CSRF token at all
-   * still gets {@code 413}, not the {@code 403} it would otherwise get for missing CSRF, proving
-   * this filter runs ahead of all of that. Real {@code application.yml} default is 16384 bytes.
+   * An oversized body is rejected by {@code Content-Length} alone, before deserialization/CSRF/
+   * authorization - a request with no CSRF token still gets 413, not 403, proving this filter runs
+   * first. Real default is 16384 bytes.
    */
   @Test
   void anOversizedRequestBodyIsRejectedWith413BeforeAnythingElse() throws Exception {
@@ -411,11 +371,9 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for D3.3: "CORS deliberately unsupported" (see {@link SecurityConfig}'s own
-   * class Javadoc) must be a proven decision, not merely an absent one - a cross-origin-shaped
-   * preflight against a mutating endpoint gets no {@code Access-Control-Allow-Origin} header at all
-   * (Spring Security's default behavior once {@code .cors(...)} is never enabled), so a browser
-   * blocks the actual follow-up request regardless of what this response otherwise says.
+   * "CORS deliberately unsupported" (see {@link SecurityConfig}'s class Javadoc) is a proven
+   * decision, not merely an absent one - a cross-origin preflight gets no {@code
+   * Access-Control-Allow-Origin} header, so a browser blocks the actual follow-up request.
    */
   @Test
   void aCrossOriginPreflightGetsNoAccessControlAllowOriginHeader() throws Exception {
@@ -429,9 +387,8 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Same proof for an ordinary (non-preflight) cross-origin-shaped request against a public,
-   * anonymously-readable route - confirms the missing header isn't merely an artifact of the
-   * mutating-endpoint/authorization path above.
+   * Same proof for a non-preflight cross-origin request against a public route - confirms the
+   * missing header isn't just an artifact of the mutating-endpoint/authorization path above.
    */
   @Test
   void aCrossOriginGetRequestGetsNoAccessControlAllowOriginHeaderEither() throws Exception {
@@ -442,10 +399,9 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * D3.4 regression test: a stale/forged CSRF token (a cookie and header that plainly don't agree)
-   * must be rejected exactly like a missing one - {@link
-   * #authenticatedAdminCreateWithoutCsrfIsForbidden} only proves the missing-token case; this one
-   * proves the repository actually compares values rather than merely checking presence.
+   * A mismatched CSRF cookie/header must be rejected like a missing one - {@link
+   * #authenticatedAdminCreateWithoutCsrfIsForbidden} only proves the missing-token case; this
+   * proves the repository actually compares values, not just checks presence.
    */
   @Test
   @WithMockUser(roles = "ADMIN")
@@ -461,19 +417,13 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * D3.4 regression test: a session that has been invalidated - by an explicit logout, or by the
-   * servlet container's own eventual idle-timeout eviction ({@code server.servlet.session.timeout:
-   * 4h} - note this is an <em>idle</em> timeout per the Servlet {@code HttpSession} contract, not
-   * an absolute session lifetime: an actively-used session is never force-expired at the 4h mark
-   * just because 4h have passed since login) - must be treated as fully anonymous on its very next
-   * use, never as a lingering admin session and never as a server error. This test proves only the
-   * <em>post-invalidation</em> half of that: {@link MockHttpSession#invalidate()} simulates the
-   * state a session is in immediately after invalidation happens, by whichever mechanism - it does
-   * not, and cannot, simulate real wall- clock idle time actually elapsing (`MockMvc` has no notion
-   * of that at all), so it is not a test of the 4h idle-timeout clock itself. Manipulates a real
-   * {@link HttpSessionSecurityContextRepository}-backed session directly (the same attribute key
-   * Spring Security's own session persistence uses) so this proves the actual session-backed
-   * authentication path, not {@code @WithMockUser}'s separate test-only mechanism.
+   * An invalidated session (logout, or eventual idle-timeout eviction - {@code
+   * server.servlet.session.timeout: 4h} is an idle timeout, not an absolute lifetime) must be
+   * treated as fully anonymous on its next use, never a lingering admin session. {@link
+   * MockHttpSession#invalidate()} only simulates the post-invalidation state, not real wall-clock
+   * idle time elapsing, so this doesn't test the 4h clock itself. Manipulates a real {@link
+   * HttpSessionSecurityContextRepository}-backed session so it proves the actual session-backed
+   * path, not {@code @WithMockUser}'s separate mechanism.
    */
   @Test
   void anInvalidatedSessionIsTreatedAsAnonymousNeverAsLingeringAdminOrAServerError()
@@ -484,8 +434,8 @@ class SecurityAccessMatrixTest {
     session.setAttribute(
         HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, securityContext);
 
-    // Sanity check: while still valid, this session really is an authenticated admin - otherwise
-    // the assertions below would trivially pass for the wrong reason.
+    // Sanity check: confirms the session really is an authenticated admin, so the assertions below
+    // don't trivially pass for the wrong reason.
     mockMvc
         .perform(get("/api/v1/auth/me").session(session))
         .andExpect(status().isOk())
@@ -507,11 +457,9 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * D3.4 regression test: {@code MUTATION} is not even a value of the {@link Suite} enum (see its
-   * own Javadoc - the REST API only ever accepts the fixed, allowlisted suites {@code
-   * SuiteCommandFactory} maps to a static Gradle task), so it is structurally unreachable, not
-   * merely policy-rejected - proves that by construction rather than asserting it from reading the
-   * enum alone.
+   * {@code MUTATION} is not a value of the {@link Suite} enum at all (see its own Javadoc), so this
+   * is structurally unreachable, not merely policy-rejected - proven by construction, not just by
+   * reading the enum.
    */
   @Test
   @WithMockUser(roles = "ADMIN")
@@ -529,12 +477,9 @@ class SecurityAccessMatrixTest {
       "{\"environment\":\"PUBLIC\",\"suite\":\"FIXTURE\"}";
 
   /**
-   * D3.4 regression test: {@code FIXTURE} (the deliberately-always-fails step/failure/artifact
-   * drill-down fixture) is a legitimate, allowlisted {@link Suite} value - but launching it is
-   * still an authenticated-admin-only mutation like any other, never a client-choosable escape
-   * hatch reachable anonymously. Same authorization rule as {@code SMOKE}/{@code REGRESSION} above,
-   * asserted explicitly for this specific suite value rather than assumed from the fact that
-   * authorization is keyed on HTTP method+path, not request body content.
+   * {@code FIXTURE} (the deliberately-always-fails drill-down fixture) is a legitimate, allowlisted
+   * {@link Suite} value, but launching it is still an authenticated-admin-only mutation like any
+   * other - never a client-choosable escape hatch reachable anonymously.
    */
   @Test
   void anonymousFixtureLaunchIsRejectedWithAProblemDetail401() throws Exception {
@@ -579,9 +524,8 @@ class SecurityAccessMatrixTest {
         .andExpect(jsonPath("$.runId").value("run-1"));
   }
 
-  // --- D4.1 review round: RetentionController was not previously covered by this matrix at all -
-  // same full access-matrix treatment (401/403/200/CSRF/429) as every other admin-only mutation
-  // surface above. ---
+  // RetentionController: same full access-matrix treatment (401/403/200/CSRF/429) as every other
+  // admin-only mutation surface above.
 
   private static final RetentionReport A_REPORT =
       new RetentionReport(false, 0, 0, 0, 0, 0, 0, 0, false);
@@ -643,10 +587,8 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for the D4.1 review round: a real sweep does real DB/filesystem work, so this
-   * admin-only route must be rate-limited per admin just like create-run/cancel-run above - not
-   * left uncapped just because the caller is already an authorized admin. Real {@code
-   * application.yml} default is 10/hour - the 11th call in the same window is rejected.
+   * A real sweep does real DB/filesystem work, so this admin-only route is rate-limited per admin
+   * like create-run/cancel-run above. Real default is 10/hour - the 11th call is rejected.
    */
   @Test
   void retentionRunIsRateLimitedPerAdminAfterTheConfiguredThreshold() throws Exception {
@@ -690,8 +632,8 @@ class SecurityAccessMatrixTest {
         .andExpect(jsonPath("$.status").value(429));
   }
 
-  // --- D4.2: DiskUsageController - same full access-matrix treatment (401/403/200/429) as every
-  // other admin-only diagnostic surface above. ---
+  // DiskUsageController: same full access-matrix treatment (401/403/200/429) as every other
+  // admin-only diagnostic surface above.
 
   private static final DiskUsageSnapshot A_SNAPSHOT =
       new DiskUsageSnapshot(1_000_000_000L, 1_048_576L, 314_572_800L, Instant.now());
@@ -722,10 +664,9 @@ class SecurityAccessMatrixTest {
   }
 
   /**
-   * Regression test for the same review pattern D4.1's retention endpoints already established: a
-   * filesystem-tree walk plus a live Postgres size query is real work, so this admin-only route
-   * must be rate-limited per admin just like every other admin-only surface above. Real {@code
-   * application.yml} default is 10/hour - the 11th call in the same window is rejected.
+   * A filesystem-tree walk plus a live Postgres size query is real work, so this admin-only route
+   * is rate-limited per admin like every other admin-only surface above. Real default is 10/hour -
+   * the 11th call is rejected.
    */
   @Test
   void diskUsageIsRateLimitedPerAdminAfterTheConfiguredThreshold() throws Exception {

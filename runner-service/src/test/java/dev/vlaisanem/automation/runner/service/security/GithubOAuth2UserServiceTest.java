@@ -16,10 +16,9 @@ import org.springframework.security.oauth2.core.user.DefaultOAuth2User;
 import org.springframework.security.oauth2.core.user.OAuth2User;
 
 /**
- * Never makes a real HTTP call - {@link GithubOAuth2UserService}'s package-private constructor
- * accepts a fake delegate, so this only ever exercises the numeric-id-allowlist mapping logic
- * itself (see {@link SecurityAccessMatrixTest} for the authorization-rule behavior once a principal
- * already exists).
+ * Uses a fake delegate so no real HTTP call is made - only the numeric-id-allowlist mapping is
+ * exercised. See {@link SecurityAccessMatrixTest} for authorization-rule behavior once a principal
+ * already exists.
  */
 class GithubOAuth2UserServiceTest {
 

@@ -45,9 +45,8 @@ class InMemoryRateLimiterTest {
 
   @Test
   void recoversAutomaticallyOnceTheWindowElapses() throws InterruptedException {
-    // A generous window/margin, not a tight one - the first call in a test class can pay real JIT
-    // warm-up/class-loading overhead, and a too-tight window would flake by "recovering" before
-    // the second call even happens rather than proving the intended time-based reset.
+    // Generous window: too tight would flake from JIT/class-loading warm-up costing more than the
+    // window itself.
     RateLimitRule rule = new RateLimitRule(1, Duration.ofMillis(300));
 
     assertThat(limiter.tryAcquire("surface", "1.2.3.4", rule).allowed()).isTrue();
@@ -59,9 +58,8 @@ class InMemoryRateLimiterTest {
   }
 
   /**
-   * Regression test for the D3.3 review finding: multi-rule checks must be one atomic decision, not
-   * two sequential ones - a request rejected by the hourly rule must never have already consumed
-   * the minute rule's budget along the way.
+   * Multi-rule checks must be one atomic decision, not two sequential ones - a request rejected by
+   * the hourly rule must never have already consumed the minute rule's budget.
    */
   @Test
   void multiRuleChecksAreAtomicNeverPartiallyConsumingOnRejection() {
@@ -72,23 +70,19 @@ class InMemoryRateLimiterTest {
             new NamedRule("create-run-per-minute", perMinute),
             new NamedRule("create-run-per-hour", perHour));
 
-    // First attempt: both rules have room, both pass and both are counted.
     assertThat(limiter.tryAcquire("admin-1", rules).allowed()).isTrue();
 
-    // Second attempt: the per-hour rule is now exhausted (limit 1) - the whole attempt must be
-    // rejected, and the still-available per-minute rule must NOT have been incremented by this
-    // rejected attempt (proven by the next assertion still finding room for a fresh, per-minute-
-    // only check under the same key).
+    // Per-hour rule (limit 1) is now exhausted; the per-minute rule must not have been incremented
+    // by this rejected attempt, proven by the next assertion still finding room under the same key.
     assertThat(limiter.tryAcquire("admin-1", rules).allowed()).isFalse();
     assertThat(limiter.tryAcquire("create-run-per-minute", "admin-1", perMinute).allowed())
         .isTrue();
   }
 
   /**
-   * Regression test for the D3.3 review finding: on rejection, {@code retryAfter} must be the
-   * *largest* remaining time among every rule that rejected - never the shortest - so a caller
-   * blocked mainly by a long-window rule is never told to retry in a few seconds just because a
-   * shorter-window rule also happened to reject.
+   * On rejection, {@code retryAfter} must be the largest remaining time among every rejecting rule,
+   * never the shortest - a caller blocked by a long-window rule must not be told to retry in
+   * seconds.
    */
   @Test
   void retryAfterReflectsTheLargestRemainingTimeAmongRejectingRules() {
@@ -103,16 +97,13 @@ class InMemoryRateLimiterTest {
 
     InMemoryRateLimiter.Result rejected = limiter.tryAcquire("admin-1", rules);
     assertThat(rejected.allowed()).isFalse();
-    // Both rules are now exhausted (each allows only 1), so the reported retryAfter must reflect
-    // the hour-long window, not the much shorter minute one.
+    // Both rules are exhausted (limit 1 each); retryAfter must reflect the longer hour window.
     assertThat(rejected.retryAfter()).isGreaterThan(Duration.ofMinutes(2));
   }
 
   /**
-   * Regression test for the D3.3 review finding: a real attacker (internet scanners, botnet
-   * clients, IPv6 address rotation) can present many genuinely distinct source IPs, each of which
-   * would otherwise leave a permanent entry - memory must stay bounded regardless of how many
-   * one-off keys are ever seen.
+   * Memory must stay bounded even against many distinct source IPs (scanners, botnets, IPv6
+   * rotation), each of which would otherwise leave a permanent entry.
    */
   @Test
   void trackedKeyCountStaysBoundedUnderManyOneOffKeys() {

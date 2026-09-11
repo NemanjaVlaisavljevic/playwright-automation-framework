@@ -21,9 +21,8 @@ public final class AdminRoomsPage {
   public AdminRoomsPage(Page page) {
     this.page = page;
     logout = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Logout"));
-    // The create-row's room number and price inputs have no associated <label> (a real
-    // accessibility gap in the app, same category as the one already documented in
-    // ContactForm.java) - id-based locators are the only reliable option.
+    // The create-row's room number and price inputs have no <label> (same accessibility gap as
+    // ContactForm.java), so id-based locators are the only option.
     roomNameInput = page.locator("#roomName");
     typeSelect = page.locator("#type");
     accessibleSelect = page.locator("#accessible");
@@ -38,10 +37,8 @@ public final class AdminRoomsPage {
   }
 
   /**
-   * Fills and submits the inline create-room row with the given room's data. Waits for the actual
-   * {@code POST /api/room} response before returning (confirmed live endpoint, no trailing slash -
-   * distinct from RoomClient's own path) - a caller that immediately looks the room up via the API
-   * afterward must not race the in-flight request the click only started.
+   * Fills and submits the inline create-room row, waiting for the {@code POST /api/room} response
+   * so a caller that looks the room up afterward doesn't race the in-flight request.
    */
   public AdminRoomsPage createRoom(CreateRoomRequest room) {
     roomNameInput.fill(room.roomName());
@@ -60,7 +57,7 @@ public final class AdminRoomsPage {
   }
 
   private Locator rowFor(String roomName) {
-    // Rows are div-based (data-testid="roomlisting"), not <tr> - confirmed against the live DOM.
+    // Rows are div-based (data-testid="roomlisting"), not <tr>.
     return page.locator(
         "[data-testid='roomlisting']", new Page.LocatorOptions().setHasText(roomName));
   }

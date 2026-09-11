@@ -33,13 +33,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 /**
  * Streams one run's canonical event timeline over Server-Sent Events. HTTP contract only - all
  * replay/live delivery semantics live in {@link RunEventBroker}; this class adapts that to {@link
- * SseEmitter} and owns nothing about the run itself beyond validating it exists (see {@link
- * RunService#find}, mirroring {@link RunController#get}).
+ * SseEmitter}.
  *
- * <p>{@code Last-Event-ID} (the sequence number of the last event a reconnecting client actually
- * saw) drives the replay starting point, so a client that drops and reconnects never loses or
- * duplicates an event across the gap - the same guarantee {@link RunEventBroker#replayAndSubscribe}
- * already provides internally is simply exposed at the HTTP layer here.
+ * <p>{@code Last-Event-ID} drives the replay starting point, so a client that drops and reconnects
+ * never loses or duplicates an event across the gap.
  */
 @RestController
 @RequestMapping("/api/v1/runs")
@@ -95,16 +92,14 @@ public class RunEventStreamController {
       @PathVariable String runId,
       @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
       HttpServletRequest request) {
-    // D2.5 - must never let a client subscribe to (and so possibly observe, mid-rewrite) a stale
-    // non-terminal run RunRecoveryService's own startup pass hasn't finished reconciling yet.
+    // Must not let a client subscribe to a stale non-terminal run before startup recovery has
+    // finished reconciling it.
     recoveryService.requireRecoveryComplete();
     runService.find(runId); // 404s via RunNotFoundException for an unknown runId
     long afterSequence = parseLastEventId(lastEventId);
 
-    // D3.3 - enforced alongside, not instead of, RunEventHub's own global sseMaxSubscribers cap;
-    // see SseConnectionsPerIpTracker's own Javadoc for why one client alone must not be able to
-    // occupy every global slot. Checked before the emitter/heartbeat are even created, so a
-    // rejected caller never pays for either.
+    // Enforced alongside, not instead of, RunEventHub's global sseMaxSubscribers cap, and checked
+    // before the emitter/heartbeat are created so a rejected caller never pays for either.
     String clientIp = request.getRemoteAddr();
     if (!connectionsPerIpTracker.tryAcquire(clientIp)) {
       metrics.recordSseRejection(RunnerMetrics.SseRejectionReason.PER_IP_CAP);
@@ -176,24 +171,16 @@ public class RunEventStreamController {
   }
 
   /**
-   * Translates canonical {@link RunnerEvent}s into SSE frames. All completion is routed through
-   * {@link EmitterGuard} so it is never attempted twice - once for whichever of "the hub closed
-   * this subscription" or "the container/client ended the connection" happens to notice first.
+   * Translates canonical {@link RunnerEvent}s into SSE frames, routing all completion through
+   * {@link EmitterGuard} so it's never attempted twice.
    *
    * <p>{@link #onComplete}/{@link #onError} also call {@link
-   * DeferredSubscriptionHandle#requestClose} directly, rather than relying solely on {@code
-   * emitter.complete()}/{@code completeWithError()} to eventually trigger the servlet container's
-   * own {@code onCompletion}/{@code onError} listeners (registered in {@link #stream}). Live
-   * D4.4.2b CI evidence found that gap real: those listeners fire asynchronously, and under
-   * back-to-back SSE scenarios reusing the same client IP (two `docker compose run` k6 containers
-   * on the same network, seconds apart) the next connection can arrive - and call {@link
-   * SseConnectionsPerIpTracker#tryAcquire} - before the previous one's servlet-level callback has
-   * run, so the per-IP slot still reads as held even though the broker already knows the
-   * subscription is done. Calling {@code requestClose} here releases it the instant the application
-   * logically completes, with no wait on servlet plumbing; it is safe precisely because {@link
-   * DeferredSubscriptionHandle#requestClose} is idempotent and defers correctly if {@link
-   * DeferredSubscriptionHandle#set} has not run yet - whichever of this call and the later servlet
-   * callback lands first performs the actual release, the other is a no-op.
+   * DeferredSubscriptionHandle#requestClose} directly instead of waiting on the servlet container's
+   * {@code onCompletion}/{@code onError} listeners, which fire asynchronously: under back-to-back
+   * connections from the same client IP, the next one can call {@link
+   * SseConnectionsPerIpTracker#tryAcquire} before the previous connection's servlet callback has
+   * released its per-IP slot. Calling {@code requestClose} here releases it immediately; it's
+   * idempotent with the later servlet callback, so whichever runs first wins.
    */
   private static final class SseRunEventSubscriber implements RunEventSubscriber {
 
@@ -236,13 +223,10 @@ public class RunEventStreamController {
   }
 
   /**
-   * Ensures {@link SseEmitter#complete()} / {@link SseEmitter#completeWithError} is invoked at most
-   * once, regardless of which side notices the connection is over first: the servlet
-   * container/client (a real disconnect or timeout, wired in {@link #stream}) and the {@link
-   * RunEventBroker} subscription (the hub closing it, e.g. a slow-consumer disconnect) are two
-   * independent, racing paths to the same outcome. Spring's {@code ResponseBodyEmitter} does not
-   * tolerate a second completion call on an already-finished async context, so without this guard
-   * whichever path loses the race would throw.
+   * Ensures {@link SseEmitter#complete()}/{@link SseEmitter#completeWithError} is invoked at most
+   * once: the servlet container/client and the {@link RunEventBroker} subscription are two
+   * independent, racing paths to the same completion, and Spring's emitter throws on a second
+   * completion call.
    */
   static final class EmitterGuard {
 
@@ -271,13 +255,11 @@ public class RunEventStreamController {
   }
 
   /**
-   * Bridges the gap between scheduling cleanup callbacks (registered on the emitter before {@link
-   * RunEventBroker#replayAndSubscribe} is even called) and that call actually returning a {@link
-   * RunEventSubscription} handle to close. {@code replayAndSubscribe} starts delivering events -
-   * and therefore can already be racing toward its own close - before it returns, so a
-   * completion/timeout/error that fires that early must not be lost just because {@link #set} has
-   * not run yet: {@link #requestClose} and {@link #set} converge on {@link #closeIfPresent},
-   * exactly one of which ever sees a non-null subscription to actually close, whichever runs last.
+   * Bridges cleanup callbacks registered before {@link RunEventBroker#replayAndSubscribe} returns
+   * its {@link RunEventSubscription} handle. That call can already be racing toward its own close
+   * before it returns, so a completion/timeout/error that fires early must not be lost just because
+   * {@link #set} hasn't run yet: {@link #requestClose} and {@link #set} both converge on {@link
+   * #closeIfPresent}, whichever runs last performs the actual close.
    */
   static final class DeferredSubscriptionHandle {
 

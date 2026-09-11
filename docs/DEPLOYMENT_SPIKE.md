@@ -25,7 +25,7 @@ here means dev has no CORS configuration to maintain, and matches the same-origi
 deployment (Spring Boot serving both the API and these static files) this app is ultimately built
 for."* Confirmed by grepping the frontend source: no absolute `http://localhost:8080` URLs, no
 `VITE_API_*` base-URL env var, nothing CORS-related anywhere in `runner-service` either (no
-`CorsConfiguration`/`@CrossOrigin`/`WebMvcConfigurer` - grepped, none exist).
+`CorsConfiguration`/`@CrossOrigin`/`WebMvcConfigurer`).
 
 **~~What this means for D1~~ (superseded - see the notice at the top of this document)**: this
 section originally recommended building the dashboard's production bundle and having Spring Boot
@@ -101,7 +101,7 @@ what a real dashboard-triggered run actually costs, including the process tree `
 | Forked JUnit worker JVM (`-Dallure.results.directory=...`) | Runs the actual test/Playwright code | ~455-500 MB |
 | Chromium (`chromium_headless_shell`, ~8-10 OS sub-processes per logical browser instance - GPU/network/renderer/utility, normal multi-process Chromium architecture) | One active browser | ~330 MB total, one instance at a time (`maxParallelForks = 1`, already pinned in `build.gradle`) |
 
-**A real, actionable finding, not just numbers**: none of these JVMs have an explicit heap cap
+**A real, actionable finding**: none of these JVMs have an explicit heap cap
 today. `gradle.properties`' `org.gradle.jvmargs=-Xmx1g` only applies to daemon-mode builds - it
 does **not** bound the `--no-daemon` build process or the forked Test JVM, both of which are
 sizing themselves via plain JVM ergonomics (roughly a fraction of whatever RAM the host happens to
@@ -142,18 +142,14 @@ covers at 2 GB or more.
 
 ## Verified
 
-All process-tree/memory numbers above came from real, live measurement on this machine, not
-estimated from source alone: started a real `runner-service` via `bootRun`, launched three real
-runs through its own `POST /api/v1/runs` endpoint (`PUBLIC`/`SMOKE`, `LOCAL`/`JOURNEY` twice, one
-specifically timed to catch the process tree mid-run), and read back each process's own
-`CommandLine` via `Get-CimInstance Win32_Process` to correctly attribute every JVM/Chromium process
-to its real role rather than guessing from process name alone. Confirmed via `./gradlew --status`
-and direct command-line inspection that the `--no-daemon` per-run build process is genuinely
-separate from, and does not spin up, a persistent daemon - the persistent daemon seen during
-measurement was attributable specifically to this session's own `bootRun` invocation (which does
-not pass `--no-daemon`), not to anything `RunService` itself launches. All ad-hoc processes started
-for this spike were cleaned up afterward (`./gradlew --stop`, confirmed port 8080 free and no
-surviving `java.exe`/`chromium_headless_shell.exe`).
+All process-tree/memory numbers above came from real, live measurement on this machine: a real
+`runner-service` via `bootRun`, three real runs through its own `POST /api/v1/runs` endpoint
+(`PUBLIC`/`SMOKE`, `LOCAL`/`JOURNEY` twice), with each process's `CommandLine` read back via
+`Get-CimInstance Win32_Process` to attribute it to its real role. The `--no-daemon` per-run build
+process is confirmed genuinely separate from, and does not spin up, a persistent daemon - the
+persistent daemon seen during measurement was attributable specifically to this session's own
+`bootRun` invocation (which does not pass `--no-daemon`), not to anything `RunService` itself
+launches.
 
 **This document's own "next" is `docs/DEPLOYMENT_ARCHITECTURE.md`** - the real Dockerfiles/Compose
 topology, the corrected (higher) RAM measurement against an actual container, and the locked D1

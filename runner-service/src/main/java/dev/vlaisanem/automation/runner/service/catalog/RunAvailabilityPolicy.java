@@ -7,16 +7,11 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Which of {@link RunCatalog}'s combinations <em>this deployment</em> actually allows - the
- * intersection {@code docs/DEPLOYMENT_ARCHITECTURE.md}'s "LOCAL is out of scope for the portfolio
- * deployment" section calls for. {@link RunCatalog} stays unchanged: it still knows every
- * combination this codebase is capable of running at all (local development, CI, and the portfolio
- * deployment alike). This class is the one place that additionally asks "and does the
- * currently-running deployment want to advertise/accept that combination?" - {@link
+ * Which of {@link RunCatalog}'s combinations this deployment actually allows. {@link RunCatalog}
+ * still knows every combination the codebase can run at all; this class additionally asks whether
+ * the current deployment wants to advertise/accept it. {@link
  * dev.vlaisanem.automation.runner.service.orchestration.RunRequestValidator} and {@link
- * dev.vlaisanem.automation.runner.service.api.CapabilitiesResponse} both filter through it, so a
- * portfolio deployment's {@code /api/v1/capabilities} never advertises {@link Environment#LOCAL}
- * and its validator rejects it outright, without either of them hand-duplicating the profile check.
+ * dev.vlaisanem.automation.runner.service.api.CapabilitiesResponse} both filter through it.
  *
  * @param profile which combinations are currently allowed, beyond what {@link RunCatalog} alone
  *     permits - see {@link DeploymentProfile}.
@@ -24,12 +19,9 @@ import java.util.stream.Collectors;
 public record RunAvailabilityPolicy(DeploymentProfile profile) {
 
   /**
-   * {@link #LOCAL_DEV} - everything {@link RunCatalog} allows, unchanged (today's behavior: local
-   * development, CI, and any environment that has not opted into the narrower portfolio profile).
-   * {@link #PORTFOLIO} - {@link Environment#PUBLIC} only; {@link Environment#LOCAL} needs the
-   * separate seven-container Restful Booker Platform stack running alongside it, which this
-   * deployment's RAM/disk/attack-surface budget does not carry (see {@code
-   * docs/DEPLOYMENT_ARCHITECTURE.md} section 2).
+   * {@link #LOCAL_DEV} - everything {@link RunCatalog} allows. {@link #PORTFOLIO} - {@link
+   * Environment#PUBLIC} only; {@link Environment#LOCAL} needs the separate seven-container stack
+   * this deployment's resource budget doesn't carry.
    */
   public enum DeploymentProfile {
     LOCAL_DEV,

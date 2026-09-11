@@ -31,13 +31,11 @@ import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 
 /**
- * D2.5 (docs/DEPLOYMENT_ARCHITECTURE.md's "Restart behavior" section) - proves {@link
- * RunRecoveryService} recovers every non-terminal run to {@code ERROR} (never touching an
- * already-terminal one), is idempotent under a repeated pass, and is fail-closed: {@link
- * RunRecoveryService#requireRecoveryComplete} never stops throwing once a single run - or the
- * initial load itself - fails to recover, and the pass itself fails loudly (by throwing out of
- * {@link RunRecoveryService#run}) rather than ever declaring itself done with unfinished work left
- * behind.
+ * Verifies {@link RunRecoveryService} recovers every non-terminal run to {@code ERROR} (leaving
+ * terminal runs untouched), is idempotent across repeated passes, and is fail-closed: {@link
+ * RunRecoveryService#requireRecoveryComplete} keeps throwing until a pass fully succeeds, and a
+ * failed pass throws loudly out of {@link RunRecoveryService#run} rather than declaring itself
+ * done.
  */
 class RunRecoveryServiceTest {
 
@@ -124,11 +122,10 @@ class RunRecoveryServiceTest {
   }
 
   /**
-   * D2.5 review [P1] - a run whose own recovery attempt fails must not prevent every other run from
-   * still being recovered, but the pass as a whole must not lie about being complete: it must throw
-   * (so an {@code ApplicationRunner} failure fails startup and the container orchestrator retries),
-   * and {@link RunRecoveryService#requireRecoveryComplete} must keep rejecting traffic with a
-   * {@code 503} forever after - never fail open just because most of the pass succeeded.
+   * A run whose own recovery fails must not block recovery of the others, but the pass as a whole
+   * must not report success: it throws (failing startup so the orchestrator retries), and {@link
+   * RunRecoveryService#requireRecoveryComplete} keeps rejecting traffic with a {@code 503} - never
+   * fail open just because most runs recovered.
    */
   @Test
   void aFailureRecoveringOneRunStillRecoversTheOthersButFailsThePassAndKeepsTheGateClosed() {
@@ -167,9 +164,8 @@ class RunRecoveryServiceTest {
   }
 
   /**
-   * D2.5 review [P1] - the same fail-closed contract must hold when the initial load of
-   * non-terminal runs itself fails (e.g. a transient database error), not only when one individual
-   * run's own recovery fails.
+   * The same fail-closed contract holds when loading non-terminal runs itself fails (e.g. a
+   * transient database error), not only when one run's own recovery fails.
    */
   @Test
   void aFailureLoadingTheNonTerminalRunsFailsThePassAndKeepsTheGateClosed() {
@@ -273,10 +269,9 @@ class RunRecoveryServiceTest {
   }
 
   /**
-   * Wraps {@code delegate}, failing every {@link RunLifecycleStore#transitionIfNonTerminal} call
-   * for exactly {@code failingRunId}, delegating every other run and every other method straight
-   * through - the minimal shape needed to prove one run's own recovery failure does not derail the
-   * rest of the pass.
+   * Wraps {@code delegate}, failing {@link RunLifecycleStore#transitionIfNonTerminal} for exactly
+   * {@code failingRunId} and delegating everything else - proves one run's recovery failure does
+   * not derail the rest of the pass.
    */
   private static RunLifecycleStore failingTransitionFor(
       RunLifecycleStore delegate, String failingRunId) {

@@ -25,45 +25,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Tails one run's raw {@code <runId>.tests.jsonl} (written by runner-listener's {@code
- * RunnerEventTestExecutionListener}, a completely separate process) and forwards each validated
- * {@code TEST_*} line into the canonical journal via {@link RunEventAppender}, which assigns it a
- * fresh canonical sequence - the raw file's own source sequence only ever proves the listener's own
- * internal ordering, never the cross-run-lifecycle one a dashboard needs.
+ * Tails one run's raw {@code <runId>.tests.jsonl} (written by runner-listener, a separate process)
+ * and forwards each validated line into the canonical journal via {@link RunEventAppender}, which
+ * assigns it a fresh canonical sequence - the raw file's own source sequence only proves the
+ * listener's internal ordering, not the cross-run-lifecycle one a dashboard needs.
  *
- * <p>Polls rather than relying solely on filesystem notifications: {@code WatchService} can
- * coalesce several rapid writes into a single event on Windows, so a poll loop that always
- * re-checks for new bytes is the only mechanism guaranteed not to miss a burst of test events.
+ * <p>Polls rather than relying on filesystem notifications: {@code WatchService} can coalesce
+ * several rapid writes into a single event on Windows, so polling is the only way to guarantee no
+ * burst of test events is missed.
  *
- * <p>Runs on its own daemon thread, started at construction and driven to completion by exactly one
- * of two conditions: the raw {@code .tests.complete} marker appears (a clean listener shutdown), or
- * {@link #stopAndAwaitFinished} is called (the process ended without one - cancelled, timed out, or
- * force-killed). Either way, a poll tick that finds nothing new AND observes one of those two
- * conditions performs no further reads - the marker is only ever created after every byte is
- * already flushed, so "nothing new, and complete" is a reliable "there will never be anything new"
- * signal, not a race. A trailing, never-terminated line left behind by an abrupt kill is discarded
- * rather than treated as a validation failure, but only when ingestion was stopped without ever
- * observing the marker - {@link RunService} alone decides whether that missing marker is itself
- * tolerable for the run's own outcome (yes for {@code CANCELLED}/{@code TIMED_OUT}, no otherwise).
- * The marker appearing at all, by contrast, is this class's own unconditional promise that the raw
- * stream is complete and internally consistent: a trailing unterminated line, or a marker with no
- * data file ever created, coexisting with it can only mean corruption, since the real writer always
- * creates the data file first and only creates the marker after closing cleanly - either is a
- * validation failure, never silently tolerated.
+ * <p>Runs on its own daemon thread until either the raw {@code .tests.complete} marker appears (a
+ * clean listener shutdown) or {@link #stopAndAwaitFinished} is called (cancelled, timed out, or
+ * force-killed). A trailing unterminated line left by an abrupt kill is discarded, not treated as a
+ * validation failure, but only when the marker was never observed; the marker appearing at all is
+ * this class's unconditional promise that the stream is complete and consistent, so a trailing line
+ * or missing data file alongside it can only mean corruption.
  *
- * <p>Backed by a real {@link ExecutorService#submit} - not a bare {@code
- * CompletableFuture.supplyAsync} task, whose {@code cancel(true)} does not actually interrupt the
- * running computation. {@link #stopAndAwaitFinished} depends on a genuine interrupt to promptly
- * break a stuck poll loop out of {@code Thread.sleep} so a hung ingestor can never keep appending
- * events after this method has already given up waiting on it and the caller has moved on to
- * finalizing the run.
+ * <p>Backed by a real {@link ExecutorService#submit}, not a bare {@code
+ * CompletableFuture.supplyAsync} task, whose {@code cancel(true)} would not actually interrupt the
+ * running computation - {@link #stopAndAwaitFinished} depends on a genuine interrupt to promptly
+ * break a stuck poll loop out of {@code Thread.sleep}.
  *
- * <p>A malformed line, a source-sequence gap or duplicate, an event for the wrong runId or of a
- * type that is neither {@code TEST_*} nor {@code STEP_*}, an unsupported {@code schemaVersion}, or
- * one of the marker-consistency violations above instead stops ingestion immediately with {@link
- * IngestionResult#valid() valid() == false}: once the raw stream's own internal consistency cannot
- * be trusted, forwarding anything further into the canonical journal would just be propagating
- * corruption.
+ * <p>A malformed line, a source-sequence gap/duplicate, an event for the wrong runId or an
+ * unexpected type, an unsupported {@code schemaVersion}, or a marker-consistency violation stops
+ * ingestion immediately with {@link IngestionResult#valid() valid() == false}.
  */
 public final class ListenerEventIngestor {
 
@@ -131,25 +116,19 @@ public final class ListenerEventIngestor {
               thread.setDaemon(true);
               return thread;
             });
-    // D4.3.3 - this executor's own worker thread is distinct from whatever thread called this
-    // constructor (RunService's own single-worker executor), so MDC does not carry runId onto it
-    // automatically - explicit here, the same way every other per-run background thread in this
-    // service is.
+    // This executor's worker thread is distinct from whatever thread called this constructor, so
+    // MDC doesn't carry runId onto it automatically.
     this.future = executor.submit(() -> MdcScope.withMdc("runId", runId, this::runLoop));
   }
 
   /**
-   * Signals the poll loop to finish as soon as it next wakes (at most one {@link #pollInterval}
-   * away in the common case) and waits up to {@code timeout} for it to actually do so. Safe to call
-   * more than once (e.g. from both {@code cancel()} and the worker thread) or whether or not the
-   * raw {@code .tests.complete} marker has appeared yet - {@link Future#get} on an
-   * already-completed future simply returns the same result again.
+   * Signals the poll loop to finish as soon as it next wakes and waits up to {@code timeout} for it
+   * to actually do so. Safe to call more than once - {@link Future#get} on an already-completed
+   * future simply returns the same result again.
    *
-   * <p>On timeout, {@link Future#cancel(boolean) cancel(true)} - backed by a real {@code
-   * ExecutorService} task, this genuinely interrupts the poll loop, unlike a bare {@code
-   * CompletableFuture} - plus {@link ExecutorService#shutdownNow()} as a second layer, guarantee
-   * the background thread cannot outlive this call to later append an event once the caller has
-   * already moved on and (most likely) closed this run's canonical journal with {@code
+   * <p>On timeout, {@link Future#cancel(boolean) cancel(true)} plus {@link
+   * ExecutorService#shutdownNow()} guarantee the background thread cannot outlive this call to
+   * later append an event after the caller has moved on and closed the journal with {@code
    * RUN_FINISHED}.
    */
   public IngestionResult stopAndAwaitFinished(Duration timeout) {
@@ -168,8 +147,7 @@ public final class ListenerEventIngestor {
               "Listener event ingestion for run " + runId + " did not stop within " + timeout);
     } catch (CancellationException cancelled) {
       // A concurrent caller's own timeout already cancelled the underlying task while this call
-      // was still waiting on it - converge on the same kind of terminal result that caller is
-      // about to record, rather than letting this exception propagate uncaught.
+      // was still waiting on it.
       interruptAndShutdownNow();
       result =
           IngestionResult.invalid(
@@ -186,9 +164,8 @@ public final class ListenerEventIngestor {
                   + (cause != null ? cause.getMessage() : executionFailure.getMessage()));
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
-      // The caller's own wait was interrupted, not the ingestion thread - without also stopping
-      // the underlying task here, it could keep running (and still append an event) long after
-      // this method has already given up and returned.
+      // The caller's wait was interrupted, not the ingestion thread - stop the underlying task too,
+      // or it could keep running and appending events after this method has returned.
       interruptAndShutdownNow();
       result =
           IngestionResult.invalid(
@@ -196,8 +173,7 @@ public final class ListenerEventIngestor {
     } finally {
       executor.shutdown();
     }
-    // First caller to resolve a terminal result wins; every concurrent caller - whatever outcome
-    // it individually observed - converges on that same single, stable answer.
+    // First caller to resolve a terminal result wins; every concurrent caller converges on it.
     return terminalResult.compareAndSet(null, result) ? result : terminalResult.get();
   }
 
@@ -247,13 +223,10 @@ public final class ListenerEventIngestor {
         boolean overflow = Files.exists(overflowMarker);
         boolean stop = stopRequested.get();
         if (newBytes.length == 0 && (complete || overflow || stop)) {
-          // D4.2 - checked before the completion-marker handling below, and unconditionally: the
-          // writer already stopped appending once it hit the configured cap (see
-          // RunnerEventJsonlWriter's own Javadoc), so nothing about a trailing/complete line
-          // applies here. Reported as its own explicit validation failure - never folded into the
-          // generic "stopped without ever seeing a marker" tolerance below, which exists for a
-          // genuinely different case (an abrupt kill) and must never be credited with the wrong
-          // cause, regardless of the process's own eventual exit classification.
+          // Checked before completion-marker handling, and unconditionally: the writer already
+          // stopped appending once it hit its configured cap, so this is its own explicit
+          // validation failure, never folded into the "stopped without a marker" tolerance below,
+          // which exists for a different case (an abrupt kill).
           if (overflow) {
             throw new RawEventValidationException(
                 diagnostic(
@@ -415,11 +388,9 @@ public final class ListenerEventIngestor {
   }
 
   /**
-   * Decodes strictly - unlike {@code new String(bytes, UTF_8)}, which silently replaces an invalid
-   * byte sequence with U+FFFD, {@link CharsetDecoder} defaults to {@link CodingErrorAction#REPORT}
-   * for malformed input and unmappable characters, throwing instead. Invalid UTF-8 in the raw
-   * stream is corruption, not something to paper over - the JSON could otherwise stay syntactically
-   * valid while a {@code testDisplayName}/{@code detail} silently changes underneath it.
+   * Decodes strictly - unlike {@code new String(bytes, UTF_8)}, which silently replaces invalid
+   * bytes with U+FFFD, this throws on malformed input, since the JSON could otherwise stay
+   * syntactically valid while a field's value silently changes underneath it.
    */
   private static String decodeStrictUtf8(byte[] bytes, int offset, int length)
       throws CharacterCodingException {
@@ -431,9 +402,8 @@ public final class ListenerEventIngestor {
     return decoder.decode(ByteBuffer.wrap(bytes, offset, length)).toString();
   }
 
-  // Deliberately unbounded for now: an extremely long line with no newline would grow this
-  // indefinitely across polls. A real writer never produces such a line, so this is deferred
-  // hardening (a max-line-length guard), not fixed here.
+  // Unbounded: an extremely long line with no newline would grow this indefinitely across polls.
+  // A real writer never produces such a line; deferred hardening, not fixed here.
   private static byte[] concat(byte[] first, byte[] second) {
     byte[] combined = new byte[first.length + second.length];
     System.arraycopy(first, 0, combined, 0, first.length);

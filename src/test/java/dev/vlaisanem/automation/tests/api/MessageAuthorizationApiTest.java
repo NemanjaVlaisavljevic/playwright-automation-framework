@@ -45,10 +45,8 @@ class MessageAuthorizationApiTest {
   @Test
   @DisplayName("Known gap: an anonymous guest can read another guest's email and phone number")
   void anonymousCanReadAnyMessagesPersonalDetails(APIRequestContext request, Steps steps) {
-    // The shared public demo target's own message ids drift over time (messages get added/removed
-    // by other tests/users) - a hardcoded id would eventually stop existing. Picking the first id
-    // off a real, current listing keeps this test pinned to whatever the target actually has right
-    // now, rather than assuming a specific id still exists.
+    // Message ids on the shared target drift over time, so read the first id from a live listing
+    // instead of hardcoding one.
     MessagesResponse messages =
         steps.call(
             "List all messages anonymously",

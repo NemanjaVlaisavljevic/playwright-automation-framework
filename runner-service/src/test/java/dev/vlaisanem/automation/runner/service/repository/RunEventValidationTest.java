@@ -14,10 +14,9 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Fast, DB-free proof of {@link RunEventValidation}'s two [P1]/[P2] review fixes - the same checks
- * are also exercised end-to-end against a real Postgres in {@code JdbcRunStoreTest}
- * (databaseIntegrationTest), but a dedicated unit test here proves the shared logic itself, not
- * just one caller of it, and runs in the default fast suite.
+ * Fast, DB-free proof of {@link RunEventValidation}'s checks - also exercised end-to-end against a
+ * real Postgres in {@code JdbcRunStoreTest}, but this proves the shared logic itself, not just one
+ * caller of it, and runs in the default fast suite.
  */
 class RunEventValidationTest {
 
@@ -155,11 +154,9 @@ class RunEventValidationTest {
     Run queued = Run.queued(RUN_ID, Environment.PUBLIC, Suite.SMOKE, NOW, List.of());
     Run before = queued.transitionTo(RunStatus.STARTING, NOW.plusSeconds(1));
     Run running = before.transitionTo(RunStatus.RUNNING, NOW.plusSeconds(2));
-    // A hand-rolled Run that reuses running's own already-set startedAt but shifts it slightly on
-    // the terminal transition - nothing about identity or the event/status pairing catches this.
-    // Still ordered requestedAt <= startedAt <= finishedAt, so Run's own compact constructor (which
-    // only ever validates one snapshot in isolation, never against what a specific transition
-    // started from) has no reason to reject it either.
+    // Reuses running's startedAt but shifts it slightly on the terminal transition - nothing about
+    // identity or the event/status pairing catches this, and it stays ordered requestedAt <=
+    // startedAt <= finishedAt, so Run's own compact constructor has no reason to reject it either.
     Run after =
         new Run(
             running.runId(),

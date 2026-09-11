@@ -36,9 +36,8 @@ class RunRequestValidatorTest {
   }
 
   /**
-   * Now testable for real (see the git history of this file): {@link Environment#LOCAL} is the
-   * first enum literal that actually exercises the rejection branch, since it does not allow every
-   * {@link Suite} the way {@link Environment#PUBLIC} does.
+   * {@link Environment#LOCAL} is the first enum literal that exercises the rejection branch, since
+   * unlike {@link Environment#PUBLIC} it does not allow every {@link Suite}.
    */
   @ParameterizedTest
   @EnumSource(value = Suite.class, names = "JOURNEY", mode = EnumSource.Mode.EXCLUDE)
@@ -48,10 +47,9 @@ class RunRequestValidatorTest {
   }
 
   /**
-   * The portfolio profile's whole point - see {@code docs/DEPLOYMENT_ARCHITECTURE.md}'s "LOCAL is
-   * out of scope for the portfolio deployment" section. Unlike {@link
-   * #rejectsEverySuiteOtherThanJourneyUnderLocalWhenLocalDev}, this rejects even the one
-   * combination {@link RunAvailabilityPolicy.DeploymentProfile#LOCAL_DEV} allows.
+   * The portfolio profile's whole point (see {@code docs/DEPLOYMENT_ARCHITECTURE.md}, "LOCAL is out
+   * of scope for the portfolio deployment"): rejects even the one combination {@link
+   * RunAvailabilityPolicy.DeploymentProfile#LOCAL_DEV} allows.
    */
   @ParameterizedTest
   @EnumSource(Suite.class)

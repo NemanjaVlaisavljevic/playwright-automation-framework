@@ -11,21 +11,18 @@ import org.slf4j.MDC;
 
 /**
  * In-memory {@link RunEventAppender} for tests that exercise a lifecycle coordinator or service
- * without standing up a real filesystem journal. Enforces the same "sequence must match", "runId
- * must match", and "reject further appends once terminal" invariants a real journal would, so a
- * test using this catches a genuine double-{@code RUN_FINISHED} or wrong-sequence bug exactly the
- * way {@code FileBackedRunEventJournalTest} does for the real implementation.
+ * without a real filesystem journal. Enforces the same sequence/runId-match and reject-after-
+ * terminal invariants a real journal would, so a double-{@code RUN_FINISHED} or wrong-sequence bug
+ * is still caught here.
  */
 public final class RecordingRunEventAppender implements RunEventAppender {
 
   private final List<RunnerEvent> events = new CopyOnWriteArrayList<>();
   private final Set<String> closedRunIds = ConcurrentHashMap.newKeySet();
   private final Object lock = new Object();
-  // D4.3.3 review finding - captured here rather than via a test-only field on any production
-  // class: this is already the real collaborator ListenerEventIngestor's own background thread
-  // invokes for every forwarded event, so observing MDC at that exact call is proof enough that
-  // runId is really set on the thread that matters, with no test-only mutable state added to any
-  // production object.
+  // Captured here instead of via a test-only field on production code: this is the exact call
+  // ListenerEventIngestor's background thread makes for every forwarded event, so observing MDC
+  // here proves runId is set on the thread that matters.
   private volatile String lastAppendMdcRunId;
 
   @Override

@@ -15,12 +15,11 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /**
- * D4.3.2 review finding - {@code RunnerMetricsTest} proves {@code recordRetentionSweepFailure}
- * itself works, and {@code RetentionServiceTest} (Testcontainers) proves the success path against a
- * real sweep, but neither proved the call-site wiring for a genuine whole-sweep exception (one that
- * fails before any {@link RetentionReport} could even be built). A plain Mockito {@link
- * RunLifecycleStore} is enough to force exactly that - no real Postgres needed, since the exception
- * fires on the very first call {@code computeCandidates()} makes, before anything else is touched.
+ * {@code RunnerMetricsTest} proves {@code recordRetentionSweepFailure} itself works, and {@code
+ * RetentionServiceTest} proves the success path against a real sweep; this proves the call-site
+ * wiring for a genuine whole-sweep exception that fails before any {@link RetentionReport} could be
+ * built. A plain Mockito {@link RunLifecycleStore} is enough, since the exception fires on the very
+ * first call {@code computeCandidates()} makes.
  */
 class RetentionServiceSweepFailureMetricsTest {
 

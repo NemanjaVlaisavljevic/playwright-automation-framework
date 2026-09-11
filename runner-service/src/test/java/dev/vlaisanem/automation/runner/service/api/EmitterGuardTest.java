@@ -19,10 +19,10 @@ import org.mockito.MockingDetails;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
- * Spring's {@code ResponseBodyEmitter} does not tolerate completing an already-finished async
- * context a second time. Both a container-driven event (client disconnect/timeout) and a hub-driven
- * one (the subscription closing on its own) can race to finish the same emitter, so this guard must
- * let exactly one of them through - see {@link RunEventStreamController} class Javadoc.
+ * Spring's {@code ResponseBodyEmitter} throws if completed twice. A container-driven event (client
+ * disconnect/timeout) and a hub-driven one (the subscription closing) can race to finish the same
+ * emitter, so this guard must let exactly one through - see {@link RunEventStreamController} class
+ * Javadoc.
  */
 class EmitterGuardTest {
 
@@ -75,8 +75,8 @@ class EmitterGuardTest {
   }
 
   /**
-   * Deterministic proof that concurrent completion attempts - exactly the container-vs-hub race
-   * this class exists for - never both reach the underlying emitter, however they are interleaved.
+   * Proves concurrent completion attempts - the container-vs-hub race this class guards against -
+   * never both reach the underlying emitter, under any interleaving.
    */
   @Test
   void concurrentCompletionAttemptsNeverBothReachTheEmitter() throws Exception {

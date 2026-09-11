@@ -27,23 +27,12 @@ import { stepRowElementId } from "./run-details-view-model";
 
 const RUN_ID = "run-1";
 
-/**
- * The Tests table only - scopes a query away from the separate, always-present Artifacts table at
- * the bottom of the page, which now legitimately lists the very same artifact a step/test failure
- * also links to in its own context (see `FailureDetail`) - both are intentional, so tests that care
- * about a specific step/test's own link must not be tripped up by that second, unrelated copy.
- */
+/** The Tests table only - scopes a query away from the always-present Artifacts table at the bottom. */
 function testsTable() {
   return screen.getByRole("table", { name: `Tests for run ${RUN_ID}` });
 }
 
-/**
- * `LiveFocusPanel`'s own `<section aria-labelledby="...">` - a labelled `<section>` maps to ARIA
- * role `region`, and it's the only one on this page, so this stays stable across its own heading
- * text changing between "Active now (N)" and "Last known activity". Scoping to it is what keeps a
- * test about the panel from being tripped up by the Tests table legitimately showing the very same
- * test/step name.
- */
+/** `LiveFocusPanel`'s labelled `<section>` (ARIA role `region`, the only one on this page). */
 function liveFocusPanel() {
   return screen.getByRole("region");
 }
@@ -66,8 +55,7 @@ function renderPage(
   client: FakeEventStreamClient,
   options: {
     runPollIntervalMs?: number;
-    /** Defaults to `/runs/${RUN_ID}` with no query string - overridden by C4.5 deep-link tests to
-     * seed `?testId=&stepId=`. */
+    /** Defaults to `/runs/${RUN_ID}` with no query string. */
     initialPath?: string;
   } = {},
 ) {
@@ -104,9 +92,7 @@ function event(overrides: Record<string, unknown>): string {
 /** Reads a `MetricCard`'s numeric value by its label - the value paragraph is always the label
  * paragraph's immediately preceding sibling (see `MetricCard.tsx`). */
 function metricValue(label: string): string | null {
-  // Scoped to a `<p>` (see `MetricCard.tsx`) - the C4.4 status filter's own `<option>` list now
-  // contains this exact same word (e.g. "Running") as one of its choices, and a plain `getByText`
-  // would otherwise match both.
+  // Scoped to a <p>: the status filter's <option> list can contain the same word.
   return (
     screen.getByText(label, { selector: "p" }).previousElementSibling
       ?.textContent ?? null
@@ -794,13 +780,6 @@ describe("RunDetailsPage", () => {
     expect(screen.getAllByText(scopedMessage)).toHaveLength(1);
   });
 
-  /**
-   * Regression test (review finding, P1): a test can have steps that all reported a real terminal
-   * result (none `FAILED`) and still itself end `FAILED` - e.g. a failure during cleanup, after
-   * every step already passed. `primaryFailure` is then test-scoped, not step-scoped, and has no
-   * counterpart anywhere in the step list - it must stay visible after expanding, not disappear the
-   * way a step-scoped preview correctly does.
-   */
   it("keeps a test-level fallback failure visible after expanding, when no step explains it", async () => {
     server.use(
       http.get("/api/v1/runs/:runId", () =>
@@ -910,12 +889,6 @@ describe("RunDetailsPage", () => {
     ).toBeInTheDocument();
   });
 
-  /**
-   * Regression test (review finding, P2): once `FailureDetail` exists, the test row's own legacy
-   * "Detail" disclosure must not also show the same failure text - that would put the same content
-   * on the page through two different disclosure paths (or, for a single-line detail, twice as
-   * plain visible text).
-   */
   it("shows a failed test's failure content exactly once, with no parallel legacy Detail disclosure", async () => {
     server.use(
       http.get("/api/v1/runs/:runId", () =>
@@ -1263,14 +1236,8 @@ describe("RunDetailsPage", () => {
     ).toBeInTheDocument();
   });
 
-  /**
-   * Regression test for a real review finding: the terminal reconciliation must not depend on a
-   * REST refetch. `useRunEventStream` triggers a `run` query refetch the instant the stream itself
-   * goes non-active (including reaching `"terminal"`) - if that refetch fails (or returns a stale
-   * snapshot), the REST-only `run.data.status`/`finishedAt` could stay stuck on RUNNING forever,
-   * reintroducing exactly the bug C4.1 fixed. The SSE stream's own `RUN_FINISHED` timestamp must be
-   * the primary terminal-time signal, not just a REST fallback.
-   */
+  // Reconciliation must not depend on a REST refetch succeeding - the SSE stream's own
+  // RUN_FINISHED timestamp is the primary terminal-time signal, not just a REST fallback.
   it("reconciles a test/step as INTERRUPTED from the stream's own RUN_FINISHED timestamp even when the final REST refetch fails", async () => {
     let getRunCallCount = 0;
     server.use(
@@ -1537,8 +1504,7 @@ describe("RunDetailsPage", () => {
       client.emit(event({ sequence: 2, type: "RUN_STARTED" }));
     });
 
-    // Without the fix, this REST snapshot would stay QUEUED for the rest of the live run - only
-    // RUN_FINISHED ever triggered a refetch, so the header/Cancel gating would be stuck stale.
+    // Confirms the REST snapshot refreshes on RUN_STARTED, not just at RUN_FINISHED.
     await screen.findByText("RUNNING");
     expect(
       screen.getByRole("link", { name: "Download log" }),
@@ -1656,11 +1622,8 @@ describe("RunDetailsPage", () => {
   });
 
   it("recovers a stuck run status and its artifacts via REST polling once the stream permanently freezes (regression)", async () => {
-    // Without the P1 fix: `useRunEventStream` invalidates `run` exactly once when the stream
-    // freezes into PROTOCOL_ERROR, but if the run is still RUNNING at that one refetch, nothing
-    // else ever refetches it again - the header stays stuck on RUNNING and the Artifacts section
-    // (gated on the run reaching a terminal status) never appears, even once the backend actually
-    // finishes the run and captures a screenshot.
+    // If the one PROTOCOL_ERROR refetch catches the run still RUNNING, REST polling must keep
+    // trying so the header and Artifacts section eventually catch up.
     let runFinished = false;
     let runRequestCount = 0;
     server.use(
@@ -2151,23 +2114,8 @@ describe("RunDetailsPage", () => {
       expect(screen.queryByRole("region")).not.toBeInTheDocument();
     });
 
-    /**
-     * A test still (wire-level) RUNNING can be reconciled to the display-only `INTERRUPTED` status
-     * even while the *live* connection itself is merely `RECONNECTING`, not yet `CLOSED` - the view
-     * model's `runIsTerminal` also considers the REST `RunResponse` (see `RunDetailsPage.tsx`), so a
-     * backend that has already finished the run can race a dropped `EventSource` that hasn't
-     * reconnected to receive the final `RUN_FINISHED` frame yet. `INTERRUPTED` must never count as
-     * active in that window either.
-     */
-    /**
-     * Regression test (review finding, P2): a dropped `EventSource` can sit in `RECONNECTING`
-     * well after the REST fallback has already confirmed the run is over - the panel must hide
-     * entirely once the run's own *effective* status (REST here, since the SSE stream itself never
-     * reached its own `RUN_FINISHED`) is terminal, not keep showing "Last known activity" (or
-     * worse, imply there might still be something active) just because `connectionState` alone
-     * hasn't caught up. This test previously asserted the opposite (a real review finding: it had
-     * cemented exactly the wrong behavior) - see the PR history for the original assertions.
-     */
+    // A dropped EventSource can sit in RECONNECTING after REST already confirmed the run is over;
+    // the panel must hide entirely rather than keep showing "Last known activity".
     it("hides entirely once the run's own REST status is terminal, even while merely RECONNECTING", async () => {
       server.use(
         http.get("/api/v1/runs/:runId", () =>
@@ -2722,14 +2670,8 @@ describe("RunDetailsPage", () => {
       scrollIntoView.mockRestore();
     });
 
-    /**
-     * Regression test (review finding, P1): `reveal()`'s own dedup previously keyed on the target
-     * itself, so once a given test had been revealed once, a *second* explicit click on the same
-     * Live Focus item (after the user had scrolled away) silently did nothing - every reveal after
-     * the first one for that target became a no-op. Each explicit reveal is its own request and
-     * must scroll/focus again, independent of whether an earlier request already targeted the same
-     * row.
-     */
+    // Each explicit reveal is its own request and must scroll/focus again, even for a target
+    // already revealed once.
     it("scrolls and focuses again when the same Live Focus target is explicitly clicked a second time", async () => {
       server.use(
         http.get("/api/v1/runs/:runId", () =>
@@ -3551,13 +3493,8 @@ describe("RunDetailsPage", () => {
       );
     });
 
-    /**
-     * Regression test (review finding, P2): `deepLinkHandledKeyRef` previously never reset once a
-     * target had been handled, so navigating away from it (the URL briefly carrying no target at
-     * all) and then back to the *exact same* target left it permanently treated as "already
-     * handled" - a real browser Back/Forward round trip to the same link would silently never
-     * reveal/focus it again.
-     */
+    // deepLinkHandledKeyRef must reset when the target disappears from the URL, so Back/Forward
+    // to the same link reveals/focuses it again.
     it("re-triggers reveal/focus after the target briefly disappears from the URL and then comes back", async () => {
       server.use(
         http.get("/api/v1/runs/:runId", () =>
@@ -3629,13 +3566,8 @@ describe("RunDetailsPage", () => {
       scrollIntoView.mockRestore();
     });
 
-    /**
-     * Regression test (review finding, P1): on a fresh deep-link load against an already-finished
-     * run, the REST `GET /runs/:id` response routinely resolves *before* the SSE replay has
-     * delivered every event. Gating "not found" on a REST-derived terminal boolean (rather than the
-     * stream's own `CLOSED` state) reported the target missing while it was, in fact, only a few
-     * replayed events away.
-     */
+    // On a fresh deep-link load, REST can resolve terminal before the SSE replay finishes; "not
+    // found" must gate on the stream's own CLOSED state, not a REST-derived terminal boolean.
     it("stays 'waiting', never a premature not-found, while an already-terminal REST snapshot resolves ahead of the SSE replay", async () => {
       server.use(
         http.get("/api/v1/runs/:runId", () =>
@@ -3688,12 +3620,6 @@ describe("RunDetailsPage", () => {
       ).not.toBeInTheDocument();
     });
 
-    /**
-     * Regression test (review finding, P2): `parseRunResultTarget` previously collapsed every
-     * malformed link (a `stepId` with no `testId`, a blank `testId`, a blank `stepId`) into the
-     * same bare `undefined` an entirely absent target also produced - a viewer following a broken
-     * link got an ordinary, unexplained page instead of any indication the URL itself was invalid.
-     */
     it("shows 'This result link is invalid.' for a malformed deep link", async () => {
       server.use(
         http.get("/api/v1/runs/:runId", () =>
@@ -3711,12 +3637,8 @@ describe("RunDetailsPage", () => {
       ).toBeInTheDocument();
     });
 
-    /**
-     * Regression test (review finding, P2): the panel previously hid only on `connectionState`, so
-     * an unknown run (e.g. a 404) - where `runStatus` is `undefined` because there is no REST data
-     * to read a status from at all - could still render "Active now (0)", implying a run this
-     * dashboard cannot even confirm exists might have something active.
-     */
+    // Must hide on runStatus === undefined too, not just connectionState, or an unknown run (404)
+    // could render "Active now (0)".
     it("hides the Live Focus panel entirely while the run itself is unknown (e.g. a 404)", async () => {
       server.use(
         http.get(

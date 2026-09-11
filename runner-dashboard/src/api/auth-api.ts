@@ -3,18 +3,9 @@ import { getCsrfTokenFromCookie } from "./csrf";
 import { RunnerApiError } from "./problem-detail";
 
 /**
- * Hand-validated against a local schema, same rationale as `getHealth` in `runner-api.ts`:
- * `/api/v1/auth/me` and `/api/v1/auth/csrf` are deliberately kept out of the backend's OpenAPI
- * document (a simple, stable, rarely-changing shape not worth `npm run api:check:contract`
- * churn), so nothing here is routed through the generated client.
- *
- * `canManageRuns` is the one field every admin-gated control must check - never `authenticated`
- * alone. When GitHub OAuth2 isn't configured on the backend at all (the permissive chain -
- * default local `bootRun`, `dashboardE2eTest`), nobody is ever "authenticated" as anyone, but
- * every caller can still manage runs, exactly like this project's whole pre-D3.2 history.
- * `authenticationRequired` says whether a login concept even exists in this deployment - the
- * login control is hidden entirely when it's `false`, since a login link with no backing OAuth2
- * endpoint would be a dead link.
+ * Hand-validated, not routed through the generated client (`/auth/me`, `/auth/csrf` are outside
+ * the OpenAPI document). `canManageRuns`, not `authenticated`, is what admin-gated controls must
+ * check: with OAuth2 unconfigured, nobody is "authenticated" but every caller can still manage runs.
  */
 const CurrentUserSchema = z.object({
   authenticationRequired: z.boolean(),
@@ -69,10 +60,8 @@ export async function getCurrentUser(): Promise<CurrentUser> {
 }
 
 /**
- * Forces the backend to (re)issue the `XSRF-TOKEN` cookie for the current session - called once on
- * app bootstrap (see `AuthControls`) and again explicitly after logout, which does not reload the
- * page (a successful login does, via its own full-page redirect back to `/`, which re-triggers
- * this same bootstrap call for the new session automatically).
+ * Forces the backend to (re)issue the `XSRF-TOKEN` cookie. Called on app bootstrap and again after
+ * logout, since logout doesn't reload the page (login does, via its own redirect).
  */
 export async function primeCsrfToken(): Promise<void> {
   await normalizedFetch("/api/v1/auth/csrf");

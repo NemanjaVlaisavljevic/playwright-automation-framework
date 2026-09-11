@@ -17,13 +17,14 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * D2.4 - direct unit coverage for {@link ArtifactIngestionService}: the manifest-reading,
- * idempotent -insert, never-throws contract every hot-path caller ({@code RunEventBroker#append},
- * {@code RunLifecycleCoordinator#finishIfLive}) depends on.
+ * Unit coverage for {@link ArtifactIngestionService}'s manifest-reading, idempotent-insert,
+ * never-throws contract, which {@code RunEventBroker#append} and {@code
+ * RunLifecycleCoordinator#finishIfLive} both depend on.
  */
 class ArtifactIngestionServiceTest {
 
@@ -53,8 +54,8 @@ class ArtifactIngestionServiceTest {
     ArtifactIngestionService service = serviceFor(artifactsRoot, repository);
 
     service.ingestAvailableEntries(RUN_ID, false);
-    service.ingestAvailableEntries(RUN_ID, false); // the incremental pass and the final drain
-    // may legitimately both see the same manifest lines.
+    // The incremental pass and the final drain may legitimately both see the same manifest lines.
+    service.ingestAvailableEntries(RUN_ID, false);
 
     assertThat(repository.findForRun(RUN_ID, null))
         .extracting(ArtifactManifestEntry::artifactId)
@@ -72,10 +73,8 @@ class ArtifactIngestionServiceTest {
   }
 
   /**
-   * The whole point of this service's own contract: a corrupt manifest (here, an unterminated
-   * trailing line reported once {@code runTerminal} is {@code true} - see {@code
-   * ArtifactManifestReader}) must never propagate out and fail whatever lifecycle event triggered
-   * ingestion. {@code artifacts} is a derived index, not a source of truth - losing one pass is
+   * A corrupt manifest must never propagate out and fail whatever lifecycle event triggered
+   * ingestion - {@code artifacts} is a derived index, not a source of truth, so losing one pass is
    * always recoverable later.
    */
   @Test
@@ -118,10 +117,29 @@ class ArtifactIngestionServiceTest {
         .isEqualTo(ArtifactIngestionOutcome.FAILED);
   }
 
+  @Test
+  void rejectsASymbolicLinkUsedAsTheRunArtifactsDirectory(@TempDir Path artifactsRoot)
+      throws IOException {
+    Path outside = artifactsRoot.resolve("outside-run");
+    Files.createDirectories(outside);
+    Path runRoot = artifactsRoot.resolve(RUN_ID);
+    try {
+      Files.createSymbolicLink(runRoot, outside);
+    } catch (UnsupportedOperationException | IOException cannotCreateSymlink) {
+      Assumptions.abort(
+          "Symbolic links are not supported/permitted: " + cannotCreateSymlink.getMessage());
+      return;
+    }
+    FakeArtifactRepository repository = new FakeArtifactRepository();
+
+    assertThat(serviceFor(artifactsRoot, repository).ingestAvailableEntries(RUN_ID, false))
+        .isEqualTo(ArtifactIngestionOutcome.FAILED);
+    assertThat(repository.findForRun(RUN_ID, null)).isEmpty();
+  }
+
   /**
-   * [P1] fix - a failed final drain used to be logged and entirely forgotten: the run still reached
-   * its terminal status, but nothing durable recorded that its artifact metadata might be
-   * incomplete, and nothing ever retried it.
+   * A failed final drain must durably mark the run's artifact metadata as incomplete so it gets
+   * retried, rather than being silently forgotten once the run reaches its terminal status.
    */
   @Test
   void aFailedFinalDrainMarksTheRunIncomplete(@TempDir Path artifactsRoot) throws IOException {
@@ -192,10 +210,9 @@ class ArtifactIngestionServiceTest {
   }
 
   /**
-   * D4.2 - because the producer already deletes an oversized artifact before ever recording it in
-   * the manifest, a real/manifested size mismatch here can only be a genuine anomaly (bug, race,
-   * tampering) - treated exactly like any other manifest corruption: the whole pass fails, nothing
-   * from it is ingested.
+   * The producer deletes an oversized artifact before ever recording it in the manifest, so a
+   * real/manifested size mismatch here can only be a genuine anomaly (bug, race, tampering) -
+   * treated like any other manifest corruption: the whole pass fails.
    */
   @Test
   void treatsARealSizeMismatchAgainstTheManifestAsCorruption(@TempDir Path artifactsRoot)
@@ -217,11 +234,9 @@ class ArtifactIngestionServiceTest {
   }
 
   /**
-   * D4.2 - the producer is a genuine trust boundary, not a guarantee runner-service can rely on
-   * alone: a file whose real size agrees with its own manifest entry (so the consistency check
-   * above would not catch it) but exceeds the configured per-artifact limit must still be rejected
-   * independently - a producer bug or a bypassed/older client must never let an oversized file
-   * reach the served index just because its own manifest entry happens to agree with it.
+   * The producer is a trust boundary, not a guarantee: a file whose real size agrees with its own
+   * manifest entry (so the consistency check above wouldn't catch it) but exceeds the configured
+   * per-artifact limit must still be rejected independently.
    */
   @Test
   void rejectsAnArtifactWhoseRealSizeAgreesWithTheManifestButExceedsTheConfiguredLimit(
@@ -339,9 +354,9 @@ class ArtifactIngestionServiceTest {
 
   /**
    * Also writes a real file at each entry's own {@code relativePath}, exactly {@code sizeBytes()}
-   * long - D4.2's ingestion-side consistency check now stats the real resolved file and compares it
-   * against the manifest's own claim, so a fixture manifest entry with no matching real file (or a
-   * mismatched size) would itself now be treated as corruption.
+   * long, since ingestion's consistency check stats the real file and compares it against the
+   * manifest's claim - a fixture entry with no matching (or mismatched) real file would itself be
+   * treated as corruption.
    */
   private static void writeManifest(Path artifactsRoot, ArtifactManifestEntry... entries)
       throws IOException {

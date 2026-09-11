@@ -5,15 +5,12 @@ import java.util.function.LongFunction;
 
 /**
  * Sole entry point for adding an event to a run's canonical, cross-run-lifecycle event timeline.
- * The implementation - not the caller - owns sequence assignment: {@code eventFactory} receives the
- * sequence number it must use, mirroring runner-listener's {@code RunnerEventJsonlWriter}, for the
- * same reason - assigning a sequence number a step before the actual write would let two threads
- * race between "take a number" and "append", so a lower sequence number could land after a higher
- * one.
+ * The implementation, not the caller, owns sequence assignment: {@code eventFactory} receives the
+ * sequence number it must use, since assigning one a step before the actual write would let two
+ * threads race between "take a number" and "append".
  *
- * <p>A narrow interface deliberately: production code depends on this, not on the file-backed
- * implementation directly, so orchestration-level tests can substitute an in-memory recording
- * appender instead of standing up a real filesystem journal.
+ * <p>A narrow interface deliberately: production code depends on this, not the file-backed
+ * implementation, so orchestration-level tests can substitute an in-memory recording appender.
  */
 public interface RunEventAppender {
 

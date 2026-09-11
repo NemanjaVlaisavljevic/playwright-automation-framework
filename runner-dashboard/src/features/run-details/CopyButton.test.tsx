@@ -17,13 +17,6 @@ describe("CopyButton", () => {
     vi.useRealTimers();
   });
 
-  /**
-   * Regression test (review finding, P3): a static `aria-label` overrides the button's own visible
-   * text for assistive tech, so the "Copied!" text change was otherwise invisible to a screen
-   * reader - the label alone made the confirmation silent. A separate `aria-live="polite"` region
-   * announces it instead, without changing the button's own accessible name (it must keep saying
-   * what it copies, not "Copied!", which would drop the very context that makes it findable).
-   */
   it("announces a successful copy via a live region, without changing the button's own accessible name", async () => {
     mockClipboard();
     render(
@@ -39,8 +32,7 @@ describe("CopyButton", () => {
     await userEvent.click(button);
 
     expect(await screen.findByText("Copied to clipboard.")).toBeInTheDocument();
-    // The button's own accessible name never changes to "Copied!" - it keeps describing what it
-    // does, exactly as before the click.
+    // Accessible name stays unchanged - not "Copied!".
     expect(
       screen.getByRole("button", { name: "Copy link to test aTest()" }),
     ).toBeInTheDocument();

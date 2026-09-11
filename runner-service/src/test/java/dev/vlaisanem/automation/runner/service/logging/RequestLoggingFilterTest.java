@@ -38,9 +38,8 @@ class RequestLoggingFilterTest {
   @BeforeEach
   void attachLogAppender() {
     logger = (Logger) LoggerFactory.getLogger(RequestLoggingFilter.class);
-    // The effective root level in a test run is typically INFO, which would silently drop a DEBUG
-    // event before it ever reaches the appender below - explicit here so the health-probe DEBUG
-    // assertion actually observes the event, not an artifact of this logger's own default level.
+    // Test root level is typically INFO, which would silently drop a DEBUG event before the
+    // appender sees it - set explicitly so the health-probe DEBUG assertion observes the event.
     logger.setLevel(Level.DEBUG);
     logAppender = new ListAppender<>();
     logAppender.start();
@@ -50,9 +49,8 @@ class RequestLoggingFilterTest {
   @AfterEach
   void detachLogAppenderAndClearMdc() {
     logger.detachAppender(logAppender);
-    logger.setLevel(null); // restore inheriting from the root logger - Logback's context is a
-    // JVM-wide singleton, so an explicit level set here would otherwise leak into other test
-    // classes sharing this same logger.
+    logger.setLevel(null); // restore inheriting from root - Logback's context is a JVM-wide
+    // singleton, so an explicit level here would leak into other test classes.
     MDC.clear();
   }
 
@@ -140,11 +138,10 @@ class RequestLoggingFilterTest {
   }
 
   /**
-   * D4.3.3 review finding [P1] - the async cycle can complete between {@code isAsyncStarted()} and
-   * listener registration (realistic for a fast terminal SSE replay), so {@code getAsyncContext()}/
-   * {@code addListener} then throw {@link IllegalStateException}. This must never escape the filter
-   * and turn a best-effort observability failure into a real request-processing error - recovered
-   * with an immediate best-effort log instead.
+   * The async cycle can complete between {@code isAsyncStarted()} and listener registration
+   * (realistic for a fast terminal SSE replay), so {@code getAsyncContext()}/{@code addListener}
+   * can throw {@link IllegalStateException}; this must never escape the filter, and falls back to
+   * an immediate best-effort log instead.
    */
   @Test
   void anAsyncContextThatAlreadyCompletedBeforeListenerRegistrationStillLogsOnceAndNeverThrows()
@@ -165,9 +162,9 @@ class RequestLoggingFilterTest {
   }
 
   /**
-   * D4.3.3 review finding [P1] - the container does not keep this listener registered for a new
-   * async cycle on the same request; without re-registering in {@code onStartAsync}, a request that
-   * calls {@code startAsync()} a second time would finish with zero access-log lines at all.
+   * The container does not keep this listener registered across a new async cycle on the same
+   * request; without re-registering in {@code onStartAsync}, a second {@code startAsync()} call
+   * would finish with zero access-log lines.
    */
   @Test
   void onStartAsyncReRegistersItselfSoASecondAsyncCycleStillLogsExactlyOnce() throws Exception {
@@ -197,9 +194,9 @@ class RequestLoggingFilterTest {
   }
 
   /**
-   * D4.3.3 review finding [P2] - {@code onComplete}/{@code onTimeout}/{@code onError} must not be
-   * conflated into the same outcome; a timed-out SSE connection logging as an ordinary successful
-   * completion (often even with a stale {@code 200}) would be actively misleading.
+   * {@code onComplete}/{@code onTimeout}/{@code onError} must not be conflated - a timed-out SSE
+   * connection logging as an ordinary completion (often with a stale {@code 200}) would be actively
+   * misleading.
    */
   @Test
   void anAsyncTimeoutLogsAsTimeoutNeverAsAnOrdinaryCompletion() throws Exception {
@@ -242,10 +239,8 @@ class RequestLoggingFilterTest {
   }
 
   /**
-   * D4.3.3 review finding [P2] - a blind {@code MDC.remove} would erase a {@code requestId} some
-   * outer scope had already put there before this filter ever ran. {@code MdcScope}'s restore-not-
-   * remove semantics must apply here too, exactly as it already does at every background-thread
-   * boundary this phase touches.
+   * A blind {@code MDC.remove} would erase a {@code requestId} an outer scope had already set
+   * before this filter ran; {@code MdcScope}'s restore-not-remove semantics apply here too.
    */
   @Test
   void restoresTheOuterRequestIdInMdcRatherThanBlindlyClearingIt() throws Exception {
@@ -309,13 +304,9 @@ class RequestLoggingFilterTest {
 
   @Test
   void aSuccessfulHealthProbeLogsAtDebugWhileAFailingOneLogsAtInfo() throws Exception {
-    // Live acceptance against a real running system found the real Spring Boot actuator
-    // WebMvcEndpointHandlerMapping resolves BEST_MATCHING_PATTERN_ATTRIBUTE to the coarse
-    // "/actuator/health/**" wildcard, never the literal "/actuator/health/readiness" - a first
-    // draft of this test set both the request's URI and that attribute to the identical literal
-    // path, which passed while the real suppression logic silently never fired against a real
-    // server. Reproduced here by giving the two a genuinely different value, exactly like the
-    // real mismatch.
+    // Spring Boot's actuator WebMvcEndpointHandlerMapping resolves BEST_MATCHING_PATTERN_ATTRIBUTE
+    // to the coarse "/actuator/health/**" wildcard, never the literal path - mirrored here so the
+    // suppression logic is exercised against the same mismatch a real server produces.
     HttpServletRequest okRequest = healthProbeRequest("readiness", null);
     HttpServletResponse okResponse = mockResponse(200);
     filter.doFilter(okRequest, okResponse, (req, res) -> {});

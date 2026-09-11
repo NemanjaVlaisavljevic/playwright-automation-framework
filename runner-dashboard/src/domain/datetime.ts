@@ -1,8 +1,6 @@
 /**
- * Renders in the viewer's own timezone (not UTC, unlike the raw ISO string the backend sends) -
- * exact enough to be useful, but not what a human reads at a glance. The locale itself is pinned
- * (`"en-US"`), not the viewer's own - deterministic formatting matters more here than adapting to
- * every locale for what is, for now, a single-team internal tool.
+ * Renders in the viewer's own timezone, not UTC. Locale is pinned to `"en-US"` for deterministic
+ * formatting rather than adapting to the viewer's locale.
  */
 export function formatLocalDateTime(iso: string): string {
   const date = new Date(iso);

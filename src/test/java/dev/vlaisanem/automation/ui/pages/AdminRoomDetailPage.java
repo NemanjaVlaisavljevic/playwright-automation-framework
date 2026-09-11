@@ -27,9 +27,8 @@ public final class AdminRoomDetailPage {
     // has the same missing-label gap.
     roomNameInput = page.locator("#roomName");
     priceInput = page.locator("#roomPrice");
-    // View-mode markup is confirmed (live DOM) to be <p>Room price: <span>100</span></p> - the
-    // value lives in its own <span>, so this can be asserted precisely instead of substring-matched
-    // against the whole "Room price: N" line.
+    // View-mode markup is <p>Room price: <span>100</span></p>; the value has its own <span>, so
+    // it can be matched exactly rather than by substring.
     priceValue = page.locator("p:has-text('Room price:') span");
   }
 
@@ -64,11 +63,9 @@ public final class AdminRoomDetailPage {
   }
 
   /**
-   * Asserts the view-mode price value equals {@code expectedPrice} exactly. Uses Playwright's
-   * auto-retrying {@code hasText} (anchored to a full match) rather than a one-shot {@code
-   * textContent()} snapshot: after Update, the form closes and the page re-fetches the room
-   * asynchronously, so a snapshot read risks reading a stale value mid-reload - and an unanchored
-   * substring match (e.g. "175") would also wrongly match a stale/different value like "1750".
+   * Asserts the view-mode price equals {@code expectedPrice} exactly, using an anchored,
+   * auto-retrying match: after Update the page re-fetches asynchronously, so a one-shot read risks
+   * a stale value, and an unanchored match could wrongly match e.g. "1750" for "175".
    */
   public AdminRoomDetailPage assertPrice(int expectedPrice) {
     assertThat(priceValue).hasText(Pattern.compile("^" + expectedPrice + "$"));
@@ -76,10 +73,9 @@ public final class AdminRoomDetailPage {
   }
 
   /**
-   * Booking rows are {@code <div class="detail booking-{n}">} (confirmed against the live DOM), but
-   * {@code {n}} is NOT confirmed to be the API's bookingId (a first attempt at assuming that failed
-   * against real data) - locate by guest name instead, which this project's tests always generate
-   * uniquely per booking (see BookingTestData).
+   * Booking rows are {@code <div class="detail booking-{n}">}, but {@code {n}} is not the API's
+   * bookingId - locate by guest name instead, which tests always generate uniquely (see
+   * BookingTestData).
    */
   private Locator bookingRow(String firstName, String lastName) {
     return page.locator(".detail")
@@ -108,12 +104,9 @@ public final class AdminRoomDetailPage {
   }
 
   /**
-   * Fills the booking row's inline edit inputs. Confirmed live: while a row is being edited, it is
-   * the ONLY row rendering real form controls (other rows stay plain text), so unscoped {@code
-   * input} locators are safe here - in DOM order: firstname, lastname, deposit paid (a separate
-   * {@code <select>}, not an input), checkin (dd/mm/yyyy), checkout (dd/mm/yyyy). None of these
-   * fields have accessible labels - another instance of the same gap already documented in
-   * ContactForm.java.
+   * Fills the booking row's inline edit inputs. Only the row being edited renders real form
+   * controls, so unscoped {@code input} locators are safe here; DOM order is firstname, lastname.
+   * No accessible labels (same gap as ContactForm.java).
    */
   public AdminRoomDetailPage fillBookingEdit(String newFirstName, String newLastName) {
     Locator inputs = page.locator("input");

@@ -7,15 +7,10 @@ import org.springframework.boot.health.contributor.Status;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.3.1 - contributes to the {@code readiness} health group (see {@code
- * management.endpoint.health.group.readiness.include} in {@code application.yml}), registered under
- * the contributor name {@code recovery} (Spring Boot strips the {@code HealthIndicator} suffix from
- * this bean's own name) - proven, not merely assumed, by {@code HealthEndpointGroupMembershipTest}.
- *
- * <p>{@link Status#OUT_OF_SERVICE}, never {@link Status#DOWN}, while D2.5's one-time startup
- * recovery pass has not finished yet - the same "temporary, self-resolving" convention {@code
- * RunnerRecoveringException}'s existing 503 mapping already uses. Deliberately excluded from the
- * {@code liveness} group: recovery taking time is never a reason to restart the JVM.
+ * Contributes to the {@code readiness} health group as {@code recovery}. Reports {@link
+ * Status#OUT_OF_SERVICE} while startup recovery is still running - the same
+ * temporary/self-resolving convention {@code RunnerRecoveringException}'s 503 uses. Excluded from
+ * {@code liveness}.
  */
 @Component
 public class RecoveryHealthIndicator implements HealthIndicator {

@@ -11,42 +11,27 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A small, dependency-free fixed-window rate limiter - no bucket4j/resilience4j, matching this
- * codebase's existing style of plain in-memory capacity ceilings ({@code
- * RunnerProperties#queueCapacity}/{@code #sseMaxSubscribers}). Single-instance, in-memory, resets
- * on restart - deliberate, the same rationale as the session store's own D3.1 decision (no Redis
- * for a single-instance portfolio deployment).
+ * A small, dependency-free fixed-window rate limiter. Single-instance, in-memory, resets on restart
+ * - deliberate, the same rationale as this project's session store (no Redis for a single-instance
+ * deployment).
  *
  * <p>Each {@code (namespace, key)} pair (a typed {@link WindowKey}, never a hand-concatenated
- * string with a separator character - a review finding: an earlier version used a literal character
- * between the two parts that a file-write mishap turned into an actual embedded NUL byte, making
- * the whole source file look like binary content to `git`/`grep`/review tooling) gets its own
- * {@link Window}: a start timestamp, the rule's own configured window duration (kept alongside it
- * specifically so a background sweep can tell a window is safe to evict without needing the
- * original {@link RateLimitRule} again), and a count - reset in place whenever the duration has
- * elapsed since that window started, so a key that keeps coming back never grows the map.
+ * string) gets its own {@link Window}: a start timestamp, the rule's configured window duration
+ * (kept alongside it so a background sweep can evict without the original {@link RateLimitRule}),
+ * and a count - reset in place once the duration elapses, so a recurring key never grows the map.
  *
- * <p><strong>Bounded memory, not just a documented trade-off (a review finding)</strong>: a real
- * attacker (internet scanners, botnet clients, IPv6 address rotation) can present many genuinely
+ * <p>Bounded memory is enforced, not just documented: a real attacker can present many genuinely
  * distinct source IPs, each opening one permanent entry - the reverse-proxy trust boundary prevents
- * *spoofing* a single request's origin, it does not prevent a real flood of distinct real origins.
- * Two independent safeguards, both required: (1) an opportunistic sweep, every {@value
- * #SWEEP_EVERY_N_CALLS} calls, removes every window whose own configured duration has already
- * elapsed since it last started; (2) a hard ceiling ({@value #DEFAULT_MAX_TRACKED_KEYS} distinct
- * keys by default) - if inserting a genuinely new key would exceed it, an immediate synchronous
- * sweep runs first, and if the map is still at capacity afterward (meaning that many keys are all
- * genuinely active right now), the single oldest window is evicted to make room. This is a safety
- * valve against unbounded growth, not a strict fairness guarantee under sustained flooding.
+ * spoofing a single request's origin, not a flood of distinct real origins. Two safeguards: (1) an
+ * opportunistic sweep every {@value #SWEEP_EVERY_N_CALLS} calls removes expired windows; (2) a hard
+ * ceiling ({@value #DEFAULT_MAX_TRACKED_KEYS} keys) triggers an immediate sweep, then evicts the
+ * single oldest window if still at capacity - a safety valve, not a fairness guarantee.
  *
- * <p><strong>Multi-rule checks are atomic (a review finding)</strong>: {@link #tryAcquire(String,
- * List)} evaluates every rule for one logical attempt (e.g. create-run's per-minute *and* per-hour
- * caps) before mutating any of their counters - a request that would be rejected by the second rule
- * never silently consumes the first rule's budget. On rejection, the returned {@code retryAfter} is
- * the *largest* remaining time among every rule that would have rejected (never the shortest), so a
- * caller blocked mainly by a hard hourly cap is never told to retry in a few seconds just because a
- * shorter-window rule also happened to be exhausted. Concurrent multi-rule callers lock every
- * involved {@link Window} in one fixed, global order (by identity hash) before evaluating any of
- * them, so two callers can never deadlock waiting on each other's windows in opposite order.
+ * <p>Multi-rule checks are atomic: {@link #tryAcquire(String, List)} evaluates every rule for one
+ * attempt before mutating any counter, so a request rejected by one rule never consumes another's
+ * budget. On rejection, {@code retryAfter} is the largest remaining time among the rules that
+ * rejected. Concurrent multi-rule callers lock every involved {@link Window} in one fixed, global
+ * order (by identity hash) before evaluating, so two callers can never deadlock on each other.
  */
 public class InMemoryRateLimiter {
 

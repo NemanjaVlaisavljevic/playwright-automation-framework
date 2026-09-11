@@ -25,10 +25,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 /**
- * Admin message view + delete through the UI. Delete (and mark-as-read) only works against the
- * local Docker target ({@code localTest}) - the public host's message DELETE/mark-as-read return
- * 403 due to a broken internal auth call between its microservices (see infra/rbp/README.md and the
- * message API discovery notes). Run this test class only against a local {@code baseUrl}.
+ * Delete (and mark-as-read) only works against the local Docker target ({@code localTest}): the
+ * public host's message DELETE/mark-as-read return 403 due to a broken internal auth call between
+ * its microservices (see infra/rbp/README.md). Run this class only against a local {@code baseUrl}.
  */
 @AutomationTest
 @Tag("journey")
@@ -102,10 +101,8 @@ class AdminMessageManagementJourneyTest {
           "Verify message deletion",
           () -> {
             messagesPage.assertNotListed(requested.subject());
-            // Empirically confirmed against the running app (not assumed): GET on a deleted message
-            // returns 500, not 404 - same behavior already found and documented for rooms in
-            // AdminRoomManagementJourneyTest. Asserting the actual observed status, not the "should
-            // be" one, per this project's rule against hardening unverified assumptions.
+            // A deleted message returns 500 on GET, not 404 - same quirk as rooms (see
+            // AdminRoomManagementJourneyTest).
             assertThat(messages.getMessage(message.messageId()).status()).isEqualTo(500);
           });
 

@@ -4,10 +4,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Raised when one or more processes remain alive after graceful and forced tree termination.
- * Carries the actual {@link Process}/{@link ProcessHandle} references, not just their PIDs: a raw
- * PID alone cannot be re-checked reliably later, since the OS can reuse it for an unrelated process
- * once the original one is truly gone, which would look like a false "still alive".
+ * Raised when one or more processes remain alive after graceful and forced tree termination. Holds
+ * the {@link Process}/{@link ProcessHandle} references rather than raw PIDs, since the OS can reuse
+ * a PID once the original process is gone.
  */
 public class ProcessTerminationException extends RuntimeException {
 
