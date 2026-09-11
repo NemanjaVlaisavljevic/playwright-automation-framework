@@ -50,3 +50,4 @@ bin/
 # Ephemeral local k6 run output - never committed; the one published baseline snapshot is
 # runner-dashboard/public/performance/baseline.json (D4.4.3), committed deliberately.
 performance/k6/results/
+.idea/
