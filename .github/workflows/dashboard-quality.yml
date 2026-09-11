@@ -2,12 +2,11 @@ name: Dashboard Quality Gate
 
 # Fast frontend CI for runner-dashboard (React/Vite) + the backend/frontend OpenAPI contract it
 # depends on. Two jobs: frontend-quality (no JVM needed) and openapi-contract (builds/starts a real
-# runner-service). Both are gated by the same workflow-level `paths` filter below, so any triggering
-# change (including a frontend-only one) runs both jobs - path filtering here decides whether the
-# whole workflow runs at all, not which job runs. openapi-contract stays a separate job (rather than
-# folded into frontend-quality) so its JVM/backend cost is easy to see and skip in the Actions UI,
-# not because it is triggered independently. Not wired into dashboardE2eTest - that suite is
-# real-browser E2E and lives in its own, separate, expensive workflow (dashboard-e2e.yml).
+# runner-service). Both run for every pull request because they are required checks; the `push`
+# path filter only avoids unrelated post-merge runs. openapi-contract stays a separate job (rather
+# than folded into frontend-quality) so its JVM/backend cost remains independently visible. Not
+# wired into dashboardE2eTest - that suite is real-browser E2E and lives in its own, separate,
+# expensive workflow (dashboard-e2e.yml).
 on:
   push:
     branches: [master]
@@ -19,15 +18,10 @@ on:
       - 'build.gradle'
       - 'settings.gradle'
       - '.github/workflows/dashboard-quality.yml'
+  # These two jobs are required by the master ruleset, so every pull request must report them.
+  # A workflow-level path filter would leave unrelated pull requests permanently "Expected" and
+  # unable to merge instead of reporting a successful/skipped check.
   pull_request:
-    paths:
-      - 'runner-dashboard/**'
-      - 'runner-service/src/main/java/**'
-      - 'runner-service/src/main/resources/application.yml'
-      - 'runner-service/build.gradle'
-      - 'build.gradle'
-      - 'settings.gradle'
-      - '.github/workflows/dashboard-quality.yml'
   workflow_dispatch:
 
 concurrency:
