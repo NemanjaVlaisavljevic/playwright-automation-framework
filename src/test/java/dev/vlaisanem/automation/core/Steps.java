@@ -12,16 +12,10 @@ import java.util.function.LongFunction;
 import java.util.function.Supplier;
 
 /**
- * Records named steps within one test as {@code STEP_STARTED}/{@code STEP_PASSED}/{@code
- * STEP_FAILED} {@link RunnerEvent}s, resolved as a JUnit parameter exactly like {@link
- * com.microsoft.playwright.Page} - see {@code AutomationExtension}. Deliberately not a {@code
- * ThreadLocal}/ambient-global design: a test declares {@code Steps} explicitly if it wants
- * step-level reporting, keeping the mechanism visible and directly testable.
- *
- * <p>Every event is appended through {@link RunnerEventWriterRegistry}, the same shared writer
- * {@code RunnerEventTestExecutionListener} uses for this test's own {@code TEST_*} events - both
- * must go through the one writer permitted per runId, so a step's events interleave with its test's
- * own events under one strictly monotonic sequence.
+ * Records named steps within a test as {@code STEP_STARTED}/{@code STEP_PASSED}/{@code STEP_FAILED}
+ * {@link RunnerEvent}s, resolved as a JUnit parameter like {@link com.microsoft.playwright.Page}.
+ * Shares one {@link RunnerEventWriterRegistry} writer per runId with the test's own {@code TEST_*}
+ * events so both stay in a single monotonic sequence.
  */
 public final class Steps {
 
@@ -29,13 +23,8 @@ public final class Steps {
   private final String testId;
   private final String testDisplayName;
   private final EventSink sink;
-  // Identity-keyed (a plain HashMap would use equals()/hashCode(), which two distinct exception
-  // instances can share by coincidence - or even the same instance thrown twice would collide with
-  // itself as a "duplicate key" under some equals() overrides) and every failed step's own instance
-  // is kept, not just the most recent: a test that catches step A's failure, then step B's, then
-  // rethrows A's original instance (a plausible negative-test shape - "step B was also expected to
-  // fail, but what actually ends the test is A") must still resolve back to step A, not lose the
-  // mapping to whichever step failed last.
+  // Identity-keyed (not equals()/hashCode()) and keeps every failed step's instance, not just the
+  // most recent, so a later rethrow of an earlier step's exception still resolves to that step.
   private final Map<Throwable, String> stepIdByFailure =
       Collections.synchronizedMap(new IdentityHashMap<>());
 
@@ -52,12 +41,8 @@ public final class Steps {
   }
 
   /**
-   * Runs {@code action} as one named step with no result: emits {@code STEP_STARTED} before it
-   * runs, {@code STEP_PASSED} if it completes normally, or {@code STEP_FAILED} if it throws - then
-   * rethrows the original failure unchanged, so the enclosing test still fails exactly as it would
-   * without this call. A thin wrapper over {@link #call(String, Supplier)} - see that method for
-   * the actual lifecycle (both go through the exact same code, so there is nothing here that could
-   * drift out of sync with it).
+   * Runs {@code action} as one named step with no result, delegating to {@link #call(String,
+   * Supplier)} for the actual lifecycle.
    */
   public void run(String name, Runnable action) {
     call(
@@ -69,25 +54,12 @@ public final class Steps {
   }
 
   /**
-   * Runs {@code action} as one named step, returning its result: emits {@code STEP_STARTED} before
-   * it runs, {@code STEP_PASSED} if it completes normally, or {@code STEP_FAILED} if it throws -
-   * then rethrows the original failure unchanged, so the enclosing test still fails exactly as it
-   * would without this call.
-   *
-   * <p>If reporting the failure itself throws (a broken writer, a full disk), that reporting
-   * failure is attached to the original one as a {@linkplain Throwable#addSuppressed(Throwable)
-   * suppressed exception} rather than propagated in its place - a reporting-infrastructure failure
-   * must never replace or hide the real assertion/application failure that actually failed the
-   * step.
-   *
-   * <p>If {@code action} succeeds but reporting that success (the {@code STEP_PASSED} write) then
-   * throws, {@code result} never reaches the caller at all - a caller of the common shape {@code
-   * try (ManagedRoom room = steps.call(...))} never gets as far as assigning {@code room}, so its
-   * try-with-resources can never close it. When {@code result} is itself an {@link AutoCloseable}
-   * (every {@code Managed*} test resource is), this closes it right here before rethrowing - the
-   * only place left that still can - so a resource genuinely created in the SUT is never silently
-   * leaked just because reporting the step's own success happened to fail. A close failure is
-   * attached as suppressed, the same pattern used for a broken {@code STEP_FAILED} write above.
+   * Runs {@code action} as one named step, returning its result, and rethrows any failure
+   * unchanged; a failure while reporting it is attached as a {@linkplain
+   * Throwable#addSuppressed(Throwable) suppressed exception} rather than replacing it. If {@code
+   * action} succeeds but reporting success then throws, a {@code result} that is itself {@link
+   * AutoCloseable} is closed here before rethrowing, since it would otherwise never reach the
+   * caller to be closed.
    */
   public <T> T call(String name, Supplier<T> action) {
     String stepId = UUID.randomUUID().toString();
@@ -128,24 +100,16 @@ public final class Steps {
       try {
         closeable.close();
       } catch (Exception | AssertionError closeFailure) {
-        // ManagedRoom/ManagedBooking/ManagedMessage's own close() throws AssertionError (not
-        // Exception) on an unexpected cleanup status - catching only Exception would let that
-        // escape this method and replace the reporting failure it was meant to be attached to.
+        // Managed* resources throw AssertionError (not Exception) on unexpected cleanup status.
         reportingFailure.addSuppressed(closeFailure);
       }
     }
   }
 
   /**
-   * The id of the step whose action threw exactly {@code executionException} (reference equality,
-   * not message/type comparison), or {@code null} if no step's own failure is the one that actually
-   * ended the test. Deliberately not just "the most recently failed step": a test that catches a
-   * step's failure and later fails for an unrelated reason (a different, unrelated assertion, or
-   * even an earlier step's own already-caught instance rethrown later) must not have its failure
-   * artifact mis-attributed to the wrong step - every failed step's own instance is remembered (see
-   * {@link #stepIdByFailure}), not just the most recent, so only the exact instance JUnit reports
-   * via {@code ExtensionContext.getExecutionException()} ever resolves, to whichever step it truly
-   * came from.
+   * The id of the step whose action threw exactly {@code executionException} (reference equality),
+   * or {@code null} if none did. Matches by identity, not by "most recently failed," since a caught
+   * step failure can be rethrown after a later, different step has also failed.
    */
   public String stepIdForFailure(Throwable executionException) {
     return executionException == null ? null : stepIdByFailure.get(executionException);

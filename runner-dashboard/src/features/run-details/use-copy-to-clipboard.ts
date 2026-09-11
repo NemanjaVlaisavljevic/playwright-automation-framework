@@ -7,24 +7,15 @@ export interface UseCopyToClipboardResult {
 }
 
 /**
- * Shared "click to copy, briefly confirm, then revert" behavior - originally the run ID's own copy
- * button, now reused everywhere a value needs the same one-tap-copy affordance (e.g. a failure's
- * detail text). A second `copy()` call before the previous one's timer fires resets the revert
- * deadline rather than racing it - two independent timers would both eventually fire, and whichever
- * happened to fire last would arbitrarily decide the final (wrong, for the second call) `copied`
- * value.
+ * Shared "click to copy, briefly confirm, then revert" behavior. A second `copy()` call before the
+ * previous timer fires resets the revert deadline rather than racing it.
  *
- * `requestId` is bumped both by a new `copy()` call and by unmount - either way, it invalidates any
- * still-in-flight `writeText` call: when that write eventually resolves, its own captured id no
- * longer matches `requestId.current`, so it is treated as stale and becomes a no-op rather than
- * calling `setState` on an unmounted component or scheduling a revert timer nothing will ever clear
- * (a real leak this hook once had - `copy()` called right before unmount, with the write still
- * pending when the cleanup effect ran, meant the cleanup could only clear a timer that did not exist
- * yet; the write resolving afterward would set state and schedule a fresh, un-cleared one).
+ * `requestId` is bumped on both a new `copy()` and unmount, invalidating any in-flight `writeText`
+ * call so it becomes a no-op instead of calling `setState` on an unmounted component or leaking an
+ * uncleared timer.
  *
- * A rejected `navigator.clipboard.writeText` (permission denied, unsupported browser) is swallowed
- * silently: no app state depends on it succeeding, `copied` simply never flips to `true`, and the
- * caller can still select the text by hand.
+ * A rejected `writeText` (permission denied, unsupported browser) is swallowed silently - `copied`
+ * simply never flips to `true`, and the caller can still select the text by hand.
  */
 export function useCopyToClipboard(
   revertAfterMs = 1500,
@@ -58,7 +49,7 @@ export function useCopyToClipboard(
         }
         revertTimer.current = setTimeout(() => setCopied(false), revertAfterMs);
       } catch {
-        // See doc comment above - deliberately not surfaced.
+        // Deliberately not surfaced - see doc comment above.
       }
     })();
   }

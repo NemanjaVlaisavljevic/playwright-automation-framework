@@ -15,15 +15,13 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * Regression guard for the runner's most important safety boundary: this service can launch
- * arbitrary Gradle/Playwright processes on request, so it must default to loopback-only, never be
- * silently reachable from other machines on the network. Starts the real embedded server (not just
- * a config-property check) so a future refactor that accidentally drops or overrides {@code
- * server.address} fails loudly here, not in production.
+ * Regression guard for the runner's most important safety boundary: it can launch arbitrary
+ * Gradle/Playwright processes, so it must default to loopback-only. Starts the real embedded
+ * server, not just a config-property check, so a refactor that drops {@code server.address} fails
+ * here, not in production.
  */
-// D2.3/D4.3.1: see OpenApiContractTest's own identical annotation for why this Docker-free,
-// full-context test re-excludes Flyway (not DataSourceAutoConfiguration - application.yml's
-// readiness group needs the real `db` contributor to exist) and mocks out the real store.
+// See OpenApiContractTest for why Flyway is excluded but DataSourceAutoConfiguration is not (the
+// readiness group needs a real `db` health contributor), and why the stores below are mocked.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
     properties = {
@@ -35,8 +33,8 @@ class ServerBindingTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
   @MockitoBean private ArtifactRepository artifactRepository;
-  // D4.2: DiskUsageService also needs a JdbcTemplate and isn't behind an interface, so it must be
-  // mocked here too for the same reason as the two stores above.
+  // DiskUsageService needs a real JdbcTemplate and isn't behind an interface; mocked for the same
+  // reason as the stores above.
   @MockitoBean private DiskUsageService diskUsageService;
 
   @Value("${server.address}")

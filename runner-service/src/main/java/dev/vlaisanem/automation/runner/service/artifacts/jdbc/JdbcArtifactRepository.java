@@ -19,45 +19,24 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * D2.4 - the real {@link ArtifactRepository}, backed by the {@code artifacts} table Flyway created
- * back in D2.1. No row lock, no transaction of its own kind {@code JdbcRunStore} needs: unlike
- * {@code runs}/{@code run_events}, nothing here participates in the replay-atomicity protocol - an
- * artifact row has no lifecycle of its own to protect, only a one-shot idempotent insert.
+ * The real {@link ArtifactRepository}, backed by the {@code artifacts} table. An artifact row has
+ * no lifecycle of its own to protect, only a one-shot idempotent insert.
  *
- * <p><strong>{@code ON CONFLICT (artifact_id) DO NOTHING} is idempotent only for a genuinely
- * identical re-read</strong> (a review finding): the same manifest entry may legitimately be
- * re-ingested by both an incremental pass and the final drain, and {@code DO NOTHING} is exactly
- * right for that case - but the same {@code artifactId} arriving with <em>different</em> metadata
- * (a different {@code runId}, path, type, size, or anything else) is not a legitimate re-read at
- * all, and {@code DO NOTHING} would otherwise silently discard that second artifact's real metadata
- * with no signal whatsoever. {@link #ingest} therefore inspects each row's own affected-count from
- * the batch (0 means a conflict occurred) and, only for those, re-reads the existing row and
- * compares it field-for-field against the incoming one - identical wins silently (the legitimate
- * case), anything else throws {@link ArtifactIngestionConflictException}.
+ * <p>{@code ON CONFLICT (artifact_id) DO NOTHING} is idempotent only for a genuinely identical
+ * re-read (an incremental pass and the final drain may legitimately re-ingest the same entry). The
+ * same {@code artifactId} arriving with different metadata is not a legitimate re-read: {@link
+ * #ingest} inspects each row's affected-count (0 means a conflict), re-reads the existing row, and
+ * throws {@link ArtifactIngestionConflictException} unless it's field-for-field identical.
  *
- * <p>{@code created_at} is truncated to microseconds before both the write and the comparison above
- * - {@code TIMESTAMPTZ} only stores microsecond precision (the same reason {@code JdbcRunStore}
- * truncates {@code Run}'s own timestamps), so an untruncated nanosecond-precision manifest {@link
- * Instant} would otherwise make a genuinely-identical re-ingest look like a conflict purely from a
- * precision mismatch that was never a real difference in the first place.
+ * <p>{@code created_at} is truncated to microseconds before both the write and that comparison,
+ * since {@code TIMESTAMPTZ} only stores microsecond precision and an untruncated {@link Instant}
+ * would otherwise look like a spurious conflict.
  *
- * <p><strong>D4.1 review round - {@code WHERE EXISTS(...)} alone does not serialize against a
- * concurrent purge under real transaction concurrency</strong> (a review finding): it correctly
- * removes the check-then-insert window <em>within one statement</em>, but does nothing to prevent
- * an ingest transaction's own snapshot from being taken before a concurrent {@code
- * claimForArtifactPurge} commits, then committing its insert only after that same run's purge has
- * already deleted its files and its {@code artifacts} rows - silently resurrecting metadata behind
- * files that no longer exist. {@link #ingest} now additionally takes a real per-run row lock (@code
- * SELECT ... FOR UPDATE} on {@code runs}) at the very start of its own transaction, for every
- * distinct target run in the batch, <em>before</em> checking the purge flag or inserting anything -
- * {@link #completePurge} takes the same lock at the start of its own transaction (the lock itself
- * is a plain {@code SELECT ... FOR UPDATE} against {@code runs}). Under Postgres's ordinary
- * row-lock semantics this makes the two protocols mutually exclusive per run, regardless of which
- * one reaches the row first: whichever transaction acquires the lock commits (or rolls back) before
- * the other can even read the row's current state, so there is no window left for a stale read to
- * slip through. {@code claimForArtifactPurge} (in {@code JdbcRunStore}) needs no code change of its
- * own to participate correctly - its {@code UPDATE} already takes the same row lock as an intrinsic
- * part of executing, for the duration of its own (very short, single-statement) transaction.
+ * <p>{@code ingest} and {@link #completePurge} each take a real per-run row lock ({@code SELECT ...
+ * FOR UPDATE} on {@code runs}) before touching artifact rows, making the two protocols mutually
+ * exclusive per run under Postgres's row-lock semantics - a same-statement {@code WHERE EXISTS}
+ * guard alone can't prevent an ingest transaction from committing after a concurrent purge has
+ * already deleted that run's files, which would silently resurrect metadata for gone files.
  */
 @Component
 public class JdbcArtifactRepository implements ArtifactRepository {
@@ -72,10 +51,8 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * D4.1 review round - see this class's own Javadoc for why a real per-run row lock, not just the
-   * {@code WHERE EXISTS(...)} guard, is what actually makes this safe under real concurrent
-   * transactions. Every distinct target run's row is locked (and its purge state read from that
-   * locked read) before anything is inserted, all within one transaction spanning the whole batch.
+   * Every distinct target run's row is locked (and its purge state read from that locked read)
+   * before anything is inserted, all within one transaction spanning the whole batch.
    */
   @Override
   public void ingest(List<ArtifactManifestEntry> rawEntries) {
@@ -88,9 +65,7 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   private void insertWithinPerRunLock(List<ArtifactManifestEntry> entries) {
-    // Sorted so two concurrent multi-run batches (were ingest ever called with entries spanning
-    // more than one run - it is not, today, see ArtifactIngestionService's own Javadoc, but this
-    // makes that safe rather than merely assumed) always lock in the same order, ruling out a
+    // Sorted so two concurrent multi-run batches always lock in the same order, ruling out a
     // lock-ordering deadlock between them.
     Set<String> runIds = new TreeSet<>();
     for (ArtifactManifestEntry entry : entries) {
@@ -130,10 +105,10 @@ public class JdbcArtifactRepository implements ArtifactRepository {
               ps.setString(10, entry.mediaType());
               ps.setTimestamp(11, Timestamp.from(entry.createdAt()));
             });
-    // batchSize == toInsert.size() above, so batchUpdate always produces exactly one chunk here -
-    // affectedPerBatch[0][i] is toInsert.get(i)'s own affected-row count. Every entry reaching this
-    // insert already passed the purge-lock check above, so 0 affected here can only mean a genuine
-    // artifact_id conflict, never a purge-skip - no further disambiguation needed.
+    // batchSize == toInsert.size(), so batchUpdate produces exactly one chunk:
+    // affectedPerBatch[0][i]
+    // is toInsert.get(i)'s affected-row count. 0 here can only mean a genuine artifact_id conflict,
+    // since every entry already passed the purge-lock check above.
     int[] affected = affectedPerBatch[0];
     for (int i = 0; i < toInsert.size(); i++) {
       if (affected[i] == 0) {
@@ -143,12 +118,9 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * Locks {@code runId}'s own {@code runs} row for the remainder of the current transaction (a
-   * plain {@code SELECT ... FOR UPDATE}) and returns whether its artifact purge has started (or the
-   * row does not exist at all - full-run cleanup deleted it out from under a very late ingestion
-   * retry, an equally benign reason to skip). See this class's own Javadoc for why this lock, held
-   * across the whole check-then-insert sequence, is what actually closes the race a bare {@code
-   * WHERE EXISTS} read could not.
+   * Locks {@code runId}'s {@code runs} row for the rest of the current transaction and returns
+   * whether its artifact purge has started (or the row doesn't exist at all - full-run cleanup
+   * deleted it out from under a very late ingestion retry, an equally benign reason to skip).
    */
   private boolean lockRunAndCheckPurgeStarted(String runId) {
     List<Boolean> rows =
@@ -177,11 +149,8 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * D4.1 review round (P2 finding): excludes any run whose artifact purge has <em>started</em> -
-   * not only one already fully complete - so a client can never be handed a download link for a
-   * file that is (or is about to be) deleted. Before this, the list stayed populated with stale
-   * rows for the entire window between {@code claimForArtifactPurge} and {@link #completePurge}
-   * (the on-disk file may already be gone by then, since deletion happens before that call).
+   * Excludes any run whose artifact purge has started, not only one already complete, so a client
+   * can never be handed a download link for a file that is (or is about to be) deleted.
    */
   @Override
   public List<ArtifactManifestEntry> findForRun(String runId, String testIdFilter) {
@@ -209,11 +178,9 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * D4.1 review round: excludes a run whose artifact purge has already started (or full-run cleanup
-   * has already tombstoned it) - retrying ingestion for a run that is being (or has been) purged
-   * can never usefully succeed, since {@link #ingest} will just keep skipping it anyway, and
-   * flagging it incomplete would only add noise to {@link #findRunIdsWithIncompleteIngestion} and
-   * waste bounded reconciliation attempts on a run that will never actually recover.
+   * Excludes a run whose artifact purge or full-run cleanup has already started: retrying ingestion
+   * for a run being (or already) purged can never usefully succeed, since {@link #ingest} will just
+   * keep skipping it.
    */
   @Override
   public void markIngestionIncomplete(String runId) {
@@ -231,7 +198,7 @@ public class JdbcArtifactRepository implements ArtifactRepository {
         runId);
   }
 
-  /** D4.1 review round: same exclusion as {@link #markIngestionIncomplete}'s own Javadoc. */
+  /** Same exclusion as {@link #markIngestionIncomplete}. */
   @Override
   public List<String> findRunIdsWithIncompleteIngestion() {
     return jdbcTemplate.queryForList(
@@ -252,11 +219,9 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * D4.1 review round (P2 finding): reports {@code true} the instant purge <em>starts</em> ({@code
-   * artifacts_purge_started_at IS NOT NULL}), not only once it fully completes ({@code
-   * artifacts_purged_at IS NOT NULL}) - matches {@link #findForRun}'s own updated exclusion, so the
-   * dashboard's "artifacts expired due to retention" message appears the moment a client can no
-   * longer see any artifacts for this run, not only once the DB row cleanup finishes.
+   * Reports {@code true} the instant purge starts, not only once it fully completes, matching
+   * {@link #findForRun}'s exclusion so the "expired due to retention" message appears as soon as a
+   * client can no longer see any artifacts for this run.
    */
   @Override
   public boolean isArtifactsPurged(String runId) {
@@ -270,9 +235,8 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * D4.1 review round - see this class's own Javadoc for why locking {@code runId}'s row first,
-   * within this same transaction, is what actually serializes this against a concurrent {@link
-   * #ingest} rather than merely the pre-existing {@code DELETE}+{@code UPDATE} pair alone.
+   * Locks {@code runId}'s row first, within this same transaction, to serialize against {@link
+   * #ingest}.
    */
   @Override
   public void completePurge(String runId) {
@@ -286,9 +250,9 @@ public class JdbcArtifactRepository implements ArtifactRepository {
   }
 
   /**
-   * {@code TIMESTAMPTZ} only stores microsecond precision - see this class's own Javadoc for why
-   * the comparison {@link #requireIdenticalToExistingRow} makes must never be tripped up by a
-   * precision difference that was never a real one.
+   * {@code TIMESTAMPTZ} only stores microsecond precision, so {@link
+   * #requireIdenticalToExistingRow}'s comparison must not be tripped up by a precision difference
+   * that was never a real one.
    */
   private static ArtifactManifestEntry normalizeCreatedAt(ArtifactManifestEntry entry) {
     Instant truncated = entry.createdAt().truncatedTo(ChronoUnit.MICROS);

@@ -13,11 +13,9 @@ import {
 } from "./run-event-reducer";
 
 /**
- * `CONNECTING` (never yet open) and `RECONNECTING` (was open, dropped, `EventSource` is retrying on
- * its own) are deliberately distinct: `EventSource` itself fires the same `error` event for both,
- * so this hook is the one place that remembers whether the connection has ever reached `open` -
- * see `hasBeenOpen` below. `RECOVERING` is a fourth, hook-driven kind: a deliberate fresh-replay
- * attempt after a sequence gap, not anything `EventSource` itself reports - see `MAX_GAP_RETRIES`.
+ * `CONNECTING` and `RECONNECTING` are distinct even though `EventSource` fires the same `error`
+ * for both; this hook tracks whether the connection has ever reached `open` to tell them apart.
+ * `RECOVERING` is hook-driven: a fresh-replay attempt after a sequence gap (see `MAX_GAP_RETRIES`).
  */
 export type ConnectionState =
   | "CONNECTING"
@@ -27,8 +25,7 @@ export type ConnectionState =
   | "PROTOCOL_ERROR"
   | "CLOSED";
 
-/** The subset `onOpen`/`onError`/the retry logic can set directly - `CLOSED`/`PROTOCOL_ERROR` are
- * derived purely from `streamState.status` at render time, see `connectionState` below. */
+/** The subset settable directly; `CLOSED`/`PROTOCOL_ERROR` are derived from `streamState.status`. */
 type LiveConnectionState =
   "CONNECTING" | "LIVE" | "RECONNECTING" | "RECOVERING";
 
@@ -40,20 +37,10 @@ export interface UseRunEventStreamResult {
 const defaultClient = new EventSourceStreamClient();
 
 /**
- * A sequence gap is the one frozen reducer status worth retrying automatically: it can be a
- * transient hiccup (a dropped frame, a reconnect race), and the backend's own contract is to
- * replay a run's full journal from the beginning to any client that connects with no
- * `Last-Event-ID` - which a brand-new `EventSource` object always is, never carrying over the
- * previous instance's state. `protocol-error` (malformed JSON, wrong `runId`, a conflicting
- * duplicate) and `compatibility-error` (unsupported `schemaVersion`) are deterministic contract
- * violations a reconnect cannot fix, so they go straight to a permanent `PROTOCOL_ERROR` instead.
- *
- * Bounded to exactly one attempt, and *per run* - this budget is never reset by the transport
- * effect itself (which also re-runs for a `client` change alone, not just a new run), only by an
- * actual fresh mount of this hook (`useReducer`'s own initial value), which is what `key={runId}`
- * on the caller guarantees for a genuinely new run (see `RunDetailsPage.tsx`). A run that gaps
- * twice is showing a real, not transient, problem, and retrying forever would just be a silent
- * reconnect loop.
+ * A sequence gap is the only frozen status worth retrying: a fresh `EventSource` gets the backend's
+ * full journal replay, so it can resolve a transient hiccup. `protocol-error`/`compatibility-error`
+ * are deterministic and go straight to `PROTOCOL_ERROR`. Bounded to one attempt per run (reset only
+ * by a fresh mount via `key={runId}`, see `RunDetailsPage.tsx`) - a second gap is a real problem.
  */
 const MAX_GAP_RETRIES = 1;
 
@@ -79,37 +66,17 @@ function reduceLiveConnectionState(
 }
 
 /**
- * Owns one run's live SSE connection and feeds every frame - replay or live, identically - into
- * `applyRunnerEventMessage` via `useReducer` (not a `useState` functional updater): the reducer
- * function itself must stay pure, since React (in development, under `StrictMode`) is explicitly
- * allowed to invoke it twice to check for exactly that - both `applyRunnerEventMessage` and the
- * `"reset"` branch below (`createInitialRunEventStreamState()`, itself pure) already are, so this
- * is free. Every side effect (closing the connection, invalidating REST caches, retrying) instead
- * lives in a plain `useEffect` below, driven off the resulting `streamState`, which React only
- * re-runs on a genuine state transition (the reducer returns the *same* object reference for a
- * benign duplicate/replay, so no spurious re-fires).
+ * Owns one run's live SSE connection, feeding every frame into `applyRunnerEventMessage` via
+ * `useReducer` (must stay pure - React StrictMode double-invokes it). Side effects (closing the
+ * connection, invalidating REST caches, retrying) live in `useEffect`s driven off `streamState`.
  *
- * On a `"gap"` with retry budget remaining: closes the current connection, dispatches `"reset"` to
- * start the reducer over from scratch, reports `"RECOVERING"`, and opens a brand-new connection
- * (see `MAX_GAP_RETRIES`) - `"RECOVERING"` is set explicitly (not derived from `streamState.status`
- * alone) specifically so it keeps showing across the render where the reset has already taken
- * `status.kind` back to `"active"` but the fresh connection hasn't reported `open` yet. On anything
- * else non-`"active"` (terminal, a gap with no budget left, or one of the reducer's other frozen
- * states): closes the connection for good and invalidates both `["runs"]` and `["runs", runId]` -
- * the authoritative `RunResponse` is always re-read over REST afterward, never synthesized from the
- * SSE event itself, and there is nothing useful left to receive by holding the connection open once
- * the reducer has permanently frozen.
+ * On a `"gap"` with retry budget left: resets and reconnects, reporting `"RECOVERING"`. Otherwise
+ * once non-`"active"`: closes for good and invalidates `["runs"]`/`["runs", runId]` so the
+ * authoritative `RunResponse` is re-read over REST. Once `runStartedAt` is set, the REST snapshot
+ * is invalidated again so a header that caught `QUEUED` doesn't stay stale for the whole run.
  *
- * Separately, once the reducer's own `runStartedAt` is set (the SSE lifecycle confirming the run
- * left `QUEUED`/`STARTING`), the REST `RunResponse` is invalidated once more - otherwise a header
- * built from a `GET` that happened to catch `QUEUED` would show that status for the entire live run,
- * only ever refreshing once the run reaches a terminal state.
- *
- * Deliberately does not reset `streamState`/`connectionState` itself when `runId` changes -
- * `useReducer`'s/`useState`'s initial values already start fresh, so the caller forcing a remount
- * via `key={runId}` (see `RunDetailsPage.tsx`) is enough. Resetting state synchronously inside this
- * effect instead would work too, but is the exact "resetting state when a prop changes" antipattern
- * React's own docs steer away from in favor of a `key`.
+ * Does not reset state itself when `runId` changes - relies on the caller remounting via
+ * `key={runId}` (see `RunDetailsPage.tsx`), per React's own guidance over resetting in an effect.
  */
 export function useRunEventStream(
   runId: string,
@@ -124,21 +91,15 @@ export function useRunEventStream(
     undefined,
     createInitialRunEventStreamState,
   );
-  // `useReducer`, not `useState`: `dispatchLiveConnectionState` is called synchronously inside the
-  // gap-retry effect below (for `"recovering"`), and a `useState` setter called that way trips
-  // oxlint's `set-state-in-effect` the same way the old impure updater did - `dispatch` from
-  // `useReducer` is exempt (see `gapRetriesUsed` below for the same reasoning in more detail).
+  // useReducer (not useState) because dispatch is exempt from oxlint's set-state-in-effect check,
+  // and this is called synchronously inside the gap-retry effect below.
   const [liveConnectionState, dispatchLiveConnectionState] = useReducer(
     reduceLiveConnectionState,
     "CONNECTING" as LiveConnectionState,
   );
 
-  // A dedicated `useReducer`, not a ref: `gapRetriesUsed` is read during render (see
-  // `isRecoveringFromGap` below), and React refs must never be read there - but a plain `useState`
-  // setter called synchronously inside an effect trips oxlint's `set-state-in-effect` the same way
-  // the old impure updater did. `dispatch` from `useReducer` is exempt from that same check (it
-  // already is for the domain `streamState` above), so a trivial counter reducer gets both
-  // properties: safe to read during render, and safe to call from inside an effect.
+  // useReducer, not a ref (read during render, see isRecoveringFromGap) or useState (its setter
+  // would trip oxlint's set-state-in-effect when called synchronously below).
   const [gapRetriesUsed, dispatchGapRetryCount] = useReducer(
     (count: number, action: "increment" | "reset") =>
       action === "reset" ? 0 : count + 1,
@@ -146,9 +107,8 @@ export function useRunEventStream(
   );
 
   const connectionRef = useRef<EventStreamConnection | null>(null);
-  // Mirrors "this connection has been superseded" without waiting for a re-render - prevents
-  // onOpen/onError from an old, already-closing connection from updating `liveConnectionState`
-  // after the effect below has moved on (closed it for a retry, or frozen for good).
+  // Marks a connection as superseded so a stale onOpen/onError can't update state after the
+  // effect below has moved on (retried or frozen for good).
   const frozenRef = useRef(false);
 
   const startConnection = useCallback(() => {
@@ -210,11 +170,8 @@ export function useRunEventStream(
     }
   }, [streamState.runStartedAt, runId, queryClient]);
 
-  // `liveConnectionState === "RECOVERING"` takes priority so it keeps showing through the render
-  // where the reset above has already put `status.kind` back to `"active"` but the fresh
-  // connection hasn't opened yet; the `"gap"` check below only covers the one render where a fresh
-  // gap is detected but the retry effect hasn't run yet - together these avoid ever flashing
-  // `"PROTOCOL_ERROR"` for a gap that's actually about to be retried.
+  // Covers both the render where recovery is already in progress and the one where a fresh gap
+  // is detected but the retry effect hasn't run yet, avoiding a flash of "PROTOCOL_ERROR".
   const isRecoveringFromGap =
     liveConnectionState === "RECOVERING" ||
     (streamState.status.kind === "gap" && gapRetriesUsed < MAX_GAP_RETRIES);

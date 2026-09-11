@@ -1,10 +1,8 @@
 package dev.vlaisanem.automation.runner.service.exception;
 
 /**
- * Thrown when a new SSE event-stream subscription cannot be accepted - either the hub is already at
- * its configured concurrent-subscriber capacity, or the service is shutting down. Either way, the
- * expected client behavior is the same: back off and reconnect with {@code Last-Event-ID} to
- * resume, rather than treating it as a permanent failure.
+ * Thrown when a new SSE subscription can't be accepted (hub at capacity, or shutting down). Clients
+ * should back off and reconnect with {@code Last-Event-ID} rather than treat this as permanent.
  */
 public class RunEventSubscriptionRejectedException extends RuntimeException {
 

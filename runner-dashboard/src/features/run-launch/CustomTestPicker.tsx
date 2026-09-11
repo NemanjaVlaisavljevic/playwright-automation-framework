@@ -24,15 +24,10 @@ export interface CustomTestPickerProps {
 }
 
 /**
- * The `CUSTOM`-suite picker: a searchable, filterable list of the server's own catalog
- * (`GET /api/v1/tests`) with checkboxes. Deliberately never lets the caller type a class/method
- * name by hand - every selectable entry comes from {@link listPublicTests}, and what gets
- * submitted is exactly the `testKey` values checked here (see `RunLaunchForm`'s own submit
- * handler) - the same allowlist-only contract `CustomTestSelectionValidator` enforces server-side.
- *
- * `smoke` is deliberately a separate checkbox, not a fourth layer option: a test can be both `UI`
- * and `smoke` at once (see the catalog's own `tags`), so folding it into the layer dropdown would
- * misrepresent it as mutually exclusive with API/UI/JOURNEY.
+ * The `CUSTOM`-suite picker: a searchable, filterable list of the server's catalog with checkboxes.
+ * Never lets the caller type a class/method name by hand - only catalog entries are selectable,
+ * matching the allowlist-only contract `CustomTestSelectionValidator` enforces server-side.
+ * `smoke` is a separate checkbox, not a layer option, since a test can be both `UI` and `smoke`.
  */
 export function CustomTestPicker({
   environment,
@@ -47,9 +42,7 @@ export function CustomTestPicker({
   const catalog = useQuery({
     queryKey: queryKeys.publicTestCatalog(environment),
     queryFn: () => listPublicTests(environment),
-    // Mirrors RunLaunchForm's own capabilities query: the catalog itself doesn't change mid-session,
-    // so this only ever matters while erroring, and refetchIntervalInBackground matters for the same
-    // reason - a tab left open, unfocused, across a backend restart must still recover on its own.
+    // Retries only while erroring; refetchIntervalInBackground so an unfocused tab still recovers.
     refetchInterval: (query) =>
       query.state.status === "error" ? catalogRetryIntervalMs : false,
     refetchIntervalInBackground: true,

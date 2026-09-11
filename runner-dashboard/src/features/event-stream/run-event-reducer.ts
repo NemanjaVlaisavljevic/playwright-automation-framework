@@ -34,19 +34,13 @@ export interface TestExecution {
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly detail?: string;
-  /**
-   * Keyed by `stepId`, insertion-ordered by first appearance - empty for a test that never used the
-   * `Steps` API. `STEP_*` is purely additive over the original `RUN_*`/`TEST_*` vocabulary (see
-   * `docs/SSE_CONTRACT_V1.md`) - every event still carries the same `schemaVersion` regardless.
-   */
+  /** Keyed by `stepId`, insertion-ordered; empty for a test that never used the `Steps` API. */
   readonly steps: ReadonlyMap<string, StepExecution>;
 }
 
 /**
- * Once `status.kind` is anything but `"active"`, the stream is frozen: `applyRunnerEventMessage`
- * returns the same state unchanged for any further message. Recovering from any of these means the
- * caller reconnecting from scratch (a fresh `EventSource`, a fresh reducer state) - never patching
- * around it, per docs/SSE_CONTRACT_V1.md's own guidance for a client that ever observes a gap.
+ * Once `status.kind` isn't `"active"` the stream is frozen: `applyRunnerEventMessage` returns state
+ * unchanged for further messages. Recovery means reconnecting from scratch, never patching around it.
  */
 export type RunEventStreamStatus =
   | { kind: "active" }
@@ -56,12 +50,8 @@ export type RunEventStreamStatus =
   | { kind: "terminal"; runOutcome: RunOutcome };
 
 /**
- * `eventsBySequence`/`testsById` are `ReadonlyMap`, not `Map`: a consuming component holding this
- * state (e.g. via `useReducer`) must never be able to call `.set(...)`/`.delete(...)` directly and
- * mutate React state out from under the reducer - every transition builds a fresh `Map` internally
- * (see `applyRunnerEventMessage`) and only ever hands the result out as read-only. This also
- * reinforces the invariant that every sequence up to `lastSequence` exists in `eventsBySequence`:
- * external code has no way to poke a hole in it.
+ * `eventsBySequence`/`testsById` are `ReadonlyMap`, not `Map`, so a consumer can never mutate React
+ * state out from under the reducer - every transition builds a fresh `Map` internally.
  */
 export interface RunEventStreamState {
   readonly status: RunEventStreamStatus;
@@ -69,20 +59,11 @@ export interface RunEventStreamState {
   readonly testsById: ReadonlyMap<string, TestExecution>;
   readonly lastSequence: number;
   readonly runOutcome?: RunOutcome;
-  /**
-   * Set once, from `RUN_STARTED`'s own `timestamp` - lets a caller (see `use-run-event-stream.ts`)
-   * detect the run-started transition confirmed by the SSE lifecycle itself, to refresh the REST
-   * `RunResponse` snapshot exactly once rather than leaving it stuck at whatever status the initial
-   * `GET` happened to catch (`QUEUED`/`STARTING`) for the entire live run.
-   */
+  /** Set once from `RUN_STARTED`'s timestamp; lets a caller refresh the REST snapshot exactly once. */
   readonly runStartedAt?: string;
   /**
-   * Set once, from `RUN_FINISHED`'s own `timestamp` - the primary terminal-time signal for
-   * reconciling a test/step that never reported its own terminal result (see
-   * `run-details-view-model.ts`). Preferring this over the REST `RunResponse.finishedAt` means
-   * reconciliation does not depend on a REST refetch succeeding or being fresh: the stream already
-   * knows the run is over, and knows exactly when, the instant this event is processed - no round
-   * trip required, and nothing for a failed/stale refetch to strand.
+   * Set once from `RUN_FINISHED`'s timestamp - the terminal-time signal for reconciling a
+   * test/step with no terminal result, without depending on a REST refetch.
    */
   readonly runFinishedAt?: string;
 }
@@ -117,11 +98,8 @@ const statusByStepLevelEventType: Record<
 };
 
 /**
- * Structural equality for two already-validated `RunnerEvent`s. `JSON.stringify` is safe here
- * specifically because both sides are Zod parse *output*: Zod always builds the parsed object by
- * iterating its own schema's key order, not the input JSON's, so two structurally identical events
- * produce identically-ordered objects even if their original wire JSON had keys in a different
- * order - this would not be a safe comparison for arbitrary/untrusted JSON.
+ * Structural equality for two already-validated `RunnerEvent`s. `JSON.stringify` is safe here only
+ * because both sides are Zod parse output with deterministic key order - not safe for raw JSON.
  */
 function runnerEventsAreEqual(a: RunnerEvent, b: RunnerEvent): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -137,19 +115,10 @@ function isTerminalTestStatus(status: TestExecutionStatus): boolean {
 }
 
 /**
- * Rejects a semantically-impossible test-level lifecycle as a protocol error - the ingestor only
- * checks shape/runId/sequence (see `ListenerEventIngestor`), so a corrupted or hand-crafted stream
- * can otherwise reach this far looking "valid". The real system's own JUnit-driven lifecycle admits
- * exactly two shapes for a test (see `RunnerEventTestExecutionListener`): `TEST_STARTED` followed
- * by exactly one of `TEST_PASSED`/`TEST_FAILED`/`TEST_ABORTED`, or a lone `TEST_SKIPPED` with no
- * `TEST_STARTED` at all (JUnit Platform never calls `executionStarted` for a test it goes on to
- * report as skipped) - so:
- * - `TEST_STARTED` requires the testId not already be known (a repeat is never a legitimate reset).
- * - `TEST_PASSED`/`TEST_FAILED`/`TEST_ABORTED` require an existing, still-`RUNNING` test.
- * - `TEST_SKIPPED` requires the testId not already be known (same reasoning as `TEST_STARTED`).
- * - No event may carry a different `testDisplayName` than the one already known for that testId, or
- *   finish a test while one of its own steps is still `RUNNING` (impossible in the real system -
- *   `Steps.run` always completes a step, PASSED or FAILED, before returning).
+ * Rejects a semantically-impossible test-level lifecycle as a protocol error (the ingestor only
+ * checks shape/runId/sequence). Valid shapes: `TEST_STARTED` then exactly one of
+ * PASSED/FAILED/ABORTED, or a lone `TEST_SKIPPED`. A testId can't repeat `STARTED`/`SKIPPED`,
+ * `testDisplayName` can't change mid-stream, and a test can't finish while a step is still RUNNING.
  */
 function applyTestEvent(
   existing: TestExecution | undefined,
@@ -214,11 +183,9 @@ function applyTestEvent(
 }
 
 /**
- * Rejects a semantically-impossible step-level lifecycle as a protocol error, the step-scoped
- * counterpart to {@link applyTestEvent}'s own invariants: a `STEP_PASSED`/`STEP_FAILED` for a step
- * that never received `STEP_STARTED`, a repeated `STEP_STARTED` for an already-known step (never a
- * legitimate reset), a step whose `stepName` changes mid-stream, or any step-level event arriving
- * for a test that has already reached a terminal status.
+ * Step-level counterpart to {@link applyTestEvent}: rejects a `STEP_PASSED`/`FAILED` with no prior
+ * `STEP_STARTED`, a repeated `STEP_STARTED`, a changed `stepName`, or a step event for an
+ * already-terminal test.
  */
 function applyStepEvent(
   existingTest: TestExecution,
@@ -250,10 +217,7 @@ function applyStepEvent(
       reason: `${event.type} at sequence ${event.sequence} references step "${event.stepId}" that never received STEP_STARTED`,
     };
   } else if (existingStep.status !== "RUNNING") {
-    // A step is terminal (PASSED/FAILED) the instant its own event lands - `Steps.run` never
-    // revisits a step once it has reported an outcome. Without this, a STEP_PASSED followed by a
-    // STEP_FAILED for the same stepId would silently overwrite an already-terminal step's own
-    // outcome instead of being rejected as the impossible transition it is.
+    // A step is terminal the instant its event lands; a second outcome for the same stepId is rejected.
     return {
       ok: false,
       reason: `${event.type} at sequence ${event.sequence} arrived for step "${event.stepId}" after it was already terminal (${existingStep.status})`,
@@ -284,14 +248,8 @@ function applyStepEvent(
 }
 
 /**
- * Applies one raw SSE `data:` payload (still a JSON string - not yet parsed) to `state` for the
- * run identified by `runId`, replay or live alike: this is deliberately the single code path for
- * both, since the wire contract makes no distinction between a replayed and a live event beyond
- * timing.
- *
- * Frozen once `state.status.kind !== "active"` (see {@link RunEventStreamStatus}) - returns `state`
- * unchanged rather than continuing to interpret events after a gap/protocol/compatibility error or
- * the stream's own terminal event.
+ * Applies one raw SSE `data:` payload to `state` for `runId` - the single code path for both
+ * replay and live events. Frozen once `state.status.kind !== "active"`: returns state unchanged.
  */
 export function applyRunnerEventMessage(
   state: RunEventStreamState,
@@ -312,12 +270,8 @@ export function applyRunnerEventMessage(
     };
   }
 
-  // Staged on purpose: a real future V2 event (a new `type`, a reshaped payload) must classify as
-  // an unsupported-schema-version compatibility error, not a generic protocol error - which only
-  // works if runId/schemaVersion are checked against the loose envelope *before* the strict V1
-  // `RunnerEvent` union gets a chance to reject an unrecognized `type` as "doesn't match the
-  // contract." Validating the full V1 shape first (as an earlier version of this function did)
-  // meant every real V2 event failed at that step, before its version was ever inspected.
+  // Check runId/schemaVersion against the loose envelope before the strict V1 union, so a future
+  // V2 event classifies as a compatibility error rather than a generic protocol error.
   const envelope = RunnerEventEnvelope.safeParse(parsedJson);
   if (!envelope.success) {
     return {
@@ -361,11 +315,8 @@ export function applyRunnerEventMessage(
   }
   const event = result.data;
 
-  // Already seen (or older than) this sequence - normally a benign replay/reconnect overlap, but
-  // only when the content actually matches what was already recorded at that sequence. A conflict
-  // (same sequence, different type/timestamp/detail/...) means two different events are claiming
-  // the same slot in the canonical journal, which the server-side contract guarantees can never
-  // happen - so it's treated as a protocol violation, not silently smoothed over.
+  // Already seen (or older than) this sequence - a benign replay/reconnect overlap only if the
+  // content matches what was recorded; a mismatch at the same sequence is a protocol violation.
   if (event.sequence <= state.lastSequence) {
     const previouslySeen = state.eventsBySequence.get(event.sequence);
     if (

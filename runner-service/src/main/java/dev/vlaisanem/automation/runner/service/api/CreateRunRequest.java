@@ -8,16 +8,12 @@ import java.util.List;
 
 /**
  * Request body for {@code POST /api/v1/runs} - domain-level names only, never a Gradle task. {@code
- * testKeys} is only meaningful for {@link Suite#CUSTOM} - {@code null}/absent for every other
- * suite. Never trusted as-is: {@code RunService} validates every key against the current
- * server-side catalog (see {@code CustomTestSelectionValidator}) before it can influence anything.
+ * testKeys} is only meaningful for {@link Suite#CUSTOM}; {@code RunService} validates every key
+ * against the server-side catalog before it can influence anything.
  *
- * <p>{@code @Size} on {@code testKeys} (D3.3) is a defense-in-depth belt-and-braces layer, not a
- * replacement for {@code CustomTestSelectionValidator}'s own 25-key cap: Bean Validation runs here,
- * against the raw deserialized list, before the service layer (and its live-catalog lookup) ever
- * sees it - catching an oversized/malformed payload with a plain {@code 400} before any of that
- * later work is attempted. The per-key length cap guards against a single absurdly long string
- * being used to inflate the request body without tripping the list-size check.
+ * <p>The {@code @Size} caps here are defense in depth, not a replacement for {@code
+ * CustomTestSelectionValidator}'s own 25-key cap: they reject an oversized/malformed payload with a
+ * plain {@code 400} before the service layer's catalog lookup runs.
  */
 public record CreateRunRequest(
     @NotNull Environment environment,

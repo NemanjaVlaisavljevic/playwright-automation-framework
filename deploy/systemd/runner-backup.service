@@ -1,8 +1,7 @@
-# D4.6 - triggers one D4.5 backup cycle (deploy/backup/backup.sh) via the docker-compose.backup.yml
-# overlay. Installed alongside runner-backup.timer (see that file's own header) - never enabled on
-# its own; systemd would otherwise treat a bare `systemctl start runner-backup.service` correctly as
-# a one-off manual run too, which is intentional (see docs/RUNBOOK.md's "Backup and restore" section
-# for that exact invocation).
+# Triggers one backup cycle (deploy/backup/backup.sh) via the docker-compose.backup.yml overlay.
+# Installed alongside runner-backup.timer - never enabled on its own; a bare
+# `systemctl start runner-backup.service` also works correctly as a one-off manual run (see
+# docs/RUNBOOK.md's "Backup and restore" section).
 #
 # Install (adjust WorkingDirectory below to the real deploy checkout path first):
 #   sudo cp runner-backup.service runner-backup.timer runner-backup-alert@.service /etc/systemd/system/
@@ -13,46 +12,37 @@ Description=runner-service Postgres backup (D4.5)
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
-# Review-round finding: Persistent=true (on the paired .timer) fires a missed run right after boot,
-# but Postgres itself may not be accepting connections yet at that exact moment - without a bounded
-# retry, that one attempt fails and the next chance would otherwise be a full day away. Bounds total
-# retries so a persistently-broken cause (not just a slow boot race) still gives up rather than
-# retrying forever: at most 5 attempts inside any rolling hour, 5 minutes apart (see Restart=/
-# RestartSec= below) - by then something genuinely needs a human, not another retry.
+# Persistent=true (on the paired .timer) fires a missed run right after boot, but Postgres may not
+# be accepting connections yet - bounds total retries so a persistently-broken cause still gives up
+# rather than retrying forever: at most 5 attempts inside any rolling hour, 5 minutes apart (see
+# Restart=/RestartSec= below).
 StartLimitIntervalSec=3600
 StartLimitBurst=5
-# Review-round finding: journald alone is not an alert - nothing pages/notifies an operator just
-# because a log line was written. Fires only once retries are genuinely exhausted (OnFailure= is not
-# invoked for a run systemd is about to auto-restart - see Restart= below), against a template unit
-# instantiated with this unit's own name. See runner-backup-alert@.service's own header for what it
-# does today and its own documented limitation.
+# journald alone is not an alert. Fires only once retries are genuinely exhausted (OnFailure= is
+# not invoked for a run systemd is about to auto-restart - see Restart= below), against a template
+# unit instantiated with this unit's own name. See runner-backup-alert@.service's own header.
 OnFailure=runner-backup-alert@%n.service
 
 [Service]
 Type=oneshot
-# The real deploy checkout on the production host - see docs/RUNBOOK.md's own deploy section for
-# where this normally lives. Adjust before installing; not templated further since a real host has
-# exactly one of these, checked once at install time.
+# The real deploy checkout on the production host - see docs/RUNBOOK.md's own deploy section.
+# Adjust before installing.
 WorkingDirectory=/opt/runner-service/deploy
-# --name: a review-round finding - without a stable, known name, a timeout/kill below (or `docker
-# compose run`'s own client being killed for any other reason) leaves the actual container running
+# --name: without a stable, known name, a timeout/kill below leaves the actual container running
 # under the Docker daemon indefinitely, still holding backup.sh's own flock, since the container's
-# lifecycle is not tied to this unit's own systemd cgroup at all (the same class of gap already found
-# and fixed in D4.5's own BackupRestoreDrillTest test helper - see docs/RELEASE_EVIDENCE.md's D4.5
-# section). A fixed name (not a random one) is deliberate: exactly one scheduled backup should ever
-# be in flight at a time, so ExecStopPost below always knows exactly what to clean up.
+# lifecycle isn't tied to this unit's systemd cgroup. A fixed name (not random) is deliberate:
+# exactly one scheduled backup should ever be in flight, so ExecStopPost below always knows exactly
+# what to clean up.
 ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.backup.yml --env-file .env run --rm --name runner-backup-scheduled backup
-# Best-effort (the leading "-" tells systemd to ignore this command's own exit code) - runs after
-# ExecStart exits for ANY reason, including a TimeoutStartSec kill below. A normal successful run
-# already self-removed via --rm, so this is usually a harmless no-op; it is the guaranteed path for
-# the one case that matters, a hung run systemd itself had to kill.
+# Best-effort (leading "-" tells systemd to ignore this command's exit code) - runs after ExecStart
+# exits for any reason, including a TimeoutStartSec kill below. A normal run already self-removed
+# via --rm; this is the guaranteed cleanup path for a run systemd itself had to kill.
 ExecStopPost=-/usr/bin/docker rm -f runner-backup-scheduled
-# A bound independent of backup.sh's own internal logic (the flock/retry/disk-budget guards already
-# documented in docs/DEPLOYMENT_ARCHITECTURE.md section 7) - systemd itself must never let one run
-# hang forever and silently block every later scheduled one.
+# A bound independent of backup.sh's own internal logic (flock/retry/disk-budget guards - see
+# docs/DEPLOYMENT_ARCHITECTURE.md section 7) - systemd itself must never let one run hang forever
+# and block every later scheduled one.
 TimeoutStartSec=1800
 # Paired with StartLimitIntervalSec/StartLimitBurst above - retries a failed run (e.g. Postgres not
-# yet reachable right after a host boot) a bounded number of times, spaced out, before giving up and
-# triggering OnFailure= above.
+# yet reachable right after a host boot) before giving up and triggering OnFailure= above.
 Restart=on-failure
 RestartSec=300

@@ -177,13 +177,8 @@ describe("computeDeepLinkStatus", () => {
     }
   });
 
-  /**
-   * Regression test (review finding, P1): on a fresh deep-link load against an already-finished
-   * run, `GET /runs/:id` routinely resolves *before* the SSE replay has delivered every event. A
-   * REST-derived "is the run terminal" boolean would report "not found" for a target only a few
-   * replayed events away - `computeDeepLinkStatus` must instead wait for the *stream's own* `CLOSED`
-   * state, which only ever happens once the reducer has actually processed `RUN_FINISHED`.
-   */
+  // Must wait for the stream's own CLOSED state, not a REST-derived terminal boolean, since REST
+  // can resolve before the SSE replay delivers every event.
   it("stays 'waiting', never a premature not-found, while the connection has not yet reached CLOSED - even against an already-terminal run", () => {
     for (const state of ["CONNECTING", "LIVE", "RECONNECTING"] as const) {
       const status = computeDeepLinkStatus(

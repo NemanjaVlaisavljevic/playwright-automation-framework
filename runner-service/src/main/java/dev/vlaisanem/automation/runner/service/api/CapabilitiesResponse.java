@@ -10,26 +10,17 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Wire representation of what a client is actually allowed to submit. {@link
- * RunRequestValidator#allowedCombinations(RunAvailabilityPolicy)} is the single source of truth
- * this mirrors, so a frontend never has to hand-copy the allowlist and risk it silently drifting
- * from what the server will actually accept - a new environment or suite only ever appears here
- * once it is also wired into the validator itself, and this deployment's own {@link
- * RunAvailabilityPolicy} (e.g. the portfolio profile hiding {@link Environment#LOCAL}) is applied
- * identically to both.
+ * Wire representation of what a client is actually allowed to submit, mirroring {@link
+ * RunRequestValidator#allowedCombinations(RunAvailabilityPolicy)} so the frontend never hand-copies
+ * the allowlist.
  *
  * <p>Both this record and {@link EnvironmentCapabilities} copy their list components in their
- * compact constructors, so the response stays deeply immutable and its ordering deterministic
- * regardless of how a future caller constructs one directly - {@link
- * #current(RunAvailabilityPolicy)} already builds sorted, unmodifiable lists, but callers should
- * not have to know that to get the same guarantee.
+ * compact constructors, keeping the response deeply immutable regardless of how a caller builds
+ * one.
  *
- * <p>Every component here is annotated with an explicit {@code requiredMode}, deliberately, the
- * same way {@link RunResponse} is - verified live against a real {@code /v3/api-docs} response
- * that, absent any Bean Validation annotation on a plain (non-validated) response record, springdoc
- * infers no {@code required} array at all. Leaving that to inference would have produced a
- * generated TypeScript client where every field here, none of which can ever actually be absent, is
- * optional.
+ * <p>Every component carries an explicit {@code requiredMode}: springdoc infers no {@code required}
+ * array at all for a plain (non-validated) response record, which would otherwise make every field
+ * optional in the generated TypeScript client.
  */
 public record CapabilitiesResponse(
     @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String apiVersion,

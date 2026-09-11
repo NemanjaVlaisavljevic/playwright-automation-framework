@@ -11,6 +11,7 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -19,32 +20,17 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Reads a run's {@code manifest.jsonl} - a file the main automation framework's {@code
- * ArtifactManifestWriter} may still be actively appending to while this run is non-terminal - as a
- * one-shot snapshot for an HTTP request, not a live tail.
+ * Reads a run's {@code manifest.jsonl} - which the automation framework's writer may still be
+ * actively appending to while the run is non-terminal - as a one-shot snapshot, not a live tail.
+ * Only a byte range terminated by {@code '\n'} is ever parsed; a trailing unterminated tail is
+ * tolerated silently unless {@code runTerminal} is {@code true} (no further writes are expected
+ * past that point, so it can only mean the writer crashed mid-write).
  *
- * <p>Mirrors {@code ListenerEventIngestor}'s own philosophy for a concurrently-written JSONL
- * stream: only a byte range actually terminated by {@code '\n'} is ever attempted as JSON at all.
- * This sidesteps any ambiguity between "malformed" and "still being written" entirely, rather than
- * parsing optimistically and trying to guess which one a failure means - a trailing, not-yet-
- * newline-terminated tail is simply never parsed, full stop.
- *
- * <p>That trailing tail is tolerated silently while {@code runTerminal} is {@code false} (the
- * writer may genuinely still be mid-append) and reported as {@link
- * ArtifactManifestCorruptException} once {@code runTerminal} is {@code true} - no further writes
- * are ever expected once a run reaches a terminal status, so a permanently unterminated line at
- * that point can only mean the writer crashed mid-write and never will finish it.
- *
- * <p>A syntactically <em>complete</em> line that fails to decode as strict UTF-8, fails to parse,
- * fails {@link ArtifactManifestEntry}'s own compact-constructor validation, whose {@code runId}
- * does not match {@code expectedRunId}, or whose {@code artifactId} repeats one already seen in
- * this same manifest, is never explainable by "still being written" and is always reported as
- * corruption regardless of {@code runTerminal} - the manifest is untrusted input (hence the runId
- * cross-check at all), not a file this reader already knows to be internally self-consistent just
- * because the run isn't finished yet. Strict UTF-8 (not the JDK's default lossy
- * replacement-character decoding) matters here specifically: a line with invalid bytes could
- * otherwise still decode into syntactically valid JSON, silently hiding raw corruption behind a
- * value that merely looks a little odd rather than failing loudly.
+ * <p>A syntactically complete line that fails strict UTF-8 decoding, JSON parsing, {@link
+ * ArtifactManifestEntry} validation, an {@code expectedRunId} mismatch, or a duplicate {@code
+ * artifactId} is always reported as corruption regardless of {@code runTerminal} - the manifest is
+ * untrusted input. Strict UTF-8 (not the JDK's default lossy decoding) matters because a line with
+ * invalid bytes could otherwise still decode into syntactically valid JSON, hiding corruption.
  */
 final class ArtifactManifestReader {
 
@@ -56,7 +42,7 @@ final class ArtifactManifestReader {
 
   List<ArtifactManifestEntry> read(
       Path manifestFile, String expectedRunId, boolean runTerminal, long manifestMaxBytes) {
-    if (!Files.exists(manifestFile)) {
+    if (!Files.exists(manifestFile, LinkOption.NOFOLLOW_LINKS)) {
       return List.of();
     }
     byte[] content = boundedRead(manifestFile, expectedRunId, manifestMaxBytes);
@@ -64,16 +50,14 @@ final class ArtifactManifestReader {
   }
 
   /**
-   * A single bounded channel session, not a separate {@code Files.size()} check followed by an
-   * independent {@code Files.readAllBytes()} - the latter has a TOCTOU gap on a file the writer can
-   * still be actively appending to between the two calls (the size check could see 4.9 MB, then the
-   * file grow past the limit before the unbounded read runs). Here, one {@code channel.size()}
-   * snapshot decides both whether to reject and exactly how many bytes to read - nothing else can
-   * make this read larger than what that single snapshot saw.
+   * A single bounded channel session, not a separate size check followed by an unbounded read: the
+   * latter has a TOCTOU gap on a file the writer can still be appending to between the two calls.
+   * One {@code channel.size()} snapshot decides both whether to reject and how much to read.
    */
   private static byte[] boundedRead(
       Path manifestFile, String expectedRunId, long manifestMaxBytes) {
-    try (FileChannel channel = FileChannel.open(manifestFile, StandardOpenOption.READ)) {
+    try (FileChannel channel =
+        FileChannel.open(manifestFile, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
       long size = channel.size();
       if (size > manifestMaxBytes) {
         throw new ArtifactManifestCorruptException(
@@ -161,10 +145,9 @@ final class ArtifactManifestReader {
     try {
       entry = objectMapper.readValue(line, ArtifactManifestEntry.class);
     } catch (IOException malformed) {
-      // IOException also catches Jackson wrapping ArtifactManifestEntry's own compact-constructor
-      // validation (a ValueInstantiationException) - a line that is syntactically valid JSON but
-      // fails the contract's own invariants is exactly as untrustworthy as one that isn't JSON at
-      // all.
+      // Also catches Jackson wrapping ArtifactManifestEntry's compact-constructor validation: a
+      // line that's syntactically valid JSON but fails the contract's invariants is just as
+      // untrustworthy as one that isn't JSON at all.
       throw new ArtifactManifestCorruptException(
           expectedRunId,
           "malformed entry at line " + lineNumber + " of " + manifestFile + ": " + malformed);
@@ -185,11 +168,9 @@ final class ArtifactManifestReader {
   }
 
   /**
-   * Deliberately {@link CharsetDecoder} with {@link CodingErrorAction#REPORT}, not {@code new
-   * String(bytes, UTF_8)} - the latter silently replaces an invalid byte sequence with U+FFFD,
-   * which could then still decode into syntactically valid (if slightly odd-looking) JSON, hiding
-   * genuine raw corruption instead of surfacing it. Mirrors {@code
-   * ListenerEventIngestor#decodeStrictUtf8} exactly, for the same reason.
+   * {@link CharsetDecoder} with {@link CodingErrorAction#REPORT}, not {@code new String(bytes,
+   * UTF_8)}: the latter silently replaces invalid bytes with U+FFFD, which could still decode as
+   * valid JSON and hide real corruption.
    */
   private static String decodeStrictUtf8(byte[] bytes, int offset, int length)
       throws CharacterCodingException {

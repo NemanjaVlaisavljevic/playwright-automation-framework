@@ -8,27 +8,16 @@ import java.util.Set;
 
 /**
  * The single source of truth for which {@code (Environment, Suite)} combinations this service can
- * actually run, and which Gradle task each one maps to. Both {@code RunRequestValidator} (is this
- * combination allowed at all?) and {@code SuiteCommandFactory} (what Gradle task actually runs it?)
- * derive from this one map, so a combination can never be allowed without also being runnable, or
- * runnable without being allowed - previously two independently hand-maintained maps, a risk that
- * stopped being hypothetical the moment a second {@link Environment} value existed at all (until
- * {@link Environment#LOCAL}, every combination happened to differ only by {@link Suite}, so the two
- * maps could not yet drift in a way that actually mattered).
+ * run, and which Gradle task each one maps to. Both {@code RunRequestValidator} and {@code
+ * SuiteCommandFactory} derive from this one map, so a combination can never be allowed without also
+ * being runnable, or vice versa.
  *
- * <p>Deliberately not in the {@code domain} package alongside {@link Environment}/{@link Suite}: a
- * concrete Gradle task name (a build-tool/execution detail, not a domain concept the way an
- * environment or a suite is) belongs in its own package rather than making {@code domain} depend on
- * infrastructure it should otherwise stay ignorant of.
+ * <p>Not in the {@code domain} package alongside {@link Environment}/{@link Suite}: a concrete
+ * Gradle task name is a build-tool detail, not a domain concept.
  *
- * <p>Each {@link Environment}/{@link Suite} pair gets its own dedicated Gradle task (e.g. {@code
- * journeyTest} for {@code PUBLIC}+{@code JOURNEY}, {@code localJourneyTest} for {@code
- * LOCAL}+{@code JOURNEY}) with everything about that environment - {@code baseUrl}, which tags it
- * does or doesn't exclude - already baked into the task definition itself in {@code build.gradle}.
- * That is deliberately why this catalog only needs to carry a task name, not a richer command spec:
- * there is no per-combination dynamic system property this process needs to inject beyond the
- * {@code runId}/ {@code rawEventsDir} pair every task already receives (see {@code
- * SuiteCommandFactory}).
+ * <p>Each pair's task already has everything about that environment - {@code baseUrl}, tag
+ * exclusions - baked into its {@code build.gradle} definition, so this catalog only needs to carry
+ * a task name, not a richer command spec.
  */
 public final class RunCatalog {
 

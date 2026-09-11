@@ -22,13 +22,11 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /**
- * A plain unit test (no Spring context), driving the real {@link jakarta.servlet.Filter#doFilter}
- * directly with a hand-built request - proves the byte-counting read path itself, independent of
- * whatever {@code Content-Length} a request claims. {@code MockHttpServletRequest} (used by {@code
- * SecurityAccessMatrixTest}'s own MockMvc-based {@code 413} test) cannot simulate this specific
- * case: its {@code getContentLengthLong()} is always derived directly from the actual content bytes
- * it was given, so a real mismatch between declared and actual size - exactly what a chunked or
- * falsified request looks like - cannot be constructed through it at all.
+ * Drives {@link jakarta.servlet.Filter#doFilter} directly with a hand-built request to prove the
+ * byte-counting read path, independent of declared {@code Content-Length}. {@code
+ * MockHttpServletRequest} (used elsewhere) always derives {@code getContentLengthLong()} from the
+ * actual bytes given, so it cannot simulate a mismatch - exactly what a chunked or falsified
+ * request looks like.
  */
 class RequestBodySizeLimitFilterTest {
 
@@ -85,8 +83,8 @@ class RequestBodySizeLimitFilterTest {
 
     byte[] actualBody = "x".repeat((int) cap + 1).getBytes();
     HttpServletRequest request = mock(HttpServletRequest.class);
-    // The declared length is absent/unreliable - exactly a chunked-transfer-encoded request -
-    // while the real stream still delivers more than the cap.
+    // Declared length is absent/unreliable (chunked-transfer-encoded), but the real stream still
+    // exceeds the cap.
     when(request.getContentLengthLong()).thenReturn(-1L);
     when(request.getInputStream()).thenReturn(fakeServletInputStream(actualBody));
     when(request.getRequestURI()).thenReturn("/api/v1/runs");

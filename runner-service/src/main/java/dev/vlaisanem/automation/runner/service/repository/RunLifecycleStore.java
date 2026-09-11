@@ -14,14 +14,11 @@ import java.util.function.LongFunction;
 import java.util.function.UnaryOperator;
 
 /**
- * D2.3 - the store abstraction {@code RunEventBroker}/{@code RunLifecycleCoordinator}/{@code
- * RunService} depend on, rather than the concrete {@code JdbcRunStore} directly - introduced at
- * cutover time (the original D2.2 plan's own "introduce repository/store interfaces" bullet,
- * deliberately deferred until the real callers existed to shape it correctly) so their own unit
- * tests can substitute a fast, in-memory fake instead of standing up a real Testcontainers Postgres
- * for every test that merely exercises orchestration, not the database protocol itself. {@code
- * JdbcRunStore} is the one production implementation; {@code FakeRunLifecycleStore} (test-only)
- * mirrors its exact validation/locking semantics for everything else.
+ * The store abstraction {@code RunEventBroker}/{@code RunLifecycleCoordinator}/{@code RunService}
+ * depend on, rather than the concrete {@code JdbcRunStore} directly, so their unit tests can
+ * substitute a fast in-memory fake instead of a real Testcontainers Postgres. {@code JdbcRunStore}
+ * is the one production implementation; {@code FakeRunLifecycleStore} (test-only) mirrors its exact
+ * validation/locking semantics.
  */
 public interface RunLifecycleStore {
 
@@ -59,10 +56,10 @@ public interface RunLifecycleStore {
       String runId, LongFunction<RunnerEvent> eventFactory);
 
   /**
-   * Empty for a runId that never existed, and equally empty for one that exists but has {@code
-   * cleanup_started_at} set (D4.1) - a tombstoned run is logically gone from every public read path
-   * immediately, well before its files/row are actually removed. See {@code RetentionService} for
-   * the only code path that can still see such a run ({@link #findPendingCleanup}).
+   * Empty both for a runId that never existed and for one with {@code cleanup_started_at} set - a
+   * tombstoned run is logically gone from every public read path immediately, well before its
+   * files/row are actually removed. {@code RetentionService} is the only caller that can still see
+   * one, via {@link #findPendingCleanup}.
    */
   Optional<Run> findById(String runId);
 
@@ -89,18 +86,15 @@ public interface RunLifecycleStore {
    */
   Optional<RunnerEvent> latestEvent(String runId);
 
-  // --- D4.1 retention - internal-only, never called outside RetentionService. Every method below
-  // deliberately still sees a tombstoned/pending-purge run - {@link #findById}/{@link #findAll}
-  // never do (see their own Javadoc). ---
+  // --- Retention - internal-only, never called outside RetentionService. Every method below
+  // still sees a tombstoned/pending-purge run, unlike findById/findAll. ---
 
   /**
    * Terminal runs, {@code cleanup_started_at IS NULL}, ranked newest-first ({@code finished_at
-   * DESC, requested_at DESC, run_id DESC} - the last two only ever break a tie on identical {@code
-   * finished_at}). A run qualifies once its 1-indexed rank exceeds {@code maxCount}
-   * <strong>or</strong> its {@code finished_at} is older than {@code now.minus(maxAge)} - the
-   * confirmed either-bound ("aggressive") retention rule. An already-tombstoned run is excluded
-   * from this ranking entirely, never occupying a rank slot - see {@link #findPendingCleanup} for
-   * those.
+   * DESC, requested_at DESC, run_id DESC} to break ties). A run qualifies once its rank exceeds
+   * {@code maxCount} <strong>or</strong> {@code finished_at} is older than {@code
+   * now.minus(maxAge)} - an either-bound rule. An already-tombstoned run never occupies a rank
+   * slot.
    */
   List<String> findEligibleForCleanup(Instant now, Duration maxAge, int maxCount);
 
@@ -128,10 +122,9 @@ public interface RunLifecycleStore {
   void deleteRun(String runId);
 
   /**
-   * Terminal runs, {@code artifacts_purge_started_at IS NULL}, whose own {@code finished_at} is
-   * older than {@code now.minus(maxAge)} - measured from the run's own completion time, never from
-   * individual {@code artifacts.created_at} rows, so every artifact belonging to a run ages out
-   * together.
+   * Terminal runs, {@code artifacts_purge_started_at IS NULL}, whose {@code finished_at} is older
+   * than {@code now.minus(maxAge)} - measured from the run's completion time, not individual
+   * artifact rows, so every artifact belonging to a run ages out together.
    */
   List<String> findEligibleForArtifactPurge(Instant now, Duration maxAge);
 

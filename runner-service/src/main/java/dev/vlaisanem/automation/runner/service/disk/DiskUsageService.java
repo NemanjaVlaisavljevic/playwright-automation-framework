@@ -23,10 +23,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.2 - the single source of truth for how much disk {@code runner-service} itself is using and
- * has available, reused by {@link dev.vlaisanem.automation.runner.service.orchestration.RunService}
- * (D4.2's own submit/pre-launch guards), the D4.2 admin diagnostic endpoint, and - unchanged, later
- * - D4.3's readiness probe and Micrometer gauges.
+ * The single source of truth for how much disk {@code runner-service} itself is using and has
+ * available, reused by {@link dev.vlaisanem.automation.runner.service.orchestration.RunService}'s
+ * submit/pre-launch guards, the admin diagnostic endpoint, and the readiness probe/gauges.
  *
  * <p>{@link #snapshot()} takes one live read and returns a single, internally consistent {@link
  * DiskUsageSnapshot} - every caller must derive its decision from that one snapshot, never call
@@ -54,12 +53,10 @@ public class DiskUsageService {
   }
 
   /**
-   * Creates every root directory this service depends on and verifies each is writable - a
-   * freshly-provisioned volume does not necessarily have these subdirectories yet (they are
-   * normally created lazily by the first real run), so this must run once at startup, before the
-   * first submission can ever race a missing directory. Also fails closed if any two of the three
-   * configured roots are nested inside one another, since {@link #runnerDataBytes()} sums each
-   * independently and would otherwise double-count.
+   * Creates every root directory this service depends on and verifies each is writable, before the
+   * first submission can race a missing directory on a freshly-provisioned volume. Also fails
+   * closed if any two of the three configured roots are nested inside one another, since {@link
+   * #runnerDataBytes()} sums each independently and would otherwise double-count.
    */
   @PostConstruct
   public void initializeStorage() {

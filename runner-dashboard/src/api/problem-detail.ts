@@ -2,28 +2,15 @@ import type { z } from "zod";
 import { ProblemDetail } from "./generated/runner-api";
 
 /**
- * Deliberately `z.infer<typeof ProblemDetail>`, not the generated `.d.ts`'s own `ProblemDetail`
- * type: that hand-written sidecar declares optional fields as `type?: string` (TS's "key may be
- * absent" convention), while a real `ProblemDetail.safeParse(...).data` value - produced by the
- * same Zod schema this type is inferred from - types an absent optional field as `type?: string |
- * undefined`. Under this project's `exactOptionalPropertyTypes`, those are different types; using
- * the schema's own inferred type instead of the sidecar's keeps `unwrap` in `runner-api.ts` (which
- * assigns a real parsed value here) type-checking against the shape it actually produces.
+ * Uses `z.infer<typeof ProblemDetail>`, not the generated `.d.ts` type: under this project's
+ * `exactOptionalPropertyTypes`, the sidecar's `type?: string` and the schema's actual
+ * `type?: string | undefined` are different types.
  */
 type ProblemDetailValue = z.infer<typeof ProblemDetail>;
 
 /**
- * - `"http"`: the backend actually responded with a 4xx/5xx status. `problem` is populated only
- *   when that response body itself parsed as a valid `ProblemDetail` - a 502 from an intermediary
- *   (e.g. Vite's dev proxy when the backend is down) is still `"http"`, just with no `problem`.
- * - `"network"`: no HTTP response was ever received (`fetch` itself rejected - DNS, connection
- *   refused, CORS, etc.).
- * - `"contract"`: a response was received and parsed as JSON, but its shape didn't match this
- *   app's own expectations (a generated schema's Zod validation failed, or a hand-validated
- *   response like `/actuator/health` failed its own schema). This is deliberately never folded
- *   into `"network"` - a contract violation means the backend is reachable and responding, just
- *   not in the shape the frontend was built against, which is a different problem to react to
- *   (and to alert on) than the backend being down.
+ * `"http"`: backend responded 4xx/5xx. `"network"`: no response was received at all. `"contract"`:
+ * response received but shape didn't match expectations - kept distinct from `"network"`.
  */
 export type RunnerApiErrorKind = "http" | "network" | "contract";
 
@@ -34,11 +21,8 @@ interface RunnerApiErrorOptions {
 }
 
 /**
- * Normalized error shape for every failure the API layer can produce. Components consume this
- * instead of `Response`/`TypedStatusError`/`ZodError` directly, and never parse a `ProblemDetail`
- * body themselves - see `runner-api.ts`'s `unwrap`, which is the only place a `ProblemDetail` is
- * parsed. The original failure is preserved via the standard `Error.cause` (not a bespoke field),
- * so nothing is lost for diagnosis even though components only ever branch on `kind`.
+ * Normalized error shape for every failure the API layer can produce. Components branch on `kind`
+ * only; the original failure is preserved via the standard `Error.cause`.
  */
 export class RunnerApiError extends Error {
   readonly kind: RunnerApiErrorKind;
@@ -60,9 +44,8 @@ export class RunnerApiError extends Error {
     this.name = "RunnerApiError";
     this.kind = kind;
     this.status = status;
-    // Guarded (not a direct `this.problem = options.problem`) because `exactOptionalPropertyTypes`
-    // treats an optional field as "present with a ProblemDetail, or absent" - never "present with
-    // undefined" - so assigning a possibly-undefined value directly would be a type error.
+    // Guarded, not a direct assignment: exactOptionalPropertyTypes rejects assigning undefined
+    // to an optional field.
     if (options.problem !== undefined) {
       this.problem = options.problem;
     }
@@ -70,10 +53,8 @@ export class RunnerApiError extends Error {
 }
 
 /**
- * Shared 401/403 message, composed in front of each admin-gated call site's own local
- * `describeError`/`describeLaunchError`/`describeApiError` (e.g. `describePermissionError(error)
- * ?? describeLaunchError(error)`) - no other error kind/status is handled here, since every other
- * case already has its own feature-specific message.
+ * Shared 401/403 message, composed in front of each admin-gated call site's own local error
+ * describer (e.g. `describePermissionError(error) ?? describeLaunchError(error)`).
  */
 export function describePermissionError(error: unknown): string | undefined {
   if (!(error instanceof RunnerApiError) || error.kind !== "http") {

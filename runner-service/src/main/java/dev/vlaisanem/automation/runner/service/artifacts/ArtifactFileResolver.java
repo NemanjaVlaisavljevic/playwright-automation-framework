@@ -3,6 +3,7 @@ package dev.vlaisanem.automation.runner.service.artifacts;
 import dev.vlaisanem.automation.runner.contract.ArtifactManifestEntry;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactManifestCorruptException;
 import dev.vlaisanem.automation.runner.service.exception.ArtifactNotFoundException;
+import dev.vlaisanem.automation.runner.service.filesystem.RunFilePaths;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -11,35 +12,48 @@ import java.nio.file.Path;
 
 /**
  * Safely resolves an {@link ArtifactManifestEntry}'s {@code relativePath} to a real filesystem
- * path, shared by both {@link ArtifactService}'s download path and {@link
- * ArtifactIngestionService}'s D4.2 size-consistency check - extracted so a second call site never
- * re-implements a naive {@code root.resolve(relativePath)} that would reopen the exact symlink
- * escape this class exists to close.
+ * path, shared by {@link ArtifactService}'s download path and {@link ArtifactIngestionService}'s
+ * size-consistency check.
  *
- * <p>Never trusts {@code entry.relativePath()} alone, even though {@link ArtifactManifestEntry}'s
- * own compact constructor already rejects an absolute path or a {@code ..} segment - defense in
- * depth, for a value that ultimately came from a file on disk rather than from code that
- * constructed it directly. Two checks, not one: {@code normalize()} + {@code startsWith} alone
- * cannot catch a symlink planted inside the run's own artifacts directory that points somewhere
- * else entirely (the normalized path never leaves the run root textually, only once resolved
- * through the symlink does it), so the real, symlink-resolved path is checked against the real,
- * symlink-resolved run root too.
+ * <p>Checks both the normalized path and the symlink-resolved real path against the run root:
+ * {@code normalize()} + {@code startsWith} alone can't catch a symlink planted inside the run's
+ * artifacts directory that points elsewhere, since the path only leaves the run root once resolved
+ * through the symlink.
  */
 final class ArtifactFileResolver {
 
   private ArtifactFileResolver() {}
 
   static Path resolve(Path artifactsRootDir, String runId, ArtifactManifestEntry entry) {
-    Path runRoot = artifactsRootDir.resolve(runId);
-    Path candidate = runRoot.resolve(entry.relativePath()).normalize();
-    if (!candidate.startsWith(runRoot)) {
+    Path normalizedArtifactsRoot = artifactsRootDir.toAbsolutePath().normalize();
+    Path runRoot = RunFilePaths.artifactsDirectory(normalizedArtifactsRoot, runId);
+    if (Files.isSymbolicLink(runRoot)) {
+      throw new ArtifactManifestCorruptException(
+          runId, "run artifacts directory must not be a symbolic link: " + runRoot);
+    }
+    Path realArtifactsRoot;
+    Path realRunRoot;
+    try {
+      realArtifactsRoot = normalizedArtifactsRoot.toRealPath();
+      realRunRoot = runRoot.toRealPath();
+    } catch (NoSuchFileException missing) {
+      throw new ArtifactNotFoundException(runId, entry.artifactId());
+    } catch (IOException e) {
+      throw new ArtifactManifestCorruptException(
+          runId, "could not resolve " + runRoot + ": " + e.getMessage());
+    }
+    if (!realRunRoot.startsWith(realArtifactsRoot)
+        || !Files.isDirectory(realRunRoot, LinkOption.NOFOLLOW_LINKS)) {
+      throw new ArtifactManifestCorruptException(
+          runId, "run artifacts directory resolves outside the configured artifacts root");
+    }
+    Path candidate = realRunRoot.resolve(entry.relativePath()).normalize();
+    if (!candidate.startsWith(realRunRoot)) {
       throw new ArtifactManifestCorruptException(
           runId, "relativePath escapes the run's artifacts root: " + entry.relativePath());
     }
-    Path realRunRoot;
     Path realCandidate;
     try {
-      realRunRoot = runRoot.toRealPath();
       realCandidate = candidate.toRealPath();
     } catch (NoSuchFileException missing) {
       throw new ArtifactNotFoundException(runId, entry.artifactId());

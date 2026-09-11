@@ -54,11 +54,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D4.1 - proves {@link RetentionService} against a real Postgres and a real temp filesystem: a
- * fresh container per test method (unlike most other {@code databaseIntegrationTest} classes, which
- * share one static container across all their methods) since these tests care about exact
- * candidate/deleted counts, which a shared, cross-method-accumulating schema would make fragile to
- * assert on.
+ * Verifies {@link RetentionService} against real Postgres and a real temp filesystem. A fresh
+ * container per test method (unlike most {@code databaseIntegrationTest} classes, which share one)
+ * - exact candidate/deleted counts would be fragile against an accumulating shared schema.
  */
 @Testcontainers
 class RetentionServiceTest {
@@ -79,11 +77,9 @@ class RetentionServiceTest {
   private Path rawEventsDir;
 
   /**
-   * Kept as a field (not just a local in {@link #setUp}) so a test can open its own extra raw
-   * connection to deterministically hold a real, uncommitted {@code SELECT ... FOR UPDATE} lock on
-   * a {@code runs} row - the only way to genuinely force the exact concurrent-transaction
-   * interleaving the D4.1 review round asked for, rather than merely calling the higher-level
-   * methods sequentially.
+   * Kept as a field so a test can open its own extra connection to hold a real, uncommitted {@code
+   * SELECT ... FOR UPDATE} lock on a {@code runs} row - the only way to force a genuine
+   * concurrent-transaction interleaving.
    */
   private PGSimpleDataSource dataSource;
 
@@ -139,10 +135,8 @@ class RetentionServiceTest {
   }
 
   /**
-   * D4.2 - a run whose raw event stream overflowed its configured size cap gets a {@code
-   * .tests.overflow} marker instead of {@code .tests.complete} (see {@code
-   * RunnerEventJsonlWriter}'s own Javadoc); a full-run cleanup must remove it too, or it would
-   * linger forever after the run itself is otherwise fully purged.
+   * A run whose raw event stream overflowed gets a {@code .tests.overflow} marker instead of {@code
+   * .tests.complete}; cleanup must remove it too or it lingers forever.
    */
   @Test
   void cleansUpAnOverflowMarkerAlongsideEveryOtherRawEventFile() throws IOException {
@@ -209,13 +203,9 @@ class RetentionServiceTest {
   }
 
   /**
-   * D4.1 review round (P1 finding): the test above races two real sweeps but never forces the exact
-   * interleaving the finding described - a second sweep starting while the first has already
-   * tombstoned a run but not yet deleted its files. This test forces exactly that interleaving
-   * deterministically, via a {@link RunLifecycleStore} wrapper that pauses right after a successful
-   * {@link RunLifecycleStore#claimForCleanup}, and proves the fix: the second sweep call is skipped
-   * entirely (never even reaches {@code findPendingCleanup}), rather than racing the first sweep's
-   * own in-flight deletion.
+   * Deterministically forces the interleaving the test above only races: a second sweep starting
+   * while the first has tombstoned a run but not yet deleted its files. It must be skipped
+   * entirely, never racing the first sweep's in-flight deletion.
    */
   @Test
   void aConcurrentSweepWhileAnotherIsMidCleanupIsSkippedNotDoubleProcessed() throws Exception {
@@ -265,9 +255,9 @@ class RetentionServiceTest {
     ingestOneArtifact(runId, "artifact-1", now.minus(Duration.ofDays(16)));
     assertThat(countArtifactRows(runId)).isEqualTo(1);
 
-    // Claim the purge directly (simulating the exact window a concurrent ingestion retry could
-    // land in) - D4.1 review round: findForRun/isArtifactsPurged must reflect "no longer
-    // available" the instant purge is claimed, not only once completePurge finishes.
+    // Claims the purge directly, simulating the exact window a concurrent ingestion retry could
+    // land in - findForRun/isArtifactsPurged must reflect "no longer available" the instant purge
+    // is claimed, not only once completePurge finishes.
     assertThat(runStore.claimForArtifactPurge(runId)).isTrue();
     assertThat(artifactRepository.findForRun(runId, null))
         .as("the list must go empty the instant purge is claimed, not only once complete")
@@ -303,10 +293,8 @@ class RetentionServiceTest {
     Instant now = Instant.parse("2026-06-01T00:00:00Z");
     String runId = seedTerminalRun(now.minus(Duration.ofDays(20)), now.minus(Duration.ofDays(16)));
 
-    // Simulates purge's own claim, holding the per-run row lock open (uncommitted) exactly the way
-    // JdbcArtifactRepository#ingest's own SELECT ... FOR UPDATE would see it mid-flight - a real
-    // second connection/transaction, not a Java-level mock, so this proves the actual Postgres row
-    // lock, not merely an assumption about how it behaves.
+    // Simulates purge's own claim, holding the per-run row lock open via a real second
+    // connection - proves the actual Postgres lock, not merely an assumption about it.
     try (Connection lockingConnection = dataSource.getConnection()) {
       lockingConnection.setAutoCommit(false);
       try (var claim =
@@ -350,10 +338,8 @@ class RetentionServiceTest {
     Instant now = Instant.parse("2026-06-01T00:00:00Z");
     String runId = seedTerminalRun(now.minus(Duration.ofDays(20)), now.minus(Duration.ofDays(16)));
 
-    // Simulates ingest's own per-run lock, holding it open (uncommitted) while it has already
-    // decided the run is not purge-started and inserted a row - the real interleaving
-    // JdbcArtifactRepository#ingest's own transaction produces, driven here from a second raw
-    // connection so the test controls exactly when it commits.
+    // Simulates ingest's own per-run lock and row insert, held open via a second raw connection
+    // so the test controls exactly when it commits.
     try (Connection lockingConnection = dataSource.getConnection()) {
       lockingConnection.setAutoCommit(false);
       try (var lock =
@@ -561,10 +547,8 @@ class RetentionServiceTest {
   }
 
   /**
-   * Raw row count, deliberately bypassing {@link JdbcArtifactRepository#findForRun}'s own D4.1
-   * review-round filtering (which now hides a row the instant purge is claimed) - the tests using
-   * this specifically want to know whether the physical row exists, independent of what a client
-   * would currently be shown.
+   * Raw row count, bypassing {@link JdbcArtifactRepository#findForRun}'s purge-claim filtering -
+   * tests using this want the physical row's existence, not what a client would currently see.
    */
   private int countArtifactRows(String runId) {
     Integer count =
@@ -641,13 +625,9 @@ class RetentionServiceTest {
   }
 
   /**
-   * Delegates every {@link RunLifecycleStore} method unchanged except {@link #claimForCleanup},
-   * which pauses right after the real delegate's claim succeeds - the exact post-claim,
-   * pre-deletion window {@link
-   * #aConcurrentSweepWhileAnotherIsMidCleanupIsSkippedNotDoubleProcessed} needs to
-   * deterministically force, mirroring the same blocking-decorator pattern already used elsewhere
-   * in this codebase (e.g. {@code RunEventBrokerJdbcAcceptanceTest}'s own {@code
-   * BlockingReplayStore}).
+   * Delegates every {@link RunLifecycleStore} method except {@link #claimForCleanup}, which pauses
+   * right after the delegate's claim succeeds - forces the post-claim, pre-deletion window {@link
+   * #aConcurrentSweepWhileAnotherIsMidCleanupIsSkippedNotDoubleProcessed} needs.
    */
   private static final class BlockingAfterClaimRunStore implements RunLifecycleStore {
     private final RunLifecycleStore delegate;

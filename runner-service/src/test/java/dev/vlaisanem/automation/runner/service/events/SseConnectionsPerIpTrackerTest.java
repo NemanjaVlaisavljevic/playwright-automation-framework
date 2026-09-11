@@ -103,10 +103,9 @@ class SseConnectionsPerIpTrackerTest {
   }
 
   /**
-   * D4.4.2b - the metric this class registers to make the exact gap that caused the CI SSE-cap
-   * flakiness observable: {@code runner.sse.client_slots.active} must track every real acquire/
-   * release, across multiple IPs, never double-counting a no-op release (an unknown IP, or one
-   * already fully released).
+   * {@code runner.sse.client_slots.active} must track every real acquire/release across multiple
+   * IPs, without double-counting a no-op release (unknown IP, or one already fully released) - this
+   * is the metric that makes the CI SSE-cap flakiness observable.
    */
   @Test
   void theActiveSlotsGaugeTracksRealAcquiresAndReleasesAcrossMultipleIps() {

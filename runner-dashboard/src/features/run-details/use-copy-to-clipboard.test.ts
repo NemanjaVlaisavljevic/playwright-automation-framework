@@ -97,12 +97,8 @@ describe("useCopyToClipboard", () => {
     expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
   });
 
-  /**
-   * Regression test for a real review finding: unmounting while `writeText` is still in flight used
-   * to leave the cleanup effect with no timer to clear yet (the write had not resolved, so
-   * `revertTimer.current` was still `undefined`) - the write resolving afterward would then set
-   * state and schedule a fresh revert timer that nothing would ever clear again.
-   */
+  // Unmounting while writeText is still in flight must not let its later resolution set state or
+  // schedule a fresh, uncleared revert timer.
   it("ignores a clipboard write that resolves after unmount - no leaked timer from the stale resolution", async () => {
     vi.useFakeTimers();
     let resolveWrite: (() => void) | undefined;

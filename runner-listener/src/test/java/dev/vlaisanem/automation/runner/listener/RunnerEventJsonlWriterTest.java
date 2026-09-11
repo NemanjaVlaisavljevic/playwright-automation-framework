@@ -24,13 +24,7 @@ class RunnerEventJsonlWriterTest {
   private static final ObjectMapper OBJECT_MAPPER = RunnerEventObjectMapper.create();
 
   /**
-   * Regression test for a real bug a review caught in a live apiTest JSONL file: line 1 had
-   * sequence=2, line 2 had sequence=1. That happened because the sequence number used to be taken
-   * from an {@link java.util.concurrent.atomic.AtomicLong} in the caller, one step before calling
-   * {@code write} - two threads could race between "take a number" and "append to the file", so a
-   * lower sequence number could physically land after a higher one on disk. Sequence assignment now
-   * happens inside {@link RunnerEventJsonlWriter}'s own write lock, so line order must always match
-   * sequence order, however many threads write concurrently.
+   * Line order on disk must always match sequence order, however many threads write concurrently.
    */
   @Test
   void assignsSequenceNumbersInTheSameOrderTheyLandOnDiskUnderConcurrency(@TempDir Path tempDir)
@@ -88,10 +82,8 @@ class RunnerEventJsonlWriterTest {
   }
 
   /**
-   * JUnit Platform only logs an exception thrown from a listener callback - it does not fail the
-   * test run. Without this, a failed write earlier in the run would leave a truncated JSONL file,
-   * but {@code testPlanExecutionFinished} would still call {@code close()} at the end and the
-   * marker would falsely claim the event log was complete.
+   * JUnit Platform only logs a listener exception, never fails the run - without this, a failed
+   * write would leave a truncated JSONL file with a marker falsely claiming completeness.
    */
   @Test
   void closeDoesNotCreateAMarkerAfterAFailedWrite(@TempDir Path tempDir) {
@@ -116,9 +108,8 @@ class RunnerEventJsonlWriterTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code CREATE_NEW} on the data file alone does not
-   * protect against a stale completion marker left behind without its data file - opening must
-   * reject that runId outright, and must not create a fresh data file while doing so.
+   * {@code CREATE_NEW} on the data file alone does not protect against a stale completion marker
+   * left behind without its data file - opening must reject the runId and create nothing.
    */
   @Test
   void refusesToOpenWhenOnlyAStaleCompletionMarkerExists(@TempDir Path tempDir) throws IOException {
@@ -136,10 +127,9 @@ class RunnerEventJsonlWriterTest {
   }
 
   /**
-   * D4.2 - once the configured byte cap is hit, further events are silently dropped (logged once,
-   * not per event) and {@code close()} must create the distinct overflow marker instead of the
-   * normal completion marker - a consumer (see {@code ListenerEventIngestor}) must never mistake a
-   * truncated stream for a cleanly complete one.
+   * Once the byte cap is hit, further events are dropped and {@code close()} must create the
+   * overflow marker instead of the completion marker, so a consumer never mistakes a truncated
+   * stream for a complete one.
    */
   @Test
   void createsAnOverflowMarkerInsteadOfACompletionMarkerOnceTheByteCapIsHit(@TempDir Path tempDir) {

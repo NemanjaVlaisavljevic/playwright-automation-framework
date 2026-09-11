@@ -8,23 +8,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.stereotype.Component;
 
 /**
- * A per-client-IP concurrent-connection cap for SSE subscriptions (D3.3), enforced
- * <em>alongside</em> - never instead of - {@link RunEventHub}'s own {@code sseMaxSubscribers}
- * global ceiling. Without this, one client alone could occupy every global slot, starving every
- * other viewer; the hub's own cap protects the server's total thread/connection budget, this one
- * protects fairness across clients.
+ * A per-client-IP concurrent-connection cap for SSE subscriptions, enforced alongside - never
+ * instead of - {@link RunEventHub}'s own {@code sseMaxSubscribers} global ceiling: the hub's cap
+ * protects the server's total thread/connection budget, this one protects fairness across clients.
  *
  * <p>A live count, not a time-windowed rate - {@link #tryAcquire} must be paired with exactly one
- * later {@link #release} call once that specific connection actually ends (see {@code
- * RunEventStreamController#stream}, which composes this into the same {@code onClose} callback
- * already used to cancel that connection's heartbeat).
+ * later {@link #release} call once that connection actually ends.
  *
- * <p>{@code runner.sse.client_slots.active} exposes the same total this class enforces against -
- * deliberately without a {@code clientIp} tag (unbounded cardinality) - so it can be watched
- * independently of {@link RunEventHub}'s own {@code runner.sse.connections.active}: a D4.4.2b CI
- * investigation found the two can legitimately disagree for a real window (this one nonzero while
- * the hub's own subscription count has already dropped to zero), which is exactly the gap that let
- * a stale per-IP slot outlive its subscription and starve the next connection from the same IP.
+ * <p>{@code runner.sse.client_slots.active} exposes the same total this class enforces against,
+ * deliberately without a {@code clientIp} tag (unbounded cardinality), watched independently of
+ * {@link RunEventHub}'s {@code runner.sse.connections.active}: the two can legitimately disagree
+ * for a real window (this one nonzero while the hub's count has already dropped to zero), which is
+ * the gap that lets a stale per-IP slot outlive its subscription and starve the next connection.
  */
 @Component
 public class SseConnectionsPerIpTracker {

@@ -64,10 +64,8 @@ class AdminRoomManagementJourneyTest {
               return new AdminRoomsPage(page).assertLoaded();
             });
 
-    // createVia() protects the create action AND the lookup together: if the room was actually
-    // created server-side but something after that (the lookup, a network blip) throws, it still
-    // finds and deletes the room by name before rethrowing - the try-with-resources below only
-    // starts once a ManagedRoom is safely in hand, so it can't cover this earlier window itself.
+    // createVia() also cleans up if the room is created server-side but a later step (the
+    // lookup, a network blip) throws, before a ManagedRoom exists to close it.
     try (ManagedRoom managedRoom =
         steps.call(
             "Create a room through the admin UI",
@@ -119,11 +117,8 @@ class AdminRoomManagementJourneyTest {
           "Verify room deletion",
           () -> {
             roomsPageAgain.assertRoomNotListed(requested.roomName());
-            // Empirically confirmed against the running app (not assumed): GET on a deleted room
-            // returns 500, not 404 - the room API does not treat "room not found" as a client error
-            // the way the booking API does (ManagedBooking.close() verifies a real 404 there).
-            // Asserting the actual observed behavior rather than the "should be" status, per this
-            // project's rule against hardening unverified assumptions.
+            // A deleted room returns 500 on GET, not 404 - unlike bookings, whose 404
+            // ManagedBooking.close() verifies.
             assertThat(rooms.getRoom(managedRoom.roomId()).status()).isEqualTo(500);
           });
 

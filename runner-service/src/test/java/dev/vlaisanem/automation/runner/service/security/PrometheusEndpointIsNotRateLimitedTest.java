@@ -18,12 +18,11 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * D4.3.2 - proves {@code /actuator/prometheus} sits genuinely outside {@link AbuseRateLimitFilter}
- * matching, not merely untested. A separate class (own context) from {@code
- * OAuth2ChainAppliesAbuseRateLimitTest} specifically so {@code runner.public-read-rate-limit} can
- * be overridden down to a small number here - that test's own 120/min real-limit assertion would
- * otherwise conflict with lowering it for this one. Cheap and deterministic: a handful of requests
- * against a 2/min override, rather than 121 requests against the real 120/min default.
+ * Proves {@code /actuator/prometheus} sits genuinely outside {@link AbuseRateLimitFilter} matching,
+ * not merely untested. A separate context from {@code OAuth2ChainAppliesAbuseRateLimitTest} so
+ * {@code runner.public-read-rate-limit} can be lowered here to keep the check cheap (a handful of
+ * requests against a 2/min override, not 121 against the real default) without conflicting with
+ * that test's own 120/min assertion.
  */
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,

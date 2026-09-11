@@ -10,9 +10,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Covers {@link TestConfig#targetsSharedEnvironment()}, the origin-normalization check the mutation
- * guard in {@code AutomationExtension} relies on to refuse writes against the shared public host. A
- * false negative here (two URLs that are really the same origin but compare unequal) would let a
- * mutation test slip through unguarded.
+ * guard relies on. A false negative here would let a mutation test slip through unguarded.
  */
 class TestConfigTest {
 

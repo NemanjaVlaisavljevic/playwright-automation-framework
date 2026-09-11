@@ -22,9 +22,8 @@ public final class RoomReservationPage {
 
   /**
    * Navigates straight to a room's reservation page with an explicit date range, bypassing the
-   * calendar widget (whose day cells do not update the dates actually submitted). Callers should
-   * pass a room they created themselves and dates far from "today" so the booking cannot collide
-   * with another guest's real, concurrent use of this shared public target.
+   * calendar widget (its day cells don't affect the dates submitted). Use a room you created and
+   * dates far from "today" to avoid colliding with other guests on this shared target.
    */
   public static RoomReservationPage openFor(
       Page page, int roomId, LocalDate checkin, LocalDate checkout) {
@@ -42,11 +41,8 @@ public final class RoomReservationPage {
     phone = page.getByLabel("Phone");
     confirmedHeading =
         page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Booking Confirmed"));
-    // Rendered from the server's rejection response (bookingErrors.map(...) -> <li>), confirmed
-    // against the running app's source (assets/src/components/reservation/BookingForm.tsx).
-    // getByRole(ALERT) alone is ambiguous - it also matches Next.js's own hidden
-    // "__next-route-announcer__" live region (role="alert", confirmed live) - so this is scoped to
-    // the specific alert-danger class the form actually renders.
+    // getByRole(ALERT) is ambiguous here - it also matches Next.js's hidden
+    // "__next-route-announcer__" live region - so scope to the alert-danger class the form renders.
     validationAlert = page.locator("div.alert-danger[role='alert']");
   }
 

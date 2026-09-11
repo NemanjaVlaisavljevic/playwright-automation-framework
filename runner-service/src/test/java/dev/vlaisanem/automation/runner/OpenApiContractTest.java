@@ -24,39 +24,16 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * Locks the generated {@code /v3/api-docs} document against everything the frontend's typed-client
- * generator (Faza 2) will depend on - not a one-time manual read of the JSON, but a real HTTP call
- * against the running application, so a later backend refactor that silently breaks the frontend
- * contract fails here in CI rather than only being noticed once client generation itself breaks.
- *
- * <p>Each assertion here corresponds to a concrete finding from the springdoc spike: an unannotated
- * {@code POST /runs} defaulted to a spurious {@code 200} alongside the real {@code 202}; two
- * controllers both named {@code get()} produced colliding {@code get}/{@code get_1} operation IDs;
- * the SSE endpoint's generated schema described {@code SseEmitter}'s own {@code timeout} field
- * instead of the actual event payload; and {@code RunResponse} had no {@code required} array at
- * all, since springdoc infers nothing without an explicit {@code @Schema} or Bean Validation
- * annotation on a plain response record.
+ * Locks the generated {@code /v3/api-docs} document against what the frontend's typed-client
+ * generator depends on - verified via a real HTTP call against the running application, not a
+ * static read of the JSON, so a backend refactor that breaks the frontend contract fails here.
  */
-// D2.3: RunnerServiceApplication no longer excludes DataSourceAutoConfiguration/
-// FlywayAutoConfiguration itself (JdbcRunStore is a real @Component now), so this Docker-free,
-// real-Postgres-free full-context test re-excludes Flyway at the test level (see D4.3.1 comment
-// below for why DataSourceAutoConfiguration itself is no longer also excluded) - this test is
-// about the generated OpenAPI document, not the store's own behavior, and must never need a real
-// Postgres to even start. @MockitoBean below covers the rest: with JdbcRunStore/
-// JdbcArtifactRepository's bean *definitions* replaced by mocks of the interfaces they implement,
-// neither is ever constructed regardless of whether the real (but unreachable-in-this-test)
-// DataSource is reachable - RunEventBroker/RunLifecycleCoordinator get the mocks instead. D2.4
-// adds the exact same problem one level down: JdbcArtifactRepository also needs a JdbcTemplate,
-// and ArtifactService/ArtifactIngestionService/RunEventBroker/RunLifecycleCoordinator all now
-// depend on ArtifactRepository transitively - mocked here for the same reason.
-// D4.3.1 - no longer excludes DataSourceAutoConfiguration: application.yml's readiness group now
-// unconditionally includes the `db` contributor, so a full-context test without a real DataSource
-// bean fails to start at all (Spring Boot's HealthEndpointGroupsFailureAnalyzer). Flyway stays
-// excluded (migrations need a real, reachable, schema-correct Postgres, which this test
-// deliberately has neither) and hikari.initialization-fail-timeout=-1 stops HikariCP's own eager
-// startup connection check from failing context refresh when nothing is listening on the
-// configured (unreachable-in-this-test) datasource URL - see HealthEndpointGroupMembershipTest's
-// own Javadoc for the full reasoning.
+// Full context without a real Postgres: DataSourceAutoConfiguration must stay enabled (the
+// readiness group needs a real `db` health contributor), Flyway is excluded (needs a real,
+// migrated schema), and hikari.initialization-fail-timeout=-1 stops HikariCP's own startup
+// connection check from failing context refresh when nothing is listening on the datasource URL.
+// The @MockitoBean fields below replace JdbcRunStore/JdbcArtifactRepository's real beans so
+// neither needs a reachable DataSource either.
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,
     properties = {
@@ -68,9 +45,8 @@ class OpenApiContractTest {
 
   @MockitoBean private RunLifecycleStore lifecycleStore;
   @MockitoBean private ArtifactRepository artifactRepository;
-  // D4.2 adds the exact same problem one level down again: DiskUsageService also needs a
-  // JdbcTemplate, and RunService now depends on it - mocked here for the same reason as the two
-  // above (it isn't behind an interface, so nothing else already satisfies this edge).
+  // DiskUsageService also needs a JdbcTemplate and isn't behind an interface, so it's mocked here
+  // for the same reason as the two stores above.
   @MockitoBean private DiskUsageService diskUsageService;
 
   private static final List<String> EXPECTED_OPERATION_IDS =
@@ -119,10 +95,9 @@ class OpenApiContractTest {
   }
 
   /**
-   * One record per operation, doubling as the exact-response-code matrix and the success media-type
-   * expectations - so removing an {@code @ApiResponse} (e.g. {@code cancelRun}'s 503) fails this
-   * test directly via the missing code, instead of just quietly narrowing what {@link
-   * #everyDocumentedErrorResponseUsesProblemJsonAndTheProblemDetailSchema} happens to see.
+   * One record per operation: doubles as the exact-response-code matrix and success media-type
+   * expectations, so removing an {@code @ApiResponse} fails here directly instead of only narrowing
+   * what {@link #everyDocumentedErrorResponseUsesProblemJsonAndTheProblemDetailSchema} sees.
    */
   private record OperationContract(
       String path,
@@ -211,13 +186,10 @@ class OpenApiContractTest {
   }
 
   /**
-   * Walks every documented response across every operation - not a hand-maintained partial list
-   * that silently stops covering an endpoint's error responses the moment someone adds a new one -
-   * so the test name actually describes what it checks. A 4xx/5xx response code found anywhere in
-   * the spec must be {@code application/problem+json} against the {@code ProblemDetail} schema.
-   * Complements {@link #everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes}
-   * (which catches a response disappearing entirely) by catching one that stays present but drifts
-   * to the wrong content type or schema.
+   * Every 4xx/5xx response found anywhere in the spec must be {@code application/problem+json}
+   * against the {@code ProblemDetail} schema. Complements {@link
+   * #everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes}, which only
+   * catches a response disappearing, not one drifting to the wrong content type or schema.
    */
   @Test
   void everyDocumentedErrorResponseUsesProblemJsonAndTheProblemDetailSchema() {
@@ -330,13 +302,10 @@ class OpenApiContractTest {
   }
 
   /**
-   * Locks both invariants {@code OpenApiConfig#problemDetailContractCustomizer} exists to fix -
-   * verified empirically against a real {@code 404} response body ({@code
-   * {"detail":"...","instance":"/api/v1/runs/does-not-exist","status":404,"title":"Not Found"}}):
-   * {@code title}/{@code status}/{@code detail}/{@code instance} are always present ({@code type}
-   * and {@code properties} deliberately are not, since that same response omits both); and {@code
-   * instance} must not carry {@code format: uri}, since typed-openapi maps that to Zod's {@code
-   * z.url()}, which rejects the relative path Spring actually sends.
+   * Locks the invariants {@code OpenApiConfig#problemDetailContractCustomizer} enforces:
+   * title/status/detail/instance are always required ({@code type}/{@code properties} deliberately
+   * are not). {@code instance} must not carry {@code format: uri} - typed-openapi maps that to
+   * Zod's {@code z.url()}, which rejects the relative path Spring actually sends.
    */
   @Test
   void problemDetailHasExactlyTheExpectedRequiredFields() {
@@ -360,14 +329,11 @@ class OpenApiContractTest {
   }
 
   /**
-   * Regression test for a real bug: the previous {@code @Schema(type = "string", format =
-   * "binary")} annotation described an opaque binary payload, but this endpoint's actual {@code
-   * text/plain} content is UTF-8 log text meant to be read, not opaque bytes. typed-openapi mapped
-   * {@code format: binary} to Zod's {@code z.custom<Blob>(...)}, while the generated client's own
-   * {@code text/plain} handling parses the body as a string via {@code response.text()} - output
-   * validation against that mismatch would throw for every real log download. This test would have
-   * failed against the original annotation; it must keep failing if {@code format: binary} ever
-   * comes back.
+   * This endpoint's {@code text/plain} content is UTF-8 log text meant to be read, not opaque
+   * bytes, so the schema must stay a plain string. {@code format: binary} would map to Zod's {@code
+   * z.custom<Blob>(...)} while the generated client parses {@code text/plain} as a string via
+   * {@code response.text()} - that mismatch would break output validation on every real log
+   * download.
    */
   @Test
   void downloadRunLogSchemaIsAPlainStringNotBinary() {
@@ -385,11 +351,10 @@ class OpenApiContractTest {
   }
 
   /**
-   * {@link #everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes} only spot-
-   * checks one canonical success media type per operation ({@code image/png} here) - this test
-   * separately locks that all three {@link dev.vlaisanem.automation.runner.contract.ArtifactType}
-   * media types the controller can actually serve are documented, not just the one the shared
-   * matrix happens to check.
+   * Complements {@link
+   * #everyOperationDocumentsExactlyItsExpectedResponseCodesAndSuccessMediaTypes}, which only
+   * spot-checks one media type per operation ({@code image/png} here) - locks that all three {@link
+   * dev.vlaisanem.automation.runner.contract.ArtifactType} media types are documented.
    */
   @Test
   void downloadRunArtifactDocumentsEveryArtifactTypesMediaType() {

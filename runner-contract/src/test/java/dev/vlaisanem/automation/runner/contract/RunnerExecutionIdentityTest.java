@@ -25,9 +25,7 @@ class RunnerExecutionIdentityTest {
 
     assertThat(first).startsWith("local-");
     assertThat(second).startsWith("local-");
-    // Each call to the pure resolver mints its own fresh UUID - the "resolved once per JVM"
-    // guarantee comes from currentRunId() caching this in a static field, not from resolve()
-    // itself.
+    // resolve() itself is not cached; currentRunId() is what makes the value stable per JVM.
     assertThat(first).isNotEqualTo(second);
   }
 

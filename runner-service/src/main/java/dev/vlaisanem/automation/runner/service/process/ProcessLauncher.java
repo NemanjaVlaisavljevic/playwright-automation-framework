@@ -16,12 +16,9 @@ public interface ProcessLauncher {
   /**
    * {@code environment} entries are added on top of the launched process's inherited environment.
    *
-   * @param runId D4.3.3 - never added to {@code environment} itself (that map is for the spawned
-   *     Gradle/test-JVM process's own consumption, e.g. by {@code RunnerEventWriterRegistry} inside
-   *     the forked JUnit worker - mixing in an internal, launcher-side-only concern like this would
-   *     be a real layering violation). Used only so an implementation can correlate its own
-   *     process-lifetime background work (e.g. an output-drainer thread) with the run it belongs to
-   *     in its own logs.
+   * @param runId not added to {@code environment} itself (that map is for the spawned process's own
+   *     consumption) - used only so an implementation can correlate its own background work (e.g.
+   *     an output-drainer thread) with the run it belongs to in its own logs.
    */
   Process start(
       String runId,
@@ -34,14 +31,10 @@ public interface ProcessLauncher {
   ProcessOutcome awaitCompletion(Process process, Duration timeout);
 
   /**
-   * Kills {@code process} and every descendant in its process tree (graceful signal first, then
-   * forced), not just the immediate handle. A single {@link Process#destroyForcibly()} call only
-   * reaches the direct child - for a {@code gradlew.bat} invocation that is typically a wrapper
-   * script process, while the actual Gradle client/worker JVMs doing the real work are its
-   * descendants and would otherwise keep running after a run is already reported CANCELLED or
-   * TIMED_OUT. Throws {@link
-   * dev.vlaisanem.automation.runner.service.exception.ProcessTerminationException} if one or more
-   * processes are still alive after both attempts.
+   * Kills {@code process} and every descendant in its process tree (graceful, then forced) - a
+   * single {@link Process#destroyForcibly()} only reaches the {@code gradlew} wrapper, not the
+   * Gradle/JVM descendants doing the real work. Throws {@link
+   * dev.vlaisanem.automation.runner.service.exception.ProcessTerminationException} if any survive.
    */
   void terminate(Process process);
 }

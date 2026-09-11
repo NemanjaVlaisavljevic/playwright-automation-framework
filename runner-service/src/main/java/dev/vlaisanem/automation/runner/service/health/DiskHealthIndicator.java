@@ -9,18 +9,10 @@ import org.springframework.boot.health.contributor.Status;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.3.1 - contributes to the {@code readiness} health group under the contributor name {@code
- * disk} (Spring Boot strips the {@code HealthIndicator} suffix from this bean's own name) - proven,
- * not merely assumed, by {@code HealthEndpointGroupMembershipTest}.
- *
- * <p>{@link Status#OUT_OF_SERVICE}, never {@link Status#DOWN}, when {@link
- * DiskUsageSnapshot#belowThreshold()} - D4.2's own guard already treats this as temporary and
- * self-resolving (D4.1's retention sweep, or an operator freeing space), never something a restart
- * would fix. A {@link DiskUsageUnavailableException} from the snapshot call itself - the probe
- * genuinely cannot determine free space - is the one case here that *does* report {@link
- * Status#DOWN}: a fail-closed guard that cannot answer its own question is a real failure, not a
- * merely-low-disk condition. Deliberately excluded from the {@code liveness} group: disk pressure
- * is never a reason to restart the JVM.
+ * Contributes to the {@code readiness} health group as {@code disk}. Reports {@link
+ * Status#OUT_OF_SERVICE} (not {@link Status#DOWN}) when {@link DiskUsageSnapshot#belowThreshold()},
+ * since low disk is temporary/self-resolving; a {@link DiskUsageUnavailableException} reports
+ * {@link Status#DOWN} since the probe itself failed. Excluded from {@code liveness}.
  */
 @Component
 public class DiskHealthIndicator implements HealthIndicator {

@@ -18,10 +18,9 @@ import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 
 /**
- * D4.3.2 - proves the sampler's own review-mandated behaviors directly: an immediate first sample
- * (no waiting a full interval), each source sampled independently (one failing must never prevent
- * the other from refreshing), and a failed sample leaves the previous cached value in place while
- * still counting the failure.
+ * Proves the sampler takes an immediate first sample (no waiting a full interval), samples each
+ * source independently (one failing never blocks the other), and on failure keeps the previous
+ * cached value while still counting the failure.
  */
 class DiskMetricsSamplerTest {
 
@@ -73,12 +72,10 @@ class DiskMetricsSamplerTest {
   }
 
   /**
-   * D4.3.2 review finding - the gauge is registered synchronously in the constructor, but the first
-   * sample it reports is only scheduled there, not completed - the two are not atomic, so a scrape
-   * landing in that real window must never see a misleadingly-real-looking {@code 0}.
-   * Deterministic, not timing-based: blocks the first sample on a latch, reads the gauge while it
-   * is still blocked (must be {@code NaN}), then releases it and reads again (must be the real
-   * value).
+   * The gauge is registered synchronously in the constructor, but the first sample is only
+   * scheduled there, not completed - a scrape landing in that window must see {@code NaN}, never a
+   * misleading {@code 0}. Deterministic: blocks the first sample on a latch, reads mid-flight
+   * ({@code NaN}), then releases and reads again (real value).
    */
   @Test
   void gaugeReportsNaNUntilTheFirstSampleActuallyCompletes() throws Exception {
@@ -128,11 +125,10 @@ class DiskMetricsSamplerTest {
     DiskMetricsSampler sampler =
         new DiskMetricsSampler(
             propertiesWithSampleInterval(Duration.ofHours(1)), diskUsageService, metrics, registry);
-    // The free_bytes gauge reads diskUsageService.snapshot() live on every .value() call,
-    // entirely independent of the periodic sampler thread - shut that thread down immediately so
-    // its own concurrent calls to runnerDataBytes()/databaseBytes() on this same mock can never
-    // race this test's own re-stubbing of snapshot() (Mockito stubbing is not thread-safe against
-    // concurrent invocations on the same mock).
+    // free_bytes reads diskUsageService.snapshot() live, independent of the periodic sampler
+    // thread - shut it down immediately so its concurrent calls can never race this test's
+    // re-stubbing of snapshot() (Mockito stubbing is not thread-safe across concurrent invocations
+    // on the same mock).
     sampler.shutdown();
 
     assertThat(registry.find("runner.disk.free_bytes").gauge().value()).isEqualTo(555.0);

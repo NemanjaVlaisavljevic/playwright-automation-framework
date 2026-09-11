@@ -37,10 +37,9 @@ class RunExceptionHandlerTest {
   }
 
   /**
-   * Regression test for the review's requirement: an unmapped exception must return a generic
-   * client-facing message - never {@link Throwable#getMessage()}, which can carry internal detail
-   * never meant to reach a client - while the original exception is still fully logged server-side,
-   * so nothing is lost for diagnosis.
+   * An unmapped exception must return a generic client-facing message, never {@link
+   * Throwable#getMessage()} (which can carry internal detail), while still being fully logged
+   * server-side for diagnosis.
    */
   @Test
   void unexpectedExceptionNeverLeaksItsMessageToTheClientButIsFullyLogged() {
@@ -62,9 +61,9 @@ class RunExceptionHandlerTest {
   }
 
   /**
-   * Regression test for a review's finding: an absolute filesystem path (or any other internal
-   * detail) in {@link ArtifactManifestCorruptException#diagnosticReason()} must reach the server
-   * log for diagnosis but never the client-facing {@link ProblemDetail#getDetail()}.
+   * An absolute filesystem path (or other internal detail) in {@link
+   * ArtifactManifestCorruptException#diagnosticReason()} must reach the server log for diagnosis
+   * but never the client-facing {@link ProblemDetail#getDetail()}.
    */
   @Test
   void artifactManifestCorruptExceptionNeverLeaksTheDiagnosticReasonButLogsIt() {
@@ -88,11 +87,9 @@ class RunExceptionHandlerTest {
   }
 
   /**
-   * Regression test for a review's finding: {@code TestCatalogService} resolves the catalog file to
-   * an absolute path, so the exception's raw message used to embed it and {@code
-   * RunExceptionHandler} sent that verbatim as {@code ProblemDetail#getDetail()} - leaking internal
-   * container/host filesystem structure to any client hitting a 503. The absolute path must reach
-   * the server log for diagnosis but never the client-facing response.
+   * {@code TestCatalogService} resolves the catalog file to an absolute path; that path must reach
+   * the server log for diagnosis but never leak into the client-facing 503 response, which would
+   * otherwise expose internal filesystem structure.
    */
   @Test
   void testCatalogUnavailableExceptionNeverLeaksTheAbsolutePathButLogsIt() {

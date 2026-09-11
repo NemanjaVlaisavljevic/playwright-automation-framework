@@ -22,30 +22,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Appends one {@link ArtifactManifestEntry} JSON Line per artifact to {@code manifest.jsonl} inside
- * that run's own artifacts root (see {@code TestConfig#artifactsDirectory()}, already run-scoped as
- * of the runner-service's {@code ARTIFACTS_DIR}).
+ * Appends one {@link ArtifactManifestEntry} JSON Line per artifact to {@code manifest.jsonl} in the
+ * run's artifacts root.
  *
- * <p>Two layers of locking, not one - a small {@code APPEND}-mode write is NOT a portable atomicity
- * guarantee across every OS/filesystem (unlike a single process's own {@code O_APPEND} behavior on
- * a given local filesystem, nothing in the Java NIO API promises this holds everywhere, and this
- * project already runs test classes concurrently within one JVM - see junit-platform.properties):
- *
- * <ul>
- *   <li>an in-JVM {@code synchronized} lock, keyed by the manifest file's own absolute path, so two
- *       threads in the same JVM (the common case here) never race at all - a {@link FileLock}
- *       acquired by a second thread of the <em>same</em> JVM would throw {@code
- *       OverlappingFileLockException} rather than block, so this must be handled before ever
- *       reaching the file lock below, not instead of it.
- *   <li>an OS-level {@link FileLock} on the channel, acquired before every write - this is what
- *       actually protects two separate JVM processes (e.g. two independent Gradle invocations
- *       somehow targeting the same manifest file) from interleaving, which no in-JVM lock could
- *       ever reach.
- * </ul>
- *
- * <p>The file's current size is read only after the {@link FileLock} is held, never before -
- * reading it earlier could observe a stale end-of-file position if another writer's append landed
- * in between, causing this write to silently overwrite (rather than follow) it.
+ * <p>Locks in two layers: an in-JVM {@code synchronized} lock (an OS {@link FileLock} would throw
+ * {@code OverlappingFileLockException} across threads of the same JVM rather than block) plus an
+ * OS-level {@link FileLock} that protects separate JVM processes from interleaving. The file's size
+ * is read only once the {@link FileLock} is held, to avoid overwriting a concurrent append.
  */
 final class ArtifactManifestWriter {
 
@@ -56,16 +39,9 @@ final class ArtifactManifestWriter {
   private ArtifactManifestWriter() {}
 
   /**
-   * Builds the entry (a fresh opaque {@code artifactId}, the file's actual size once it is fully
-   * written, {@code relativePath} normalized to forward slashes regardless of platform) and appends
-   * it - unless {@code artifactFile} itself already exceeds {@code artifactMaxBytes} (a second,
-   * independent layer of defense in depth behind whatever pre-write cap the caller may already have
-   * applied - the only layer at all for a capture API, like a Playwright trace, with no in-memory
-   * alternative), or the manifest/per-run-total D4.2 budgets reject it (see {@link #append}) - in
-   * either case {@code artifactFile} is deleted and this returns {@code false} rather than leaving
-   * a disk-consuming file with no manifest reference at all. Callers are expected to catch {@link
-   * IOException} the same way they already treat any other best-effort artifact-capture failure -
-   * this never throws anything artifact capture itself did not already risk throwing.
+   * Builds and appends the manifest entry, unless {@code artifactFile} exceeds {@code
+   * artifactMaxBytes} or a manifest/per-run budget in {@link #append} rejects it - either way
+   * {@code artifactFile} is deleted rather than left orphaned on disk.
    *
    * @return {@code true} if the entry was actually recorded in the manifest.
    */
@@ -114,11 +90,9 @@ final class ArtifactManifestWriter {
   }
 
   /**
-   * @return {@code true} if the line was actually appended; {@code false} if either D4.2 budget
-   *     (the manifest's own size, or the run's real total artifact-directory size, computed fresh
-   *     under this same lock rather than an in-memory counter - a counter would not hold across the
-   *     two separate OS processes this method already supports, see this class's own Javadoc)
-   *     rejected it.
+   * @return {@code true} if appended; {@code false} if the manifest-size or run-total-bytes budget
+   *     rejected it. The run total is computed fresh under the lock, not cached, since a cache
+   *     would not hold across separate JVM processes.
    */
   private static boolean append(
       Path artifactsRoot,
@@ -143,9 +117,8 @@ final class ArtifactManifestWriter {
               manifestMaxBytes);
           return false;
         }
-        // The candidate artifact file this entry describes was already written to disk before
-        // record() was ever called, so this walk already includes it - no separate "plus the new
-        // file's own size" addition is needed.
+        // Already includes the new artifact's own bytes, since it's written to disk before this
+        // runs.
         long runArtifactTotal = directorySize(artifactsRoot);
         if (runArtifactTotal > runMaxTotalArtifactBytes) {
           LOGGER.warn(

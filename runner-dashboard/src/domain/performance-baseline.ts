@@ -1,24 +1,9 @@
 import { z } from "zod";
 
 /**
- * D4.4.3b - the frontend contract for `public/performance/baseline.json` (D4.4.3a): a committed,
- * manually-published "CI performance snapshot" - never live monitoring, never regenerated at
- * request time. Hand-written, mirroring `runner-event.ts`'s own established style (`.strict()`
- * everywhere, locked enums, no bare `z.string()` where a real shape is known) - there is no
- * generated OpenAPI counterpart for this file, the same way there is none for the SSE contract.
- *
- * This schema validates *shape*, but also a real set of cross-field semantic invariants meaningful
- * to check purely from the committed JSON itself, so a future hand-edit can't silently desync the
- * file's own internal meaning even while every individual field still looks well-typed:
- * `workflowRun.url`'s own embedded run id must match `workflowRun.id`; a latency metric's
- * `p95LimitMs`/`passed` must be null together or set together, and when set, `passed` must equal the
- * real `p95Ms < p95LimitMs` comparison (the exact semantics of this project's own k6 `p(95)<X`
- * threshold syntax); a scenario's own `status` must be derivable from whether any of its metrics
- * report `passed:false`; `generatedAt` may never predate `source.measuredAt`. It deliberately does
- * NOT re-derive the raw k6 correctness checks that need data this file never carries (percentile
- * ordering across the underlying k6 Trend's own raw samples, a threshold's own `ok:true`, non-zero
- * sample counts) - those are already enforced, with much richer error messages, by
- * `runner-dashboard/scripts/lib/summarize-baseline-core.mjs` at generation time.
+ * Frontend contract for the committed, manually-published `public/performance/baseline.json`
+ * (hand-written, no generated OpenAPI counterpart). Also checks cross-field invariants (e.g.
+ * `passed` matching `p95Ms < p95LimitMs`); raw k6 checks are enforced separately at generation time.
  */
 
 const nonBlankString = z.string().regex(/\S/, "must not be blank");
@@ -45,12 +30,9 @@ const K6Version = z
 const GITHUB_ACTIONS_RUN_URL_PATH = /^\/[^/]+\/[^/]+\/actions\/runs\/(\d+)$/;
 
 /**
- * Parses `value` as a *plain* GitHub Actions run URL - `https://github.com/<owner>/<repo>/actions/
- * runs/<id>`, nothing else. Returns the embedded run id on success, `null` otherwise. Deliberately
- * stricter than "parses as some URL, ends in the right suffix" (a review finding: that alone would
- * accept `https://evil.example/actions/runs/123`, or a URL carrying credentials/query/hash a real
- * GitHub Actions link never does) - real `new URL()` parsing plus an exact host/protocol/shape
- * check is what actually locks this down to the one real thing this field can legitimately be.
+ * Parses `value` as a plain `https://github.com/<owner>/<repo>/actions/runs/<id>` URL and returns
+ * the embedded run id, or `null`. Checks exact host/protocol/shape, not just a matching suffix, so
+ * e.g. `https://evil.example/actions/runs/123` is rejected.
  */
 function parseGithubActionsRunUrl(value: string): number | null {
   let url: URL;
@@ -118,8 +100,7 @@ const LatencyMetric = z
     p50Ms: z.number().nonnegative(),
     p95Ms: z.number().nonnegative(),
     p99Ms: z.number().nonnegative(),
-    // null when the underlying k6 script genuinely configures no threshold for this metric (see
-    // scenario-configs.mjs's own `thresholdRequired: false`) - never a missing/omitted field.
+    // null when the metric has no configured threshold (`thresholdRequired: false`), never omitted.
     p95LimitMs: z.number().positive().nullable(),
     passed: z.boolean().nullable(),
   })
@@ -144,8 +125,7 @@ const LatencyMetric = z
       return;
     }
     if (isGated) {
-      // Real semantics of this project's own k6 threshold syntax - see performance/k6/*.js's own
-      // "p(95)<X" gates (D4.4.2) - strictly less-than, never less-than-or-equal.
+      // k6's "p(95)<X" gate semantics: strictly less-than, never less-than-or-equal.
       const expectedPassed = metric.p95Ms < (metric.p95LimitMs as number);
       if (metric.passed !== expectedPassed) {
         ctx.addIssue({

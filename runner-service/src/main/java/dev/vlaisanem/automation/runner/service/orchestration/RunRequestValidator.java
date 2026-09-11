@@ -11,12 +11,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Rejects any (environment, suite) combination {@link RunAvailabilityPolicy} does not allow.
- * Deliberately a separate check from what {@link Environment}/{@link Suite} can even represent:
- * adding a new enum value must not silently make every existing request able to use it - {@link
- * RunCatalog} (what this codebase can run at all) and {@link RunAvailabilityPolicy} (what this
- * deployment currently allows of that) are the only two places that actually turn a combination on,
- * for this validator, {@code SuiteCommandFactory}, and {@code CapabilitiesResponse} alike.
+ * Rejects any (environment, suite) combination {@link RunAvailabilityPolicy} does not allow. Kept
+ * separate from what {@link Environment}/{@link Suite} can represent, so a new enum value doesn't
+ * silently become usable everywhere: {@link RunCatalog} and {@link RunAvailabilityPolicy} are the
+ * only places that actually turn a combination on.
  */
 public final class RunRequestValidator {
 
@@ -29,9 +27,8 @@ public final class RunRequestValidator {
   }
 
   /**
-   * The same allowlist {@link #validate} enforces, grouped by environment and exposed read-only (an
-   * unmodifiable map of unmodifiable sets) so a capabilities endpoint can mirror exactly what the
-   * server will actually accept instead of hand-copying it into a second, driftable list.
+   * The same allowlist {@link #validate} enforces, grouped by environment and read-only, so a
+   * capabilities endpoint can mirror it instead of hand-copying a second, driftable list.
    */
   public static Map<Environment, Set<Suite>> allowedCombinations(RunAvailabilityPolicy policy) {
     Map<Environment, Set<Suite>> grouped = new EnumMap<>(Environment.class);

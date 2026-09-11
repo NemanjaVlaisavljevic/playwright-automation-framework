@@ -22,66 +22,38 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Fans a run's canonical events out to zero or more live subscribers. Never called directly from a
- * runner worker thread with anything that could block on slow I/O: {@link #publish} only enqueues
- * (a fast, non-blocking operation) into each subscriber's own mailbox - the actual delivery to
- * whatever transport a subscriber wraps (an SSE emitter, in the eventual controller) happens on
- * that subscriber's own dedicated thread, fully decoupled from the publisher.
+ * Fans a run's canonical events out to zero or more live subscribers. {@link #publish} only
+ * enqueues into each subscriber's mailbox (fast, non-blocking); actual delivery happens on that
+ * subscriber's own dedicated thread, decoupled from the publisher.
  *
- * <p>No real backpressure on the live path: a subscriber that cannot keep up with live events is
- * disconnected outright rather than blocking the publisher or growing its mailbox without bound.
- * The replay batch a subscriber is seeded with (see {@link #subscribe}) is a separate, unbounded
- * concern - it is a known, finite history and is never counted against the live capacity, so a
- * subscriber with a large backlog to replay is never punished for it. The expected recovery from a
- * live disconnect is a client reconnect with {@code Last-Event-ID}, replaying via {@link
- * RunEventBroker#replayAndSubscribe}, not a slow-consumer protocol.
+ * <p>No backpressure on the live path: a subscriber that can't keep up is disconnected outright
+ * rather than blocking the publisher or growing its mailbox unbounded. The replay batch a
+ * subscriber is seeded with is a separate, unbounded concern - a known, finite history never
+ * counted against live capacity. Expected recovery from a live disconnect is a client reconnect
+ * with {@code Last-Event-ID}, not a slow-consumer protocol.
  *
- * <p>A subscription closes itself, cleanly, the moment it has delivered a {@link
- * EventType#RUN_FINISHED} event (replayed or live) - a run's canonical timeline never produces
- * anything after that (see {@code RunLifecycleStore#appendEventIfNonTerminal}'s own terminal
- * contract), so there is nothing left to justify holding its delivery thread, mailbox, and (for an
- * SSE subscriber) HTTP connection open any further.
+ * <p>A subscription closes itself once it delivers a {@link EventType#RUN_FINISHED} event, since
+ * nothing follows it in a run's canonical timeline. A subscriber's terminal callback always runs
+ * off whatever thread triggered the close (see {@link #notifyTerminal}), and swallows any exception
+ * it throws - critical for the live-overflow disconnect, detected on the publisher thread itself,
+ * which must never block or throw back into {@link RunEventBroker#append}.
  *
- * <p>A subscriber's terminal callback ({@link RunEventSubscriber#onError} / {@code onComplete})
- * always runs off whatever thread triggered the close, and any exception it throws is swallowed -
- * see {@link #notifyTerminal}. This matters most for the live-overflow disconnect, which is
- * detected directly on the publisher thread (ultimately whatever thread calls {@link
- * RunEventBroker#append}): a subscriber's own callback must never be able to block that thread, and
- * must never be able to turn an already-durably-written journal append into a thrown exception for
- * the caller.
+ * <p>{@link #subscribe} enforces a hard cap ({@code maxSubscribers}), since every subscriber holds
+ * its own dedicated delivery thread for the life of its connection. {@link #shutdown} closes every
+ * active subscription and stops accepting new ones.
  *
- * <p>Every subscriber holds its own dedicated delivery thread for the life of its connection, so
- * {@link #subscribe} enforces a hard cap ({@code maxSubscribers}) on how many can be active at once
- * - without it, an unbounded number of concurrent SSE clients would mean an unbounded number of
- * live threads. {@link #shutdown} closes every active subscription (each one's terminal callback
- * still runs exactly as it would from any other close) and stops accepting new ones, so an
- * application shutdown does not leave dangling subscriber threads or half-finished SSE responses.
+ * <p>{@code lifecycleLock} makes shutdown's "close everything and tear down the executor" atomic
+ * against concurrent {@code subscribe}/{@code close} calls: {@code subscribe}/{@code close} take
+ * the shared read lock (so they proceed in parallel against each other) while {@code shutdown}
+ * takes the exclusive write lock for its whole body. This guarantees a subscription created
+ * concurrently with shutdown is provably either rejected or included in its snapshot, and that
+ * {@code close} can never straddle shutdown's executor teardown and throw a {@link
+ * RejectedExecutionException} back through a publisher thread; {@code close}'s idempotency check
+ * must sit inside the locked section for the same reason.
  *
- * <p>{@code lifecycleLock} - a single {@link ReentrantReadWriteLock} shared by {@link #subscribe},
- * {@link Subscription#close}, and {@link #shutdown} - is what makes that guarantee actually hold
- * under concurrency, not just in the common case: {@code subscribe}/{@code close} take the shared
- * read lock (so any number of them proceed in parallel against each other), while {@code shutdown}
- * takes the exclusive write lock for its entire body. That serializes three things that used to
- * race: (1) a subscription created concurrently with shutdown can no longer end up neither rejected
- * nor included in shutdown's close-everything snapshot - it is provably one or the other; (2)
- * {@code close}'s "remove from bookkeeping, then submit to the terminal-notifier executor" can no
- * longer straddle {@code shutdown}'s executor teardown and throw a {@link
- * RejectedExecutionException} out through whatever thread called {@code close} (e.g. a publisher
- * thread, mid-{@code append}, exactly the kind of leak {@link #notifyTerminal} otherwise exists to
- * prevent) - critically, {@code close}'s idempotency check ({@code closed.compareAndSet}) has to
- * sit <em>inside</em> the locked section too, not just the work after it: claiming the close via
- * CAS and then blocking on the lock would let {@code shutdown}'s own snapshot loop see {@code
- * closed} already {@code true} for this subscription (a spurious no-op) while the real
- * unsubscribe/notify from the original caller is still pending, letting it fall through to a
- * torn-down executor once the lock is finally granted; (3) {@code shutdown} calling {@code close}
- * on each snapshotted subscription reentrantly acquires the very read lock it already excludes new
- * writers from - Java's {@code ReentrantReadWriteLock} explicitly supports this write-then-read
- * "downgrading" reentrancy for the same thread.
- *
- * <p>Package-private: {@link #subscribe} is only ever called by {@link RunEventBroker}, which alone
- * holds the per-run lock needed to combine it atomically with a replay snapshot. Calling it
- * directly would let a live event from {@link #publish} slip into a subscriber's mailbox before, or
- * interleaved with, that subscriber's own replay batch.
+ * <p>Package-private: {@link #subscribe} is only called by {@link RunEventBroker}, which holds the
+ * per-run lock needed to combine it atomically with a replay snapshot - calling it directly could
+ * let a live event slip into a subscriber's mailbox interleaved with its own replay batch.
  */
 class RunEventHub {
 
@@ -167,15 +139,10 @@ class RunEventHub {
   }
 
   /**
-   * Stops accepting new subscriptions and closes every currently active one - each still gets its
-   * normal terminal {@code onComplete()} callback (see {@link #notifyTerminal}), just triggered by
-   * shutdown instead of a client disconnect or a slow-consumer overflow. Holding the exclusive
-   * write lock for this whole method - snapshot, close-everything, and the executor's own {@code
-   * shutdown()} call - is what guarantees no subscription can be created or closed concurrently in
-   * a way that either escapes this snapshot or races the executor teardown (see the class Javadoc).
-   * The bounded {@code awaitTermination} wait itself runs after releasing the lock: by that point
-   * every relevant {@code close()} has either already finished or can no longer submit anything
-   * new, so there is nothing left for that wait to race against.
+   * Stops accepting new subscriptions and closes every currently active one, each still getting its
+   * normal terminal callback. Holds the exclusive write lock for the whole snapshot +
+   * close-everything + executor shutdown sequence (see the class Javadoc); the bounded {@code
+   * awaitTermination} wait runs after releasing the lock, once nothing can race it any further.
    */
   void shutdown() {
     lifecycleLock.writeLock().lock();
@@ -196,17 +163,13 @@ class RunEventHub {
   }
 
   /**
-   * Runs one subscriber's terminal callback on a dedicated notifier thread - never on the thread
-   * that triggered the close - and swallows any exception it throws. Without this, a live-overflow
-   * disconnect (detected inside {@link Subscription#offerLive}, on the publisher thread) would call
-   * the callback synchronously there: a blocking or throwing callback would then stall or fail
-   * {@link RunEventBroker#append} itself, after the event it just published had already been
-   * durably written to the journal - silently splitting the repository/journal state from what the
-   * caller believes happened. The {@link RejectedExecutionException} catch is a last-resort safety
-   * net for the same failure mode via a different door: {@code lifecycleLock} (see the class
-   * Javadoc) is what actually prevents a live {@code close()} from ever reaching a torn-down
-   * executor, but dropping a callback here is still infinitely preferable to letting that exception
-   * escape to a publisher thread if some future change ever reopens that gap.
+   * Runs one subscriber's terminal callback on a dedicated notifier thread, never the thread that
+   * triggered the close, and swallows any exception it throws. Without this, a live-overflow
+   * disconnect detected on the publisher thread could let a blocking or throwing callback stall or
+   * fail {@link RunEventBroker#append} after its event was already durably written to the journal.
+   * The {@link RejectedExecutionException} catch is a last-resort safety net alongside {@code
+   * lifecycleLock}, which is what actually prevents a live {@code close()} from reaching a
+   * torn-down executor.
    */
   private void notifyTerminal(RunEventSubscriber subscriber, Throwable cause) {
     try {
@@ -229,18 +192,15 @@ class RunEventHub {
   }
 
   /**
-   * Test seam only - does nothing in production. Overridden in tests to pause exactly here,
-   * deterministically reproducing {@code subscribe()} running concurrently, mid-registration, with
-   * {@code shutdown()}'s snapshot - proving the lifecycle lock actually excludes that interleaving
-   * rather than merely being expected to in the common case.
+   * Test seam only - does nothing in production. Overridden in tests to deterministically reproduce
+   * {@code subscribe()} running concurrently, mid-registration, with {@code shutdown()}'s snapshot.
    */
   void beforeSubscribeRegistration() {}
 
   /**
-   * Test seam only - does nothing in production. Overridden in tests to pause exactly here,
-   * deterministically reproducing {@link Subscription#close} running concurrently, mid-notify, with
-   * {@code shutdown()}'s executor teardown - proving the lifecycle lock actually excludes that
-   * interleaving rather than merely being expected to in the common case.
+   * Test seam only - does nothing in production. Overridden in tests to deterministically reproduce
+   * {@link Subscription#close} running concurrently, mid-notify, with {@code shutdown()}'s executor
+   * teardown.
    */
   void beforeCloseNotify() {}
 
@@ -256,8 +216,7 @@ class RunEventHub {
 
     /**
      * Counts only envelopes queued via the live path ({@link #offerLive}), never the replay batch
-     * seeded at construction - replay is a known, finite history and must stay unbounded, while
-     * only an unbounded, ever-growing live backlog indicates a subscriber that cannot keep up.
+     * seeded at construction, which must stay unbounded.
      */
     private final AtomicInteger liveQueued = new AtomicInteger();
 
@@ -275,8 +234,7 @@ class RunEventHub {
     }
 
     /**
-     * Unbounded and unconditional: a replay batch is a known, finite history and must never be
-     * truncated by, or counted against, the live-delivery capacity bound below.
+     * Unbounded and unconditional: never truncated by, or counted against, the live-delivery cap.
      */
     private void seedReplay(List<RunnerEvent> replayEvents) {
       for (RunnerEvent event : replayEvents) {
@@ -289,9 +247,8 @@ class RunEventHub {
     }
 
     /**
-     * Live-publish path - bounded, independently of however large the replay backlog in the same
-     * mailbox is. Disconnects this subscriber instead of growing its live backlog without limit if
-     * it is falling behind.
+     * Live-publish path - bounded independently of the replay backlog in the same mailbox.
+     * Disconnects the subscriber instead of growing its live backlog without limit.
      */
     private void offerLive(RunnerEvent event) {
       if (closed.get()) {

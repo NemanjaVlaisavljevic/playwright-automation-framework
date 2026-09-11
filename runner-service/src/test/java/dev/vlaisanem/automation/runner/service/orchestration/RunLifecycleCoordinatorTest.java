@@ -36,14 +36,10 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * D2.3 cutover: rewritten against {@link FakeRunLifecycleStore} (behaviorally faithful to {@code
- * JdbcRunStore}, proven separately against a real Postgres in {@code databaseIntegrationTest})
- * instead of the retired in-memory {@code RunRepository}/file-backed {@code RunEventAppender} pair.
- * The old "emergency ERROR" tests (a store write succeeding but the separate journal append then
- * failing) no longer apply - one atomic store transaction means a failure anywhere rolls back
- * everything, so this class no longer has any emergency fallback of its own to test; the equivalent
- * coverage here is simpler: a failing store write leaves the run completely unchanged, and the
- * exception propagates unmodified for {@code RunService} to handle.
+ * Verifies {@link RunLifecycleCoordinator}'s state transitions and event emission against {@link
+ * FakeRunLifecycleStore}. A failing store write leaves the run completely unchanged (one atomic
+ * transaction, no separate emergency fallback), and the exception propagates for {@code RunService}
+ * to handle.
  */
 class RunLifecycleCoordinatorTest {
 
@@ -116,10 +112,9 @@ class RunLifecycleCoordinatorTest {
   }
 
   /**
-   * Replaces the pre-cutover "emergency ERROR" test for this same failure point: with one atomic
-   * store transaction, a failed write cannot leave a status change un-backed by its event any more
-   * - it leaves the run completely unchanged instead, and the failure propagates for {@code
-   * RunService}'s own existing top-level fallback to handle (unchanged by this cutover).
+   * With one atomic store transaction, a failed write leaves the run completely unchanged instead
+   * of a status change un-backed by its event; the failure propagates for {@code RunService}'s own
+   * fallback to handle.
    */
   @Test
   void aFailingRunStartedWriteLeavesTheRunInStartingUnchanged() {
@@ -141,8 +136,8 @@ class RunLifecycleCoordinatorTest {
   }
 
   /**
-   * Regression test for the review's finding: a run whose lifecycle transition is lost to a
-   * concurrent finalization must never get a RUN_STARTED it cannot honestly back up.
+   * A run whose transition is lost to a concurrent finalization must never emit a RUN_STARTED it
+   * cannot honestly back up.
    */
   @Test
   void markRunningEmitsNothingWhenTheTransitionIsLostToAConcurrentFinish() {
@@ -218,9 +213,8 @@ class RunLifecycleCoordinatorTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code RUN_QUEUED} followed directly by {@code
-   * RUN_FINISHED(CANCELLED)} - a run cancelled before ever reaching STARTING/RUNNING - must never
-   * carry a RUN_STARTED or any TEST_* event, and its canonical sequence must stay continuous.
+   * A run cancelled before reaching STARTING/RUNNING must emit only RUN_QUEUED then {@code
+   * RUN_FINISHED(CANCELLED)} - no RUN_STARTED or TEST_* event, with a continuous sequence.
    */
   @Test
   void queuedThenCancelledEmitsOnlyQueuedThenFinishedWithNoStartedInBetween() {
@@ -278,9 +272,8 @@ class RunLifecycleCoordinatorTest {
   }
 
   /**
-   * Regression test for the review's finding: of two callers racing to finalize the same run, only
-   * the one whose transition actually applies may emit RUN_FINISHED - a race must never produce
-   * more than one.
+   * Of many callers racing to finalize the same run, only the one whose transition applies may emit
+   * RUN_FINISHED - a race must never produce more than one.
    */
   @Test
   void concurrentFinishAttemptsNeverProduceMoreThanOneRunFinished() throws Exception {
@@ -320,9 +313,8 @@ class RunLifecycleCoordinatorTest {
             .filter(event -> event.type() == EventType.RUN_FINISHED)
             .toList();
     assertThat(finished).hasSize(1);
-    // Exactly one of the 16 racing attempts actually won - summed across whichever status tag
-    // (SUCCEEDED or FAILED) that one happened to carry, the metric fired exactly once too, never
-    // once per attempt.
+    // Exactly one of the 16 attempts wins; the metric (summed across whichever status tag it used)
+    // must have fired exactly once, never once per attempt.
     double totalFinished =
         meterRegistry.find("runner.runs.finished").counters().stream()
             .mapToDouble(Counter::count)
@@ -381,12 +373,9 @@ class RunLifecycleCoordinatorTest {
   }
 
   /**
-   * None of this test class's scenarios ever append a {@code TEST_FAILED}/{@code TEST_ABORTED}
-   * event (this class only exercises lifecycle transitions, never the {@code TEST_*}/{@code STEP_*}
-   * append path), so {@link RunEventBroker}'s own D2.4 artifact-ingestion hook never actually fires
-   * here - a real {@link ArtifactIngestionService} wired to an in-memory {@link
-   * FakeArtifactRepository} satisfies the constructor without needing a real manifest file or
-   * database.
+   * This class only exercises lifecycle transitions, never TEST_* or STEP_* events, so {@link
+   * RunEventBroker}'s artifact-ingestion hook never fires - an in-memory {@link
+   * FakeArtifactRepository} is enough to satisfy the constructor.
    */
   private static ArtifactIngestionService noopArtifactIngestionService() {
     return new ArtifactIngestionService(

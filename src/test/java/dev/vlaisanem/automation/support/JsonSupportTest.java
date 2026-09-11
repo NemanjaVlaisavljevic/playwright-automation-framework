@@ -14,11 +14,7 @@ class JsonSupportTest {
     assertThat(redacted).doesNotContain("hunter2");
   }
 
-  /**
-   * Proves {@code SensitiveDataKeys} is actually wired in here, not just referenced - a field this
-   * class didn't know about before (see the review that added {@code cookie}/{@code set-cookie} to
-   * the shared set) must be redacted without any change to this class itself.
-   */
+  /** Verifies the shared {@code SensitiveDataKeys} set is used directly, not duplicated here. */
   @Test
   void redactsACookieField() {
     String redacted = JsonSupport.redact("{\"cookie\": \"SESSION=abc123\"}");

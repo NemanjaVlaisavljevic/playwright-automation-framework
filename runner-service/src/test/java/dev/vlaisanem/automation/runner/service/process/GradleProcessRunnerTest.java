@@ -91,12 +91,10 @@ class GradleProcessRunnerTest {
   }
 
   /**
-   * D4.3.3 review finding - the output-drainer thread is a distinct thread from whichever one
-   * called {@code start()}, so MDC does not carry {@code runId} onto it automatically. A normal,
-   * successful drain never itself logs anything observable from that thread (the class's own two
-   * log statements only fire on an I/O error), so proving this needs the {@code
-   * afterDrainerThreadMdcEstablished} test seam - mirrors {@code RunEventHubTest}'s own protected-
-   * method-override pattern for exactly the same reason.
+   * The output-drainer thread is distinct from the one that called {@code start()}, so MDC does not
+   * carry {@code runId} onto it automatically. A successful drain never logs anything observable
+   * (the class's log statements only fire on I/O error), so this needs the {@code
+   * afterDrainerThreadMdcEstablished} test seam.
    */
   @Test
   void theOutputDrainerThreadCarriesTheRealRunIdInItsOwnMdc(@TempDir Path tempDir)
@@ -122,10 +120,9 @@ class GradleProcessRunnerTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code builder.environment().putAll(environment)}
-   * used to run after the output file was already opened, so a failure there (a null map is the one
-   * input verified to throw identically on every platform - see the class-level note) leaked the
-   * file handle instead of being caught by the existing IOException/RuntimeException cleanup.
+   * If {@code builder.environment().putAll(environment)} fails (a {@code null} map throws
+   * consistently on every platform) after the output file is already opened, the file handle must
+   * not leak - it needs the same IOException/RuntimeException cleanup as any other failure.
    */
   @Test
   void doesNotLeakTheOutputFileHandleWhenTheEnvironmentMapIsInvalid(@TempDir Path tempDir) {
@@ -154,9 +151,9 @@ class GradleProcessRunnerTest {
   }
 
   /**
-   * Regression test for the review's exact finding: {@code destroyForcibly()} on the direct process
-   * handle alone does not reach a grandchild - a real gap for {@code gradlew.bat}, whose direct
-   * process is a wrapper script while the actual Gradle/JUnit work happens in a descendant.
+   * {@code destroyForcibly()} on the direct process handle alone does not reach a grandchild - a
+   * real gap for {@code gradlew.bat}, whose direct process is a wrapper script while the actual
+   * Gradle/JUnit work happens in a descendant.
    */
   @Test
   void terminateKillsTheEntireProcessTreeIncludingGrandchildren(@TempDir Path tempDir)
@@ -236,10 +233,9 @@ class GradleProcessRunnerTest {
   }
 
   /**
-   * Regression test for the review's finding: a single snapshot (even taken twice) would never
-   * learn about a child spawned during the graceful-shutdown wait. {@code terminate()} now repeats
-   * discovery on every forced-kill pass, so a descendant that only appears from the second call
-   * onward must still be targeted.
+   * A single snapshot (even taken twice) would never learn about a child spawned during the
+   * graceful-shutdown wait. {@code terminate()} repeats discovery on every forced-kill pass, so a
+   * descendant that appears only from the second call onward must still be targeted.
    */
   @Test
   void terminateAlsoTargetsADescendantThatAppearsOnlyAfterTheInitialSnapshot() {
@@ -247,10 +243,9 @@ class GradleProcessRunnerTest {
     Process process = mock(Process.class);
     ProcessHandle lateDescendant = mock(ProcessHandle.class);
     AtomicInteger callCount = new AtomicInteger();
-    // Empty on the very first (entry) discovery; every call from the second onward reveals the
-    // descendant, simulating one spawned during the graceful-shutdown wait. A counter-driven
-    // answer (rather than a fixed thenReturn list) guarantees a fresh Stream on every call,
-    // however many discovery passes terminate() ends up making.
+    // Empty on the first discovery; every call after reveals the descendant, simulating one
+    // spawned during the graceful-shutdown wait. A counter-driven answer guarantees a fresh Stream
+    // each call.
     when(process.descendants())
         .thenAnswer(
             invocation ->
@@ -273,11 +268,9 @@ class GradleProcessRunnerTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code process.descendants()} alone can miss a
-   * grandchild once its immediate parent dies and it gets reparented away from the root's view.
-   * {@code terminate()} also scans every still-alive already-known handle's own {@code
-   * descendants()}, which is the only way this grandchild (never reachable through {@code
-   * process.descendants()} at all) can still be discovered and killed.
+   * {@code process.descendants()} alone can miss a grandchild once its immediate parent dies and it
+   * gets reparented away from the root's view. {@code terminate()} also scans every still-alive
+   * known handle's own {@code descendants()} to discover and kill it.
    */
   @Test
   void terminateAlsoTargetsAGrandchildOnlyDiscoverableThroughAKnownHandlesOwnDescendants() {
@@ -303,12 +296,9 @@ class GradleProcessRunnerTest {
   }
 
   /**
-   * Regression test for the review's finding: {@code allDeadWithin} used to check only the {@code
-   * known} snapshot captured before the wait started, never re-discovering while polling - a
-   * descendant that only appears mid-wait (not at a pass boundary) would be missed entirely and,
-   * under the old code, this exact scenario would exhaust every forced-kill pass and throw. Now
-   * discovery (and the matching kill signal) repeats on every poll tick of the wait itself, so this
-   * resolves successfully within the graceful phase, never needing a forced pass at all.
+   * {@code allDeadWithin} must re-discover descendants on every poll tick of the wait, not just the
+   * snapshot taken before the wait started - a descendant that appears mid-wait (not at a pass
+   * boundary) must still be found and killed within the graceful phase.
    */
   @Test
   void terminateRediscoversAndKillsADescendantThatAppearsOnlyDuringTheWaitNotAtAPassBoundary() {
@@ -317,11 +307,10 @@ class GradleProcessRunnerTest {
     ProcessHandle midWaitDescendant = mock(ProcessHandle.class);
     AtomicInteger discoveryCalls = new AtomicInteger();
 
-    // Root discovery is called exactly once per allDeadWithin loop iteration (at its top) - this
-    // counter therefore doubles as an iteration count. Empty for the first two iterations (nothing
-    // to find yet), reveals the descendant only from the third iteration onward, and everything is
-    // reported dead from the fifth iteration onward - modelling a process that genuinely appears
-    // partway through the grace-period wait, not at its start.
+    // Root discovery runs once per allDeadWithin iteration, so this counter doubles as an iteration
+    // count: empty for the first two iterations, reveals the descendant from the third onward, and
+    // everything reports dead from the fifth onward - a process that appears mid-wait, not at
+    // start.
     when(process.descendants())
         .thenAnswer(
             invocation ->

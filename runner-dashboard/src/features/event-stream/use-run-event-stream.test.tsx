@@ -111,8 +111,7 @@ describe("useRunEventStream", () => {
     act(() => client.error());
     act(() => {
       client.open();
-      // A reconnect naturally replays from the server's Last-Event-ID bookkeeping - here that's
-      // sequence 1 and 2 arriving again before live delivery continues at 3.
+      // A reconnect replays sequence 1 and 2 again before live delivery continues at 3.
       client.emit(event({ sequence: 1, type: "RUN_QUEUED" }));
       client.emit(event({ sequence: 2, type: "RUN_STARTED" }));
       client.emit(
@@ -169,8 +168,7 @@ describe("useRunEventStream", () => {
       }),
     ];
 
-    // The backend's fresh-replay contract: a new EventSource with no Last-Event-ID gets the full
-    // journal again, from sequence 1.
+    // A new EventSource with no Last-Event-ID gets the full journal again, from sequence 1.
     act(() => {
       client.open();
       for (const raw of replayedEvents) {
@@ -179,11 +177,7 @@ describe("useRunEventStream", () => {
     });
 
     expect(result.current.connectionState).toBe("LIVE");
-    // Full-state comparison, not just lastSequence/status/one test's partial status: applying the
-    // identical correct sequence to a clean reducer must produce an indistinguishable streamState
-    // (both `eventsBySequence` and `testsById`) - a bug that lost a displayName, timestamp, detail,
-    // or an entry from `eventsBySequence` during the reset+fresh-replay path would still have
-    // passed a narrower assertion.
+    // Full-state comparison against a clean reducer run, not just lastSequence/status.
     const expectedState = replayedEvents.reduce(
       (state, raw) => applyRunnerEventMessage(state, RUN_ID, raw),
       createInitialRunEventStreamState(),
@@ -281,8 +275,7 @@ describe("useRunEventStream", () => {
     expect(result.current.connectionState).toBe("RECOVERING");
     expect(clientA.connectCallCount).toBe(2);
 
-    // Swapping the injected client for the same runId must not look like a fresh mount - the
-    // retry budget stays consumed (RunDetailsPage's key={runId} is what resets it, not this).
+    // Swapping the client for the same runId must not reset the retry budget.
     rerender({ client: clientB });
 
     act(() => {

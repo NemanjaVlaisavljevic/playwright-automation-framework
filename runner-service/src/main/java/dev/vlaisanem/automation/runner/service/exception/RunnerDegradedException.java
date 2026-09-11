@@ -3,9 +3,8 @@ package dev.vlaisanem.automation.runner.service.exception;
 import java.util.List;
 
 /**
- * Thrown when the runner refuses a new submission because a process tree from a previously
- * cancelled/failed run is still known to be alive - starting a new run now would break single-run
- * isolation by letting it execute concurrently with that survivor.
+ * Thrown when the runner refuses a new submission because a process tree from a previous
+ * cancelled/failed run is still alive - starting a new run now would break single-run isolation.
  */
 public class RunnerDegradedException extends RuntimeException {
 

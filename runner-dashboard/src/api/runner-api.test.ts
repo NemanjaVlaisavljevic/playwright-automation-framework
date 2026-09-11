@@ -167,11 +167,8 @@ describe("listRunArtifacts", () => {
   });
 
   it("forwards the testId as a query parameter, fully decoded back to the original JUnit unique ID", async () => {
-    // A real JUnit `TestIdentifier.getUniqueId()` - brackets, colons, parentheses, a dot-qualified
-    // class name - is exactly the kind of value naive string concatenation into a query string
-    // would mangle. Asserting via `url.searchParams.get` (not a raw substring match on the URL) is
-    // the point: it proves the server receives this value back verbatim after a real
-    // encode-then-decode round trip, not merely that *some* escaped form appears in the URL.
+    // Asserting via `url.searchParams.get`, not a raw substring match, proves the value survives
+    // a real encode/decode round trip (brackets, colons, parentheses included).
     const testId =
       "[engine:junit-jupiter]/[class:HomePageTest]/[method:showsRooms()]";
     server.use(

@@ -9,13 +9,10 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 
 /**
- * Reads and safely resolves a run's artifacts. D2.4 - {@link #listForRun}/{@link #download} query
- * the {@code artifacts} table via {@link ArtifactRepository} exclusively; the manifest file itself
- * is no longer read here at all - {@link ArtifactIngestionService} is the sole component that still
- * reads it, to keep {@code artifacts} populated. Path resolution itself is shared with that class
- * via {@link ArtifactFileResolver} - see its own Javadoc for this class's remaining trust boundary:
- * an {@link ArtifactManifestEntry} read back from the database still originated from the manifest
- * file, so its {@code relativePath} is treated exactly as untrusted as it always was.
+ * Reads and safely resolves a run's artifacts via {@link ArtifactRepository}; the manifest file
+ * itself is only read by {@link ArtifactIngestionService}. An {@link ArtifactManifestEntry} read
+ * back from the database still originated from the manifest file, so its {@code relativePath}
+ * remains untrusted - see {@link ArtifactFileResolver}.
  */
 @Service
 public class ArtifactService {
@@ -31,26 +28,16 @@ public class ArtifactService {
     this.artifactsRootDir = Path.of(properties.artifactsDir()).toAbsolutePath().normalize();
   }
 
-  /**
-   * {@code testIdFilter} narrows the result to one test's own artifacts when non-blank - a query
-   * parameter, not a path variable: a real {@code testId} (JUnit's own unique-ID format) contains
-   * {@code /} characters, which would make it an unusable REST path segment.
-   */
+  /** {@code testIdFilter} narrows the result to one test's own artifacts when non-blank. */
   public List<ArtifactManifestEntry> listForRun(String runId, String testIdFilter) {
-    // find() alone is what 404s for an unknown runId - the returned Run itself is otherwise unused
-    // now that artifacts are read from Postgres directly, which needs no "is this run terminal"
-    // tolerance the way reading a still-being-appended manifest file directly used to.
+    // find() alone is what 404s for an unknown runId.
     runService.find(runId);
     return repository.findForRun(runId, testIdFilter);
   }
 
   /**
    * Whether {@code runId}'s artifact metadata may be incomplete because its final ingestion drain
-   * failed and has not yet been recovered by {@code ArtifactIngestionService}'s own bounded
-   * background reconciliation - lets {@link
-   * dev.vlaisanem.automation.runner.service.api.ArtifactController} distinguish "this run genuinely
-   * has zero artifacts" from "ingestion for this run has not finished yet" instead of conflating
-   * the two (a review finding).
+   * failed and hasn't yet been recovered by background reconciliation.
    */
   public boolean isIngestionIncomplete(String runId) {
     return repository.isIngestionIncomplete(runId);

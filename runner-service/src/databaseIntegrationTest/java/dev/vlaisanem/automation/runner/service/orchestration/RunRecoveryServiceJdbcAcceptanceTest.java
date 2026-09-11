@@ -45,17 +45,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D2.5 review [P2] - {@link RunRecoveryService}'s own {@code RunRecoveryServiceTest} only exercises
- * {@code FakeRunLifecycleStore}; the real behavior against a real Postgres (row locking, the {@code
- * idx_runs_non_terminal}-backed {@link JdbcRunStore#findNonTerminal} query, a real committed
- * transaction per recovered run) had only ever been proven by hand (a live {@code bootRun}
- * restart), which never repeats in CI. This class proves the same guarantees against the real
- * {@link JdbcRunStore}: every non-terminal run recovers to {@code ERROR} with exactly one trailing
- * {@code RUN_FINISHED(ERROR)}, an already-terminal run is left untouched, a repeated pass is a
- * genuine no-op, a failure recovering one run still fails the whole pass (fail-closed, via a
- * genuine database-level failure - a temporary trigger, not a test double intercepting the call
- * before Postgres ever sees it), and {@code findNonTerminal}'s own query plan actually uses the
- * partial index it was written for.
+ * Verifies {@link RunRecoveryService} against real Postgres: non-terminal runs recover to {@code
+ * ERROR}, terminal runs are untouched, repeat passes are no-ops, one run's DB-level failure fails
+ * the whole pass, and {@code findNonTerminal} actually uses its partial index.
  */
 @Testcontainers
 class RunRecoveryServiceJdbcAcceptanceTest {
@@ -155,16 +147,9 @@ class RunRecoveryServiceJdbcAcceptanceTest {
   }
 
   /**
-   * D2.5 review [P2] - the wrapping-store test double this test originally used intercepted the
-   * call before {@link JdbcRunStore} or PostgreSQL ever saw it, so it only proved {@link
-   * RunRecoveryService} tolerates an exception from some {@code RunLifecycleStore} - never the
-   * actual scenario its own description promised: a real recovery {@code UPDATE}/event {@code
-   * INSERT} transaction failing at the database level. Fixed by installing a genuine, temporary
-   * Postgres trigger that rejects exactly {@code badRun}'s own recovery {@code UPDATE} (the same
-   * technique used for the live verification, and the same established idiom {@code
-   * JdbcRunStoreTest#aFailingRunsRowUpdateRollsBackTheAlreadyInsertedEventToo} already uses for a
-   * different scenario) - always removed in a {@code finally} block, since this class shares one
-   * static container/schema across every test method here.
+   * Forces a genuine Postgres-level failure (a temporary trigger rejecting {@code badRun}'s
+   * recovery UPDATE), not a test double, so fail-closed behavior is proven at the database layer.
+   * Trigger is removed in {@code finally} since this class shares one static schema.
    */
   @Test
   void aFailureRecoveringOneRunAgainstRealPostgresStillFailsTheWholePassAndKeepsTheGateClosed()
@@ -196,11 +181,9 @@ class RunRecoveryServiceJdbcAcceptanceTest {
   }
 
   /**
-   * D2.5 review [P2] - a parameterized {@code status IN (?, ?, ?)} query cannot reliably be proven
-   * by PostgreSQL's planner to imply {@code idx_runs_non_terminal}'s own literal predicate,
-   * especially once a generic prepared plan is in play; {@link JdbcRunStore#findNonTerminal} was
-   * fixed to use the same literal {@code IN} list the index predicate itself uses. This proves that
-   * fix against a real table via {@code EXPLAIN}, rather than trusting the fix by inspection alone.
+   * A parameterized {@code IN (?, ?, ?)} query isn't reliably matched by Postgres's planner to
+   * {@code idx_runs_non_terminal}'s literal predicate, so {@link JdbcRunStore#findNonTerminal} uses
+   * the same literal list. Proved here via {@code EXPLAIN} against a real table.
    */
   @Test
   void findNonTerminalUsesThePartialIndex() throws SQLException {

@@ -13,31 +13,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.3.2 - the one place every domain counter/timer this service exposes is recorded, so both its
- * cardinality and its failure semantics are enforced in exactly one place rather than trusted to
- * every call site. Gauges (executor active/queued, SSE active connections, disk/DB size) are
- * registered directly by the class that owns the underlying value (see {@code RunService}/{@code
- * RunEventHub}/{@code DiskMetricsSampler}) against the same {@link MeterRegistry} - a gauge has no
- * tags and so carries none of this class's cardinality concerns.
+ * The one place every domain counter/timer this service exposes is recorded, so cardinality and
+ * failure semantics are enforced in one place. Gauges are registered directly by the class that
+ * owns the value ({@code RunService}, {@code RunEventHub}, {@code DiskMetricsSampler}) instead.
  *
- * <p><strong>Best-effort, never throws from a real Micrometer/registry failure</strong> - every
- * {@code record*} method's actual {@code Counter}/{@code Timer} interaction is wrapped in its own
- * try/catch, logged and swallowed. A metrics-backend problem (a full registry, a broken exporter)
- * must never change a run's outcome or propagate into lifecycle code that has nothing to do with
- * metrics. A cheap precondition check (e.g. "this status must be terminal") still throws normally,
- * before that try/catch - that only ever fires from a caller programming bug, since every real call
- * site derives its arguments from an already-validated domain object, so failing loudly there in
- * tests/dev does not conflict with the no-throw guarantee for genuine registry failures.
- *
- * <p><strong>Cardinality is locked by type, not by string discipline</strong> - every tag is an
- * enum ({@link DiskRejectionPhase}, {@link SseRejectionReason}, {@link SampleSource}) or a domain
- * enum ({@link Suite}, {@link RunStatus}), never a free-form {@code String}. No method here can be
- * called with a {@code runId}, an IP address, or an exception message as a tag value.
- *
- * <p><strong>Every counter here is a process-lifetime value</strong> - it resets to zero on every
- * {@code runner-service} restart. A real Prometheus server (not deployed yet - D5) is what would
- * retain history/rate-over-time across restarts; this service's own in-process {@link
- * MeterRegistry} never does.
+ * <p>Every {@code record*} method swallows its own Micrometer/registry failures (logged, not
+ * thrown) so a metrics-backend problem never affects a run's outcome; precondition checks still
+ * throw normally. Every tag is an enum, never a free-form {@code String}, so no method can be
+ * called with a {@code runId} or other unbounded value as a tag. Counters reset to zero on every
+ * restart - there's no Prometheus server yet to retain history across one.
  */
 @Component
 public class RunnerMetrics {

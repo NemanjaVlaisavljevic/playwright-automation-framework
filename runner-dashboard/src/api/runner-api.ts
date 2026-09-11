@@ -15,13 +15,8 @@ import { getCsrfTokenFromCookie } from "./csrf";
 import { RunnerApiError } from "./problem-detail";
 
 /**
- * Re-exported here, not imported directly from `./generated/` elsewhere: the README's REST layer
- * invariant is "only `src/api/` imports from `src/api/generated/`," not "only `runner-api.ts`
- * imports the client" - `domain/`, `features/`, and everywhere else must go through this wrapper
- * for types too, the same way they already do for the functions below. Importing straight from
- * `./generated/runner-api` from outside this file was a real regression a previous review caught
- * (`RunsTable.tsx` and `domain/run.ts` both did it) - `scripts/check-import-boundaries.mjs` (wired
- * into `npm run check`) now fails the build if it happens again.
+ * Re-exported here so `domain/`, `features/`, etc. never import `./generated/` directly.
+ * `scripts/check-import-boundaries.mjs` enforces this.
  */
 export type {
   ArtifactSummaryResponse,
@@ -32,11 +27,9 @@ export type {
 };
 
 /**
- * Attaches `X-XSRF-TOKEN` (when the cookie exists) to every request the generated client makes -
- * `createRun`/`cancelRun` already go through `client.post(...)` below, so both, and any future
- * mutating endpoint, are covered automatically with no per-call-site changes. No `credentials:
- * 'include'` is needed anywhere: this stays same-origin (Vite's dev proxy, Caddy in prod), so the
- * browser's default `credentials: "same-origin"` already sends the session cookie.
+ * Attaches `X-XSRF-TOKEN` to every request when the cookie exists, covering all mutating calls
+ * automatically. Requests stay same-origin (dev proxy / Caddy in prod), so no `credentials:
+ * "include"` is needed.
  */
 const csrfAwareFetcher: Fetcher["fetch"] = (input) => {
   const token = getCsrfTokenFromCookie();
@@ -51,11 +44,9 @@ const csrfAwareFetcher: Fetcher["fetch"] = (input) => {
   });
 };
 
-// The generated client's own request() does `new URL(baseUrl + path)`, and the WHATWG URL
-// constructor rejects a relative string with no base ("" + "/api/v1/..." throws) - so this can't
-// be "" the way a hand-written fetch wrapper could get away with. window.location.origin keeps it
-// same-origin in effect (proxied to the backend by Vite in dev, see vite.config.ts; served
-// same-origin in production, see the roadmap's packaging phase) without ever hardcoding a host.
+// baseUrl can't be "": the generated client does `new URL(baseUrl + path)`, which throws on a
+// relative string with no base. window.location.origin keeps requests same-origin without
+// hardcoding a host.
 const client = createApiClient(
   { fetch: csrfAwareFetcher },
   window.location.origin,
@@ -63,23 +54,9 @@ const client = createApiClient(
 client.setValidate("output");
 
 /**
- * Turns a failure from the generated client into a {@link RunnerApiError}. Only this file and
- * `problem-detail.ts` (for the `ProblemDetail` schema itself) import from `./generated/` - nothing
- * outside this `api/` infrastructure layer ever touches generated code.
- *
- * Three distinct failure shapes reach here, and collapsing them into one `kind` would hide a real
- * distinction:
- * - {@link TypedStatusError} - the backend actually returned a 4xx/5xx. The generated client's own
- *   output validation deliberately skips every known error status (see `shouldValidateOutput` in
- *   `generated/runner-api.ts` - it only validates success responses and genuinely unexpected
- *   codes), so `ProblemDetail` is parsed here explicitly.
- * - {@link ZodError} - the backend returned a *success* status, but a body that doesn't match this
- *   app's own generated schema. This is a contract drift, not connectivity - the previous version
- *   of this function conflated the two, which meant a genuine backend contract break was reported
- *   to the user (and would be triaged) as "network unreachable."
- * - anything else - a real `fetch()` rejection (DNS, connection refused, CORS): the only other
- *   thing that can reach this catch, since every other failure this client can produce is one of
- *   the two cases above by construction.
+ * Turns a failure from the generated client into a {@link RunnerApiError}, keeping
+ * {@link TypedStatusError} (backend 4xx/5xx), {@link ZodError} (success status, schema mismatch),
+ * and a raw `fetch()` rejection (network) as distinct `kind`s rather than collapsing them.
  */
 async function unwrap<T>(request: Promise<T>): Promise<T> {
   try {
@@ -113,10 +90,8 @@ const HealthStatusSchema = z
 export type HealthStatus = z.infer<typeof HealthStatusSchema>;
 
 /**
- * Not part of the generated client - `/actuator/health` isn't in the app's own OpenAPI document -
- * so its response is validated by hand against a small local schema instead of a TS type
- * assertion, and normalized into the same `RunnerApiError` shape (network/http/contract) `unwrap`
- * produces for every other call, rather than a fourth, ad hoc failure mode.
+ * `/actuator/health` isn't in the OpenAPI document, so it's validated by hand against a local
+ * schema and normalized into the same `RunnerApiError` shape `unwrap` produces elsewhere.
  */
 export async function getHealth(): Promise<HealthStatus> {
   let response: Response;
@@ -171,11 +146,8 @@ export function createRun(request: CreateRunRequest): Promise<RunResponse> {
 }
 
 /**
- * The `CUSTOM`-suite picker's own allowlist - every `testKey` a caller may later put in
- * `CreateRunRequest.testKeys` and nothing else. `environment` is typed off `CreateRunRequest`
- * itself (not a new hand-written union) for the same contract-drift-proofing reason `domain/
- * run.ts`'s own `Environment` type is - this file cannot import that type back without a circular
- * dependency (`domain/run.ts` already imports from here).
+ * Allowlist of `testKey` values for the `CUSTOM`-suite picker. `environment` is typed off
+ * `CreateRunRequest` rather than `domain/run.ts`'s `Environment` to avoid a circular import.
  */
 export function listPublicTests(
   environment: CreateRunRequest["environment"],
@@ -194,11 +166,8 @@ export function cancelRun(runId: string): Promise<RunResponse> {
 }
 
 /**
- * Returns every artifact captured so far for the run - callers don't need a separate wrapper for
- * downloading one: each entry's own `downloadUrl` is a same-origin path meant to be used directly
- * as an `<a href>`/`<img src>` (mirrors how `RunResponse.processLogUrl` is already used in
- * `RunDetailsPage.tsx`), not fetched through this client - the download endpoint serves raw
- * image/zip/video bytes, not JSON, so there's nothing for `unwrap`'s Zod validation to check.
+ * Each entry's `downloadUrl` is a same-origin path meant for direct use as `<a href>`/`<img src>`,
+ * not fetched through this client - the download endpoint serves raw bytes, not JSON.
  */
 export function listRunArtifacts(
   runId: string,

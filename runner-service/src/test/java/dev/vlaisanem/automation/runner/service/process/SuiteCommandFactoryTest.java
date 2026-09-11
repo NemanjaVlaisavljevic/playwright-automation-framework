@@ -124,13 +124,11 @@ class SuiteCommandFactoryTest {
   }
 
   /**
-   * D4.2 review round 3 - this is deliberately a system property, not an environment variable: it
-   * must reach {@code build.gradle}'s own configuration code (the outer, {@code --no-daemon} build
-   * JVM this command line actually starts), which uses it to override the Allure Gradle plugin's
-   * own {@code adapter.resultsDir} - see {@code SuiteCommandFactory}'s own Javadoc for why the raw
-   * event byte limit is threaded completely differently (an environment variable, since it must
-   * reach {@code RunnerEventWriterRegistry} inside the forked JUnit test-worker JVM itself, which a
-   * system property set here never reaches on its own).
+   * Deliberately a system property, not an environment variable: it must reach {@code
+   * build.gradle}'s own configuration code in the outer build JVM, which uses it to override the
+   * Allure plugin's {@code adapter.resultsDir}. See {@link SuiteCommandFactory}'s Javadoc for why
+   * the raw event byte limit is threaded differently (an environment variable, since it must reach
+   * the forked JUnit worker JVM instead).
    */
   @Test
   void forwardsAllureResultsDirectoryAsASystemProperty() {

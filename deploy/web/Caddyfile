@@ -1,32 +1,24 @@
-# {$SITE_ADDRESS::80} defaults to :80 (plain HTTP, no domain) - the D0 spike/local Compose run,
-# and still today's default in production until deploy/.env sets a real SITE_ADDRESS (see
-# deploy/.env.example). D1 wired the rest of what real TLS needs once a domain exists:
-# docker-compose.yml passes SITE_ADDRESS through, publishes 80/443 (and 443/udp for HTTP/3) on
-# `web`, and gives Caddy persistent named volumes for its own /data (ACME account + certificates)
-# and /config - without those, Caddy would re-request a fresh certificate on every container
-# recreate and hit Let's Encrypt's rate limits. Not yet verified against a real domain (no domain
-# purchased yet - D5's job) - see docs/DEPLOYMENT_ARCHITECTURE.md.
+# {$SITE_ADDRESS::80} defaults to :80 (plain HTTP, no domain) until deploy/.env sets a real
+# SITE_ADDRESS (see deploy/.env.example). Once a domain exists, docker-compose.yml passes
+# SITE_ADDRESS through, publishes 80/443 (and 443/udp for HTTP/3) on `web`, and gives Caddy
+# persistent named volumes for its /data (ACME account + certificates) and /config - without those,
+# Caddy would re-request a fresh certificate on every container recreate and hit Let's Encrypt's
+# rate limits. Not yet verified against a real domain - see docs/DEPLOYMENT_ARCHITECTURE.md.
 {$SITE_ADDRESS::80} {
 	encode gzip
 
-	# D3.3 - CSP/Permissions-Policy live here, not in Spring Security: this header block applies to
-	# every response Caddy serves, including the SPA's own index.html/JS/CSS (served directly by
-	# `file_server` below - runner-service is never in that response path at all, only proxied for
-	# /api/*/actuator/health) - a Spring-Security-only CSP would never reach the page that needs it
-	# most. Spring Security also deliberately never sets a CSP of its own; the app must define its
-	# own concrete policy.
+	# CSP/Permissions-Policy live here, not in Spring Security: this header block applies to every
+	# response Caddy serves, including the SPA's own index.html/JS/CSS (served by `file_server`
+	# below) - a Spring-Security-only CSP would never reach the page that needs it most. Spring
+	# Security deliberately never sets a CSP of its own.
 	#
-	# CSP verified against the real production dashboard bundle (`npm run build` + reading the
-	# built index.html/CSS): no inline scripts/styles, no `data:` URIs anywhere - so neither is
-	# added here; add `data:` to img-src only if a future bundle change actually needs it, not
-	# preemptively. The one legitimate cross-origin resource today is the logged-in admin's own
-	# GitHub avatar image (`AuthControls.tsx`'s `<img src={avatarUrl}>`,
-	# https://avatars.githubusercontent.com). `connect-src 'self'` also covers the SSE
-	# `EventSource` connection (`/api/v1/runs/*/events` is always same-origin, never a cross-origin
-	# URL). Deliberately Caddy-only, like the rest of this block - no CSP/Permissions-Policy is set
-	# for local `bootRun`/`dashboardE2eTest` (no Caddy in front there), consistent with this
-	# project's existing prod-only security-posture split (the Secure cookie and HSTS are both
-	# prod-only for the identical reason).
+	# No inline scripts/styles, no `data:` URIs in the built dashboard bundle - so neither is added
+	# here; add `data:` to img-src only if a future bundle change needs it. The one legitimate
+	# cross-origin resource today is the logged-in admin's GitHub avatar image
+	# (https://avatars.githubusercontent.com). `connect-src 'self'` also covers the SSE
+	# `EventSource` connection (always same-origin). Caddy-only, like the rest of this block - no
+	# CSP/Permissions-Policy is set for local `bootRun`/`dashboardE2eTest` (no Caddy in front
+	# there), consistent with the Secure cookie and HSTS also being prod-only.
 	header {
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
@@ -38,29 +30,21 @@
 
 	# Caddy normally runs directives in its own fixed internal order, not the order written below -
 	# `try_files`/`file_server` would otherwise rewrite an unmatched path (including a real API
-	# path like /api/v1/capabilities) to /index.html *before* reverse_proxy ever saw the original
-	# path, silently serving the SPA shell instead of proxying it (a real bug caught during the D0
-	# spike by actually curling /api/v1/capabilities through Caddy, not assumed from the config
-	# alone). Wrapping everything in one `route` block forces genuine top-to-bottom evaluation, so
-	# the two reverse_proxy matchers below always get first refusal.
+	# path like /api/v1/capabilities) to /index.html before reverse_proxy ever saw it, silently
+	# serving the SPA shell instead of proxying it. Wrapping everything in one `route` block forces
+	# top-to-bottom evaluation, so the reverse_proxy matchers below always get first refusal.
 	route {
-		# Only the three health paths are exposed publicly - not the full actuator surface (info is
-		# enabled server-side too, per application.yml, but deliberately not proxied here) and not
-		# /v3/api-docs (the OpenAPI document only ever needs to be reachable from the dashboard's
-		# own build tooling, against a real running instance directly, not through the public edge
-		# - see runner-dashboard/README.md's api:check:contract script).
+		# Only the three health paths are exposed publicly - not the full actuator surface, and not
+		# /v3/api-docs (only needed by the dashboard's own build tooling against a running instance
+		# directly, not through the public edge).
 		reverse_proxy /actuator/health runner-service:8080
-		# D4.3.1 - the Kubernetes-style liveness/readiness probe groups (see application.yml's
-		# management.endpoint.health.group.readiness).
+		# The Kubernetes-style liveness/readiness probe groups.
 		reverse_proxy /actuator/health/liveness runner-service:8080
 		reverse_proxy /actuator/health/readiness runner-service:8080
 
-		# D4.3.1 - fail closed on every *other* /actuator/* path (e.g. /actuator/prometheus,
-		# /actuator/env, /actuator/configprops, or a plain typo of one of the three paths above).
-		# Without this, an unmatched /actuator/* request would otherwise fall through to the SPA's
-		# own try_files fallback below and silently return React's index.html with a 200 - making
-		# "is this surface actually exposed publicly" impossible to verify by response code alone.
-		# Placed after the three allowed proxies above (which take priority) and before the SPA
+		# Fail closed on every other /actuator/* path. Without this, an unmatched /actuator/*
+		# request would fall through to the SPA's try_files fallback below and silently return
+		# React's index.html with a 200. Placed after the allowed proxies above and before the SPA
 		# fallback below.
 		@actuatorOther path /actuator/*
 		respond @actuatorOther 404

@@ -30,34 +30,22 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D4.5 - the automated proof the original spec required: "a backup with no proven restore is not a
- * finished backup." Builds the real {@code deploy/backup} Docker image and drives its real {@code
- * backup.sh}/{@code restore.sh} scripts end to end - real {@code pg_dump}, real {@code age}
- * encryption/decryption (a genuine, disposable {@code age-keygen}-generated recipient/identity
- * keypair, never the production one), real {@code rclone} upload/download, and a real {@code
- * pg_restore} into a second, empty Postgres - against real Testcontainers {@code
- * postgres:17-alpine} instances, not mocked at any layer. A first review round found the original
- * happy-path-only version of this class could not have caught several real safety gaps (an
- * unvalidated restore identifier, a destructive restore with no target-emptiness check, an
- * unretried "retry candidate") - the negative tests below exist specifically to prove those gaps
- * are now closed, not just that the golden path works.
+ * Builds the real {@code deploy/backup} Docker image and drives its real {@code backup.sh}/{@code
+ * restore.sh} scripts end to end against real Testcontainers {@code postgres:17-alpine} instances -
+ * real pg_dump, age encryption/decryption, rclone upload/download, and pg_restore, nothing mocked.
+ * The negative tests below prove specific safety gaps (an unvalidated restore identifier, a
+ * destructive restore with no target-emptiness check, an unretried "retry candidate") are closed,
+ * not just that the happy path works.
  *
- * <p>The one real difference from production: {@code BACKUP_REMOTE} points at an rclone {@code type
- * = local} remote (a plain host directory standing in for the S3-compatible bucket), not a real
- * Backblaze B2 account - this test has no real cloud credentials to exercise, and none should ever
- * be committed to this repo. Every other step (the encrypt-pipe-into-age, the atomic rename, the
- * {@code rclone check} verification, the explicit-identifier restore, the destructive-restore
- * guard) runs for real. The real S3/B2 round trip, against real production data, is the D5
- * acceptance item this test does not replace (see docs/RELEASE_EVIDENCE.md's D4.5 section).
+ * <p>{@code BACKUP_REMOTE} points at an rclone {@code type = local} remote standing in for the real
+ * S3-compatible bucket - this test has no real cloud credentials, and none should ever be committed
+ * to this repo. The real S3/B2 round trip is a separate D5 acceptance item (see
+ * docs/RELEASE_EVIDENCE.md's D4.5 section).
  *
- * <p>{@code backup.sh}/{@code restore.sh} run as real, separate, one-shot {@code docker run}
- * invocations (via {@link ProcessBuilder}, mirroring the same pattern root {@code build.gradle}'s
- * own {@code localPostgresRun}/{@code rbpRun} helpers and {@code DashboardProcess} already use in
- * this repo) sharing each Postgres container's own network namespace ({@code --network
- * container:<id>}) - the identical mechanism a production host uses to reach {@code postgres} by
- * Compose DNS, just addressed as {@code 127.0.0.1:5432} instead. The image is built once for the
- * whole class ({@link #buildBackupImage()}), not per test - its content never changes between
- * tests.
+ * <p>{@code backup.sh}/{@code restore.sh} run as separate {@code docker run} invocations sharing
+ * each Postgres container's own network namespace ({@code --network container:<id>}), reaching
+ * Postgres at {@code 127.0.0.1:5432}. The image is built once for the whole class - its content
+ * never changes between tests.
  */
 @Testcontainers
 class BackupRestoreDrillTest {
@@ -100,16 +88,9 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: an earlier version of {@code backup.sh}/{@code restore.sh} built a single
-   * {@code postgresql://user:password@host:port/dbname} connection string and parsed it with a
-   * hand-rolled regex - a raw {@code @}, {@code :}, {@code /}, or {@code %} in the password broke
-   * that parser outright (e.g. {@code p@ssword} was misparsed as password {@code p} and host {@code
-   * ssword@postgres}, and percent-encoded forms were never decoded at all), which could have
-   * silently disabled the very first production backup the moment a normally-generated strong
-   * password was used. {@code PGHOST}/{@code PGPORT}/{@code PGDATABASE}/{@code PGUSER}/{@code
-   * PGPASSWORD} are now passed as separate, literal environment variables with no URL syntax to
-   * disambiguate - this proves a password containing every one of those characters at once
-   * round-trips through a real dump, encrypt, upload, download, decrypt, and restore unchanged.
+   * Proves a password containing URL-special characters ({@code @ : / %}) round-trips correctly.
+   * PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD are passed as separate env vars, not a single
+   * connection-string URL, so such characters in the password can't break parsing.
    */
   @Test
   @Timeout(180)
@@ -142,11 +123,9 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: {@code identifier} becomes part of both a local filesystem path and an rclone
-   * remote path inside restore.sh - an unvalidated argument there is an uncontrolled path (path
-   * traversal, absolute-path escape), not just a display string. This never needs a real uploaded
-   * backup, a source database, or even valid credentials for anything else - restore.sh must refuse
-   * before touching any of that.
+   * {@code identifier} becomes part of a local filesystem path and an rclone remote path, so
+   * restore.sh must reject a path-traversal/absolute-path identifier before touching rclone/age at
+   * all.
    */
   @Test
   @Timeout(60)
@@ -159,15 +138,10 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: the original restore.sh went straight to a destructive {@code --clean}
-   * restore with no check that the target was actually empty/disposable. This check runs (and must
-   * refuse) before restore.sh ever touches rclone/age - a syntactically-valid but nonexistent
-   * identifier is enough to prove it, no real uploaded backup needed. A second review finding
-   * pushed this further: {@code RESTORE_CONFIRM_DESTRUCTIVE} must be tied to the real database name
-   * and the real backup identifier, not a generic "yes" that could be scripted once and silently
-   * reused across a completely different incident - this test proves both a missing ack AND a
-   * present-but-wrong one (the previous target's own database name/identifier pair, not this one's)
-   * are equally refused, not just that *some* non-empty value is required.
+   * A destructive restore into a non-empty target requires an explicit {@code
+   * RESTORE_CONFIRM_DESTRUCTIVE} tied to this restore's own database name and backup identifier - a
+   * missing ack and a stale/wrong ack (from a different incident) are both refused, not just "some"
+   * non-empty value.
    */
   @Test
   @Timeout(60)
@@ -178,9 +152,8 @@ class BackupRestoreDrillTest {
       String runId = "already-here-" + UUID.randomUUID();
       migrateAndSeedFully(target, runId);
 
-      // Content is irrelevant - the destructive-target check must refuse before restore.sh ever
-      // reads this file's content (i.e. before age/rclone are touched at all). Only needs to exist
-      // as a real host file so the bind mount itself succeeds.
+      // Content is irrelevant - the destructive-target check must refuse before age/rclone are
+      // touched. Only needs to exist as a real host file so the bind mount succeeds.
       Path unusedIdentityFile = tempDir.resolve("unused-identity.txt");
       Files.writeString(
           unusedIdentityFile, "AGE-SECRET-KEY-1UNUSEDPLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLD\n");
@@ -209,14 +182,9 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: {@code target_db} was only ever parsed out of {@code TARGET_DATABASE_URL}'s
-   * own string - a mistyped or misdirected connection string parses just as "successfully" as a
-   * correct one, so a wrong-database restore with no `runs` table at all (a fresh, never-migrated
-   * database - indistinguishable from the normal disaster-recovery case by the destructive-target
-   * check alone) would have been silently accepted. {@code RESTORE_EXPECTED_DATABASE} is now
-   * cross-checked against Postgres's own {@code current_database()}; this test deliberately
-   * supplies a wrong expectation and confirms restore.sh refuses before touching
-   * rclone/age/pg_restore at all.
+   * {@code RESTORE_EXPECTED_DATABASE} is cross-checked against Postgres's own {@code
+   * current_database()} - a wrong-database restore into a fresh, never-migrated database would
+   * otherwise be indistinguishable from a legitimate disaster-recovery target.
    */
   @Test
   @Timeout(60)
@@ -247,9 +215,8 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding pushed this scenario into scope: decrypting with the wrong identity must fail
-   * loudly (age itself refuses, the pipeline's exit code propagates via {@code pipefail}), never
-   * silently hand pg_restore garbage that happens to look like success.
+   * Decrypting with the wrong identity must fail loudly (age refuses, exit code propagates via
+   * {@code pipefail}), never silently hand pg_restore garbage that looks like success.
    */
   @Test
   @Timeout(180)
@@ -279,12 +246,8 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: an earlier version of backup.sh called a leftover local archive a "retry
-   * candidate" in a comment but never actually retried it, and deleted it purely by age - directly
-   * contradicting its own "delete only after verified" guarantee. This proves the real invariant:
-   * when the upload genuinely fails (here, a read-only destination bucket directory), the local
-   * encrypted archive survives - a real file, still on disk, still a valid encrypted backup,
-   * exactly where the next run's retry pass would find and retry it.
+   * When upload verification fails, the local encrypted archive must survive on disk - untouched,
+   * so the next run's retry pass can find and retry it.
    */
   @Test
   @Timeout(180)
@@ -309,12 +272,9 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: the previous test proved a failed upload leaves the local archive on disk,
-   * but never proved anything actually retries it - "survives" and "gets retried" are different
-   * claims. This runs backup.sh twice against the SAME local directory: once with a read-only
-   * (failing) bucket mount, once with the bucket made writable again - and confirms the survivor
-   * from run 1 is genuinely uploaded on run 2, alongside run 2's own fresh dump (two real objects
-   * in the bucket afterward, zero files left locally).
+   * Proves the survivor from a failed run is actually retried, not just left on disk: runs
+   * backup.sh twice against the same local directory (failing bucket, then writable) and confirms
+   * both the survivor and run 2's own fresh dump end up uploaded, with nothing left locally.
    */
   @Test
   @Timeout(180)
@@ -361,13 +321,8 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * A review finding: {@code flock}/the random filename suffix closed a real collision path, but
-   * nothing proved the lock itself actually excludes a genuinely concurrent invocation. A
-   * background container holds the exact same lock file backup.sh itself uses (real {@code flock -n
-   * 9} against {@code /backups/.backup.lock}, the identical mechanism, not a simulation) for a
-   * fixed window; backup.sh, invoked against the same shared local directory while that window is
-   * still open, must fail immediately with the lock-held message rather than blocking, racing, or
-   * corrupting anything.
+   * A concurrent backup.sh run must fail fast with a lock-held message, never block or race, while
+   * another holds the same real {@code flock -n 9} lock this script itself uses.
    */
   @Test
   @Timeout(120)
@@ -382,13 +337,8 @@ class BackupRestoreDrillTest {
       Path localBackupsDir = tempDir.resolve("local-backups");
       Files.createDirectories(localBackupsDir);
 
-      // A fixed, generous hold window (the same idiom this repo's own CancelDuringStepFixtureTest
-      // uses elsewhere for a deterministic concurrency race) - deliberately waited on via the
-      // holder's own "LOCK_ACQUIRED" announcement below, not merely the lock *file*'s existence:
-      // the
-      // shell's own `exec 9>...` redirection creates that file immediately, before `flock` itself
-      // has
-      // necessarily run, so file-existence alone would be a real race, not proof the lock is held.
+      // Waits for the holder's "LOCK_ACQUIRED" announcement, not the lock file's existence: `exec
+      // 9>...` creates the file before `flock` actually runs, so file-existence alone would race.
       Process holder =
           new ProcessBuilder(
                   "docker",
@@ -426,12 +376,9 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * Blocks until {@code process}'s own stdout (merged with stderr, per {@code
-   * redirectErrorStream(true)} at every call site) prints a line equal to {@code marker}, or throws
-   * once {@code timeout} elapses. Reading line-by-line while the process is still running (never
-   * {@code readAllBytes()}, which blocks until the process exits) is what makes this usable as a
-   * genuine "has the holder actually reached this point yet" signal, not just an existence check on
-   * a side effect that can happen before the thing it is supposed to indicate.
+   * Blocks until {@code process}'s stdout prints a line equal to {@code marker}, or throws after
+   * {@code timeout}. Reads line-by-line (never {@code readAllBytes()}, which blocks until exit) so
+   * it can observe output while the process is still running.
    */
   private static void waitForLine(Process process, String marker, Duration timeout)
       throws IOException, InterruptedException {
@@ -493,27 +440,12 @@ class BackupRestoreDrillTest {
   /**
    * rclone's own {@code local} backend, standing in for the real S3-compatible bucket.
    *
-   * <p>A CI finding: the {@code backup}/{@code restore} image runs as root (the base {@code
-   * postgres:17-alpine} image sets no {@code USER}, confirmed via {@code docker inspect}), so on a
-   * real Linux Docker host - unlike this project's own Windows/Docker-Desktop dev machine, where a
-   * bind-mounted directory's ownership is transparently translated to the host user - a file {@code
-   * rclone copyto} writes into a bind-mounted host directory is genuinely owned by {@code root} on
-   * the host side. If the {@code runner-backups} prefix subdirectory itself does not already exist
-   * before the first container write, the container (running as root) creates it too, so the
-   * directory ends up root-owned with default permissions that the CI runner's own non-root user
-   * cannot write to - and deleting a directory entry requires write permission on its *parent*, not
-   * ownership of the entry itself, so JUnit's own {@code @TempDir} cleanup then fails outright
-   * ({@code Failed to delete temp directory ... Permission denied}), even though the files inside
-   * are otherwise perfectly readable. Pre-creating {@code runner-backups} here, before any
-   * container ever runs, makes the CI runner's own user its owner instead - later root-owned files
-   * written *inside* it are still deletable, since Unix directory-entry deletion is governed by the
-   * parent directory's own permissions, not the individual file's owner. Verified for real against
-   * a Linux container/volume (not just reasoned about): reproduced the exact CI failure with a
-   * container-root-created subdirectory (a non-root cleanup `rm -rf` failed with `Permission
-   * denied`), then confirmed a subdirectory pre-created by the non-root identity itself remains
-   * fully deletable by that same identity afterward, even after a root-owned file is written into
-   * it and a second root process reads it back - the exact sequence this test class's own
-   * backup-then-restore scenarios exercise.
+   * <p>The backup/restore image runs as root, so on a real Linux Docker host a container-created
+   * subdirectory inside this bind mount would be root-owned and undeletable by CI's non-root user
+   * (directory-entry deletion needs write permission on the parent, not ownership of the entry).
+   * Pre-creating {@code runner-backups} here, before any container runs, makes the CI user its
+   * owner instead, so JUnit's {@code @TempDir} cleanup can still delete it even though files
+   * written inside it afterward are root-owned.
    */
   private static RemoteBucket prepareLocalRcloneRemote(Path tempDir) throws IOException {
     Path rcloneConfig = tempDir.resolve("rclone.conf");
@@ -702,13 +634,10 @@ class BackupRestoreDrillTest {
   }
 
   /**
-   * Migrates and seeds one real row in every table the schema actually has - not just {@code runs}
-   * (a review finding: the original version of this test only ever proved a bare run row survived,
-   * never {@code run_events}/{@code run_selected_tests}/{@code artifacts}, which are exactly the
-   * tables a real restore is most likely to get subtly wrong, e.g. a foreign-key ordering issue
-   * {@code pg_restore} handles differently under {@code --single-transaction}). Returns the real
-   * Flyway migration count, read from the database itself rather than a hardcoded literal that
-   * would silently go stale the next time a migration is added.
+   * Migrates and seeds one real row in every table the schema has, not just {@code runs} - these
+   * are the tables a real restore is most likely to get subtly wrong (e.g. FK ordering under {@code
+   * pg_restore --single-transaction}). Returns the real Flyway migration count read from the
+   * database, not a hardcoded literal.
    */
   private static int migrateAndSeedFully(PostgreSQLContainer<?> container, String runId)
       throws Exception {
@@ -871,22 +800,11 @@ class BackupRestoreDrillTest {
   private static final Duration DOCKER_COMMAND_TIMEOUT = Duration.ofMinutes(2);
 
   /**
-   * A review finding: the original version of this helper had no bounded cleanup path at all - a
-   * hung {@code docker} command (or, since JUnit 5's default {@code @Timeout} mode does not
-   * actually interrupt a blocking {@link Process#waitFor()} on the same thread, a test that simply
-   * never returns) could leak both the local {@code docker} CLI client process and, for a {@code
-   * run} invocation, the actual container the daemon keeps executing regardless of what happens to
-   * that local client - the same class of failure-path gap {@code DashboardProcess}'s own bounded
-   * termination logic already guards against elsewhere in this repo, adapted here to Docker's own
-   * execution model (killing this method's {@link Process} handle only ever stops the local CLI
-   * client, never the daemon-managed container - a named, explicit {@code docker kill}/{@code
-   * docker rm -f} is the only mechanism that reaches the actual container).
-   *
-   * <p>Every {@code run} invocation gets an explicit, unique {@code --name} inserted for exactly
-   * this reason. Output is drained on a separate thread while the main thread waits with a real
-   * timeout, rather than blocking on {@code InputStream#readAllBytes()} first (which itself has no
-   * timeout and would already be stuck against a hung process before {@link Process#waitFor(long,
-   * TimeUnit)} is ever reached).
+   * Runs {@code docker} with a bounded timeout and explicit cleanup. Killing this method's {@link
+   * Process} handle only stops the local CLI client - the daemon keeps running the actual container
+   * - so every {@code run} invocation gets an explicit {@code --name} and, on timeout, an explicit
+   * {@code docker kill}/{@code docker rm -f}. Output is drained on a separate thread while waiting
+   * with a real timeout, since {@code InputStream#readAllBytes()} has none.
    */
   private static DockerResult docker(List<String> rawArgs)
       throws IOException, InterruptedException {

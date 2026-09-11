@@ -32,9 +32,8 @@ runner-service ─────────────────── data ne
 Docker containers can only resolve/reach each other by name over a network they are *both* attached
 to - `runner-service` is the only service on both, so it alone bridges the two. Without this split
 (every service sharing one default network instead) `web` could reach `postgres` directly even
-though nothing external is involved - a real gap caught in review before it ever shipped, not
-assumed safe from the Compose file's prose alone (see "Verified": confirmed live that `web`
-genuinely cannot reach `postgres`, while `runner-service` can). `data`'s own `internal: true` is a
+though nothing external is involved (see "Verified" for the live confirmation that `web` genuinely
+cannot reach `postgres`, while `runner-service` can). `data`'s own `internal: true` is a
 *separate*, additional protection on top of that topology, not the mechanism behind it: it stops the
 `data` network itself from routing to the external internet/host gateway at all (so even
 `runner-service` or `postgres` could never reach out through it), which is a real defense-in-depth
@@ -140,14 +139,11 @@ profile is active - `runner.deployment-profile` (env var `RUNNER_DEPLOYMENTPROFI
 dashboard's own launch form never even renders `LOCAL` as an option in the portfolio deployment -
 not a client-side filter the frontend has to apply itself, the backend simply never advertises it.
 
-**Verified live, both ends of the boundary, not just unit-tested**: started a real `runner-service`
-with `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO` - `GET /api/v1/capabilities` returned `PUBLIC` only (no
-`LOCAL` entry at all, not an empty one), `POST /api/v1/runs` with `{"environment":"LOCAL",...}`
-correctly `400`s (`Unsupported environment/suite combination: LOCAL/JOURNEY`), and a `PUBLIC`/
-`SMOKE` submission still queued and ran normally (cancelled once queued, to avoid leaving a process
-behind - confirmed no orphaned `java`/Gradle-daemon-launched process survived afterward). Also
-reconfirmed the unrestricted default (no env var set) still advertises both `PUBLIC` and `LOCAL`
-exactly as before, so existing local-development/CI behavior is unchanged.
+**Verified live, both ends of the boundary**: with `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO`, `GET
+/api/v1/capabilities` returns `PUBLIC` only (no `LOCAL` entry at all), `POST /api/v1/runs` with
+`{"environment":"LOCAL",...}` correctly `400`s, and a `PUBLIC`/`SMOKE` submission still queues and
+runs normally. The unrestricted default (no env var set) still advertises both `PUBLIC` and `LOCAL`,
+so existing local-development/CI behavior is unchanged.
 
 Anonymous visitors can browse run history/results. Launch and cancel require authentication (D3).
 Whether a rate-limited, anonymous `FIXTURE`-only demo mode is worth adding later is an open
@@ -225,7 +221,7 @@ test_id, step_id)` (backs the dashboard's own group-by-`(testId, stepId)` groupi
 
 ### Artifacts must ingest incrementally, not only at `RUN_FINISHED`
 
-**A real regression this design would otherwise have shipped, caught in review**: the dashboard
+The dashboard
 already shows a failing test's screenshot/trace before the whole run finishes (Faza A4/A4-review -
 `RunDetailsPage`'s artifacts query invalidates on `TEST_FAILED`/`TEST_ABORTED`, not only on the
 run's own terminal status). A `Run.submit`-to-`RUN_FINISHED` bulk-import of the manifest into
@@ -254,7 +250,7 @@ the whole run." D2.4 must instead:
 
 ### `runs`/`run_events` is one atomic cutover, not two independently-shippable steps
 
-**A real design risk caught in review before any code existed**: splitting the migration into "move
+Splitting the migration into "move
 `RunRepository` to Postgres first, move the event journal later" would create a real window where a
 lifecycle status commits to Postgres while its corresponding `RUN_*` event still only exists in the
 JSONL file (or vice versa) - exactly the "never a status update that commits with no matching
@@ -420,80 +416,41 @@ as its own step, not folded silently into the default `test` task.
    from §5 once this phase is live - it is the first time this deployment carries any real Postgres
    read/write load, not just an idle container.
 
-**D2.1 - DONE 2026-09-06.** Reviewed once (four gaps folded directly into `V1` before it shipped
-anywhere - the fourth table, the artifact NOT-NULL/schema_version/created_at columns, a full
-lifecycle-mirroring CHECK-constraint set, and a full one-case-per-constraint test matrix, all
-described inline in the migration/schema sections above) and once more after that (container-count/
-`@Testcontainers` cleanup, a `chk_runs_status` test that could legitimately fail on constraint-
-evaluation-order grounds - PostgreSQL does not guarantee which of several simultaneously-violated
-CHECK constraints it reports first, fixed by asserting the generic `chk_runs_` prefix instead of one
-specific name, plus splitting `databaseIntegrationTest` into its own parallel CI job). 26/26 green
-against a real Testcontainers Postgres, reconfirmed stable across repeated runs.
+**D2.1 - DONE.** Flyway migrations create all four tables with the foreign keys, CHECK constraints
+(the `runs` status set mirrors the lifecycle machine, matched with a generic `chk_runs_` prefix
+assertion rather than one specific constraint name, since PostgreSQL doesn't guarantee which of
+several simultaneously-violated CHECK constraints it reports first), and indexes described above.
+`databaseIntegrationTest` is a dedicated Gradle source set/task (its own parallel CI job) proving a
+fresh Testcontainers Postgres migrates cleanly, migrating twice is a no-op, and every constraint
+rejects what it claims to. 26/26 green.
 
-**D2.2 - first pass DONE 2026-09-06.** `JdbcRunStore` (`repository/jdbc` package) - the single
-component the review demanded, not a mechanical two-collaborator port of today's `RunRepository`/
-`RunEventAppender` split: one method, one transaction, `SELECT ... FOR UPDATE` on the `runs` row,
-sequence allocated from that same locked row, the event inserted, the run row updated, then
-committed - reusing `Run.transitionTo`/`RunStateMachine` unchanged for validation, so this component
-adds no parallel business-rule copy of its own. Deliberately still not a Spring bean (see its own
-Javadoc) and not yet wired to any live subscriber hub - both are explicitly D2.3's job.
+**D2.2 - DONE.** `JdbcRunStore` (`repository/jdbc` package) is the single component the design above
+calls for, not a mechanical two-collaborator port of the old `RunRepository`/`RunEventAppender`
+split: one method, one transaction - `SELECT ... FOR UPDATE` on the `runs` row, sequence allocated
+from that same locked row, the event inserted, the run row updated, then committed - reusing
+`Run.transitionTo`/`RunStateMachine` unchanged for validation. `appendEventIfNonTerminal(runId,
+eventFactory)` is the separate append-only path for `TEST_*`/`STEP_*` events: it allocates the next
+sequence and inserts the event under the same row lock without touching status/timestamps/`version`,
+and rejects any `RUN_*` event type outright (that's `queue()`/`transitionIfNonTerminal`'s job).
+Every write method returns a `CommittedRunChange(Run run, RunnerEvent event)` (event nullable for a
+no-event transition).
 
-Verified directly against a real Testcontainers Postgres, not reasoned about: a `queue()` +
-`findById()` round trip (including a `CUSTOM` run's selected-test snapshot), the inserted
-`RUN_QUEUED` event's JSON payload round-tripping byte-for-byte back through `ObjectMapper` into an
-equal `RunnerEvent`, a no-event transition allocating no new sequence, an event-bearing transition
-allocating exactly the next gapless sequence, a genuine two-thread race (two real connections both
-attempt to finalize the same `RUNNING` run to a different terminal status at the same instant) where
-exactly one of the two attempts ever applies and exactly one `RUN_FINISHED` event is ever inserted -
-never both, never neither - and a forced event-insert conflict (a pre-existing colliding sequence)
-proving the *entire* transaction rolls back, leaving the run's status completely untouched rather
-than partially transitioned. All green on three separate runs (checking specifically for concurrency
-flakiness), and the full existing Java gate (root + all three `runner-*` modules, unchanged) stayed
-green throughout - this phase touched no file the live application actually loads yet.
+Validation is unconditional and runs before any SQL executes, rolling back the whole transaction on
+a violation: `requireMatchingEvent` (the returned event's `runId`/`sequence` must match what was
+allocated), `requireLifecycleEventMatches` (`STARTING` requires no event; `RUNNING` requires a
+`RUN_STARTED`; any terminal status requires a `RUN_FINISHED` with the matching `runOutcome`; `QUEUED`
+is rejected outright, `queue()` has its own dedicated check), `requireSameIdentity` (a transition
+function may only change status/timing/result, never `runId`/`environment`/`suite`/`requestedAt`/
+`selectedTests`), and `requireReachableTransition` (independently re-checks the transition through
+`RunStateMachine`, and that an already-set `startedAt` never changes). `findAll()` batch-loads every
+run's `run_selected_tests` in one grouped query rather than one per run. Every timestamp is truncated
+to microseconds (`Instant.truncatedTo(ChronoUnit.MICROS)`) before it enters this class, matching
+`TIMESTAMPTZ`'s own storage precision.
 
-**D2.2 review round (2026-09-06, same day) - 3 P1s, all fixed, D2.2 now formally closed:**
-
-1. **[P1] The class's own Javadoc wrongly called the DB row lock "the per-run lock the protocol
-   needs"** - `SELECT ... FOR UPDATE` is released at `COMMIT`, so it serializes concurrent database
-   *writers* on the same `runId` (everything this class's own concurrency test actually proves) but
-   cannot by itself close the "publish after commit, before unlock" window the protocol's live-SSE
-   half needs - that's about coordinating this store's commit with the in-process `RunEventHub`
-   subscribe path, which a DB lock can't reach. Corrected the Javadoc, and - so D2.3's future
-   external per-run lock has everything it needs without re-deriving or re-reading anything - every
-   write method now returns a new `CommittedRunChange(Run run, RunnerEvent event)` (the event
-   nullable for a no-event transition) instead of a bare `Run`/`Optional<Run>`.
-2. **[P1] No append-only path for `TEST_*`/`STEP_*` events** - `transitionIfNonTerminal` couples
-   every event to a lifecycle transition, so recording a test/step event through it would have
-   forced a real `UPDATE runs` (bumping `version`, rewriting every lifecycle column) for every
-   single test in a run, for no reason. Added `appendEventIfNonTerminal(runId, eventFactory)`:
-   allocates the next sequence under the same row lock, inserts the event, advances only
-   `next_event_sequence` - status/timestamps/`version` untouched - and rejects any `RUN_*` event
-   type outright (that path is `queue()`/`transitionIfNonTerminal`'s job, not this one's). Returns
-   empty once the run is already terminal, mirroring `RunEventAppender`'s own closed-journal
-   contract.
-3. **[P1] An event factory could silently corrupt the row/event correlation** - nothing previously
-   checked that the `RunnerEvent` a caller-supplied factory returned actually matched the `runId`/
-   `sequence` it was allocated for, or that a lifecycle transition's event carried the right type/
-   outcome (a `RUNNING` transition handed a `RUN_FINISHED` event, or a `SUCCEEDED` transition handed
-   a `RUN_FINISHED` whose own `runOutcome` said `FAILED`, would previously have been written as-is).
-   Added `requireMatchingEvent` (runId/sequence, used by all three write methods) and
-   `requireLifecycleEventMatches` (RUNNING &rarr; `RUN_STARTED`; any terminal status &rarr;
-   `RUN_FINISHED` with the matching `runOutcome`) - a violation throws before any SQL runs, and (via
-   the same transaction) rolls back anything already written in that call. Six new tests cover wrong
-   `runId`, wrong `sequence`, and wrong type/outcome, each asserting both the exception and that the
-   run's own status/event count survived untouched.
-
-Also fixed, both flagged as worth doing before the cutover rather than after: `findAll()` batch-loads
-every run's `run_selected_tests` in one query grouped by `run_id` (was one query per run - an N+1
-that would only get more expensive as history grows); every timestamp is now truncated to
-microseconds (`Instant.truncatedTo(ChronoUnit.MICROS)`) at the point it first enters this class -
-`TIMESTAMPTZ` only stores microsecond precision, so an untruncated nanosecond-precision `Instant`
-would otherwise have made `queue()`'s own in-memory return value silently disagree with what a later
-`findById()` re-read produces. A new test using a literal nanosecond-precision `Instant` asserts both
-sides agree on the truncated value.
-
-Verified after all fixes: the same three-Testcontainers-run stability check (now 16 `JdbcRunStoreTest`
-cases, up from 6), full Java gate green throughout.
+Not a Spring bean and not yet wired to any live subscriber hub - both are D2.3's job.
+`JdbcRunStoreTest` (22 cases) proves the round trip, concurrent-transition races (exactly one of two
+racing finalize attempts applies, exactly one `RUN_FINISHED` is inserted), and that a conflicting
+event insert rolls back the entire transaction including the status change.
 
 **D2.3 - business-logic reconciliation DONE 2026-09-06; live wiring still open.** The reconciliation
 this phase's own design called for is complete: `RunLifecycleStore` (new interface, `JdbcRunStore`'s
@@ -512,243 +469,58 @@ that split-brain state cannot occur any more, so the only fallback left anywhere
 `FileBackedRunEventJournal` and both their dedicated test files are deleted - fully unused the
 moment nothing depended on them any more, not left as dead code.
 
-Verified: the full existing `RunEventBrokerTest` suite (concurrent-append stress test, the
-deterministic blocking-store race test, slow-consumer disconnect, resume-sequence validation,
-terminal-vs-non-terminal resume behavior, shutdown) all still pass rewritten against a
-`FakeRunLifecycleStore` (a new, behaviorally-faithful in-memory double sharing the exact same
-`RunEventValidation` calls `JdbcRunStore` itself uses, so the fake can never silently accept or
-reject something the real store wouldn't) instead of a real file journal - every test needed
-adapting to call `queue()` first (a real `run_events` row now requires its `runs` parent to exist
-first, thanks to the schema's own foreign key, which the old file journal never enforced), and the
-300/260-event stress tests moved from repeatedly "re-queuing" one run (a real run can only be queued
-once) to the append-only `TEST_STARTED` path instead. `RunServiceTest`/`RunLifecycleCoordinatorTest`
-rewritten the same way; two of `RunServiceTest`'s pre-cutover "emergency ERROR" tests were redesigned
-around the new, intentionally different failure mode (a permanently-failing `RUN_FINISHED` write now
-leaves a run stuck at its last known-good status rather than falsely `SUCCEEDED`/showing a
-fabricated `ERROR` - see the reasoning in `RunLifecycleCoordinator`'s own Javadoc). Full gate green
-throughout: root `test` (45), all three `runner-*` module suites (`runner-contract` 50, `runner-
-listener` 18, `runner-service` 274), and `databaseIntegrationTest` (42, including two new
-`JdbcRunStore` read-method cases) - zero failures across all of them, `git diff --check` clean.
+`RunEventBrokerTest`/`RunServiceTest`/`RunLifecycleCoordinatorTest` all run against a new
+`FakeRunLifecycleStore` - a behaviorally-faithful in-memory double sharing the exact same
+`RunEventValidation` checks `JdbcRunStore` itself uses, so it can never silently accept or reject
+something the real store wouldn't. `RunLifecycleCoordinator`'s pre-cutover "emergency ERROR" fallback
+(for the case where an in-memory repository write succeeded but a separate file-journal write then
+failed) is gone: one atomic store transaction makes that split-brain state impossible now, so the
+only fallback left in this path is `RunService.executeRun`'s pre-existing top-level catch block.
+`RunRepository`/`FileBackedRunEventJournal` are deleted.
 
-**Explicitly not done yet, a real remaining gap before D2.3 can be called fully closed**: none of
-this is wired into the *live* application yet. `JdbcRunStore` is still not a Spring `@Component` (no
-real `DataSource`/`TransactionTemplate` bean exists for it to be constructed from), and
-`RunnerServiceApplication` still excludes `DataSourceAutoConfiguration`/`FlywayAutoConfiguration` -
-exactly as D2.1/D2.2 left it. `OpenApiContractTest`/`ServerBindingTest` (the two existing full-
-`@SpringBootTest`-context tests) now carry a `@MockitoBean RunLifecycleStore` specifically so this
-Docker-free, real-Postgres-free ordinary `test` task keeps working without a real store bean ever
-needing to be constructed - a legitimate, targeted fix for tests that are about the OpenAPI document
-and server binding, not the store. The **actual production/local wiring** - re-enabling those two
-autoconfigurations, giving `JdbcRunStore` a real `@Component` constructor, adding
-`spring.datasource.*` properties, and updating `docker-compose.yml` so `runner-service` actually
-points at its sibling `postgres` service - has not been done. Once it is, every local `bootRun` and
-`dashboardE2eTest` (which boots a real `runner-service` via `bootJar`/`java -jar`, bypassing Compose
-entirely) will need a real, reachable Postgres too - `dashboardE2eTest`'s own environment will need a
-Testcontainers-managed Postgres added to it, which has not been done either. Neither gap affects the
-PR-blocking `quality-gate.yml` gate today (`dashboardE2eTest` only runs from the separate, non-
-blocking `dashboard-e2e.yml` workflow), but both are real, tracked follow-ups before D2.3 is fully
-closed - not silently deferred. Also still outstanding, per the design section above: the full
-concurrent-appends-under-real-subscriber-traffic/crash-recovery-replay acceptance list, which needs
-the live wiring to exist first before it can be exercised for real (as opposed to `FakeRunLifecycleStore`).
+Validation is hardened beyond D2.2's per-write checks: `RunEventValidation.requireLifecycleEventMatches`
+runs unconditionally for every `RunStatus` (not just when a caller happens to pass an event factory);
+`requireSameIdentity` rejects a transition function that changes any identity field
+(`runId`/`environment`/`suite`/`requestedAt`/`selectedTests`); `requireReachableTransition`
+independently re-validates the transition through `RunStateMachine` and requires an already-set
+`startedAt` to never change. The per-run lock (`RunEventBroker` and `FakeRunLifecycleStore` alike) is
+now backed by a fixed 256-entry `RunLockStripes` array indexed by `runId.hashCode()`, bounding memory
+instead of growing one lock entry per run forever - at the cost of occasional, harmless false-positive
+serialization between unrelated runs sharing a stripe.
 
-**D2.3 review round (2026-09-06) - all findings fixed before live wiring.** A second review of the
-business-logic reconciliation above confirmed the cutover architecture itself is sound, but found one
-real correctness gap and five hardening gaps that had to close before live wiring could be safe to
-build on top of:
-
-- **[P1] Lifecycle event validation was conditional, not unconditional.** `requireLifecycleEventMatches`
-  used to run only inside `if (eventFactory != null)`, so a caller could commit `RUNNING`/a terminal
-  status with a `null` factory (silently losing the event the replay protocol requires) or commit
-  `STARTING` with an arbitrary attached event (nothing downstream expects one). Fixed by making
-  `RunEventValidation.requireLifecycleEventMatches` itself unconditional over every `RunStatus`: `STARTING`
-  now requires `event == null`; `RUNNING` requires a non-null `RUN_STARTED`; every terminal status
-  requires a non-null `RUN_FINISHED` with a matching outcome; `QUEUED` is rejected outright (it has its
-  own dedicated `requireQueuedEvent` via `queue()`). Both `JdbcRunStore` and `FakeRunLifecycleStore` call
-  it the same unconditional way. New coverage: a fast, DB-free `RunEventValidationTest` (9 cases) plus
-  three new `JdbcRunStoreTest` rollback cases against a real Postgres (`transitionToRunningWithoutAnEventFactoryIsRejected`,
-  `transitionToATerminalStatusWithoutAnEventFactoryIsRejected`, `transitionToStartingWithAnEventFactoryIsRejected`).
-- **[P2] A transition function could return a run with a different identity.** Nothing stopped a
-  hand-rolled `UnaryOperator<Run>` from constructing an arbitrary `Run` instead of only changing
-  status/timing/result. Fixed with a new `RunEventValidation.requireSameIdentity(before, after)`,
-  called by both `JdbcRunStore.transitionIfNonTerminal` and `FakeRunLifecycleStore.transitionIfNonTerminal`
-  right after the transition runs, rejecting any change to `runId`/`environment`/`suite`/`requestedAt`/
-  `selectedTests`. Covered by both `RunEventValidationTest` and a dedicated `JdbcRunStoreTest` case.
-- **[P2] `FakeRunLifecycleStore`'s `Run` snapshot had no JMM visibility guarantee.** `findById`/`findAll`
-  read `RunRecord.run` without the per-run lock (by design, so reads never serialize on a writer), but
-  the field was a plain, non-`volatile` reference - fixed by marking it `volatile`.
-- **[P2] The per-run lock map grew forever.** Both `RunEventBroker` and `FakeRunLifecycleStore` kept a
-  `ConcurrentHashMap<String, Object>` with one entry per `runId` ever seen, never removed (removal is
-  itself unsafe: a lock object must never be replaced/removed while another thread might still be
-  synchronized on it). Replaced with a new shared `RunLockStripes` - a fixed 256-entry array of monitor
-  objects, indexed by `runId.hashCode()` - bounding memory at the cost of occasional, harmless
-  false-positive serialization between unrelated runs that happen to hash to the same stripe.
-- **[P2] `JdbcRunStore.queue()`'s SQL insert loop iterated the caller's raw parameter, not the
-  already-validated copy.** Fixed to iterate `run.selectedTests()` (the `List.copyOf`'d, validated value
-  from the constructed `Run`) instead of the `selectedTests` method parameter directly.
-- **[P2] The two-connection concurrency test wasn't a deterministic proof of the row lock.** The
-  existing latch-based `exactlyOneOfTwoConcurrentTerminalAttemptsOnTheSameRunWins` only proved the two
-  attempts didn't corrupt each other - a scheduler could in principle serialize them without either ever
-  blocking on the lock, and the test would still pass. Added a new
-  `aSecondTransactionBlocksUntilTheFirstsRowLockIsReleased`: it opens a second raw JDBC connection, takes
-  `SELECT ... FOR UPDATE` on the row itself and holds it open, proves a concurrent
-  `transitionIfNonTerminal` call cannot complete within a short timeout while that lock is held, then
-  commits the locking connection and proves the pending call then completes. The original latch-based
-  test is kept as a stress companion, not replaced.
-- **Minor cleanup**: `RunEventHub`'s Javadoc no longer references the deleted `FileBackedRunEventJournal`;
-  the now-fully-unused `RunEventReader` interface is deleted; `JdbcRunStore`'s class Javadoc no longer
-  claims "every timestamp is truncated to microseconds" - it now spells out that only `Run`'s own
-  `requestedAt`/`startedAt`/`finishedAt` columns are truncated, while `RunnerEvent.timestamp` inside the
-  `jsonb` payload stays nanosecond-precision (the authoritative copy) and `run_events.occurred_at` is a
-  separate, microsecond-precision secondary index column, never re-parsed back into a `RunnerEvent`.
-
-Verified after all fixes: `JdbcRunStoreTest` now 21 cases (up from 16), `RunEventValidationTest` new (9
-cases), full gate green throughout (root `test` 45, `runner-contract` 50, `runner-listener` 18,
-`runner-service` `test` 274 + new `RunEventValidationTest` 9, `databaseIntegrationTest` 21 + 26 = 47),
-`git diff --check` clean. The live-wiring gap in the section above is unaffected by this round - still
-the explicit next step.
-
-**D2.3 - final part: real Spring wiring, Compose, dashboardE2eTest Postgres, acceptance matrix - DONE
-2026-09-06.** Everything the review round above gated is now closed:
+**Real Spring wiring, Compose, and `dashboardE2eTest` Postgres are all done:**
 
 - **Real Spring wiring.** `RunnerServiceApplication` no longer excludes `DataSourceAutoConfiguration`/
-  `FlywayAutoConfiguration`. `JdbcRunStore` is now a real `@Component` - `JdbcTemplate` comes from
-  Spring Boot's own `JdbcTemplateAutoConfiguration`, `TransactionTemplate` from
-  `TransactionAutoConfiguration$TransactionTemplateConfiguration` (given the single
-  `PlatformTransactionManager` `DataSourceTransactionManagerAutoConfiguration` creates for the
-  auto-configured `DataSource`), `ObjectMapper` from the existing `spring-boot-starter-json`
-  autoconfiguration - no manual `@Bean` wiring needed for any of the three.
+  `FlywayAutoConfiguration`. `JdbcRunStore` is a real `@Component` - `JdbcTemplate`,
+  `TransactionTemplate`, and `ObjectMapper` all come from Spring Boot's own autoconfiguration, no
+  manual `@Bean` wiring needed.
 - **`application.yml`** carries local-`bootRun` `spring.datasource.*` defaults
-  (`jdbc:postgresql://localhost:5433/runner`, `runner`/`runner`) - port 5433, not Postgres's usual
-  5432, because this exact machine already runs its own unrelated Postgres Windows service on 5432
-  (confirmed live: `docker run -p 127.0.0.1:5432:5432 postgres` failed outright with a port-in-use
-  error). New `runner-service/build.gradle` tasks `localPostgresUp`/`localPostgresDown` start/stop a
-  matching throwaway `postgres:17-alpine` container for local development - a plain `docker run`/
-  `docker rm -f` pair (not docker compose; a single container needs none of its orchestration), polling
-  `pg_isready` with no fixed blind delay, the same convention `localSutHealth` already uses for the RBP
-  stack.
-- **`deploy/docker-compose.yml`** - `runner-service` now depends on `postgres` with
-  `condition: service_healthy` (not just container-started; a fresh `docker compose up` would otherwise
-  race the JVM's very first connection attempt against a Postgres that hasn't finished initializing),
-  and carries `SPRING_DATASOURCE_URL`/`_USERNAME`/`_PASSWORD` env vars reusing the exact same
-  `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD` values the `postgres` service itself is configured
-  from (never repeated as separate literals that could drift apart).
-- **`dashboardE2eTest`** - new `DashboardE2eDatabase` owns one Testcontainers `postgres:17-alpine`
-  container, lazily started and shared for the whole suite's JVM (both `DashboardE2eEnvironment`'s
-  shared backend and `BackendUnavailableE2eTest`'s own isolated one point at the same container - a
-  run's history surviving `BackendUnavailableE2eTest`'s own repeated stop/restart on purpose, not a
-  leak between test classes); Flyway migrates on the launched jar's own startup, nothing runs a
-  migration directly. Stopped from `DashboardE2eEnvironment`'s own root-context close, the one point
-  guaranteed to run after every test class finishes; if a filtered run only ever executes
-  `BackendUnavailableE2eTest`, Testcontainers' own Ryuk reaper is the fallback, same as everywhere else
-  in this codebase an unmanaged container is used.
+  (`jdbc:postgresql://localhost:5433/runner`, `runner`/`runner`) - port 5433 rather than Postgres's
+  usual 5432, to avoid colliding with an unrelated local Postgres service some dev machines already
+  run on 5432. `runner-service/build.gradle`'s `localPostgresUp`/`localPostgresDown` tasks start/stop
+  a throwaway `postgres:17-alpine` container for local development via a plain `docker run`/`docker
+  rm -f` pair, polling `pg_isready` with no fixed blind delay.
+- **`deploy/docker-compose.yml`** - `runner-service` depends on `postgres` with
+  `condition: service_healthy` (not just container-started, avoiding a race against Postgres still
+  initializing), and carries `SPRING_DATASOURCE_URL`/`_USERNAME`/`_PASSWORD` env vars reusing the
+  same `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD` values the `postgres` service itself uses.
+- **`dashboardE2eTest`** - `DashboardE2eDatabase` owns one Testcontainers `postgres:17-alpine`
+  container, lazily started and shared for the whole suite's JVM; Flyway migrates on the launched
+  jar's own startup. Stopped from `DashboardE2eEnvironment`'s root-context close, with Testcontainers'
+  own Ryuk reaper as the fallback for a filtered run.
 - **`OpenApiContractTest`/`ServerBindingTest`** (the two Docker-free, full-`@SpringBootTest`-context
-  tests) now re-exclude `DataSourceAutoConfiguration`/`FlywayAutoConfiguration` at the test level (via
-  `spring.autoconfigure.exclude`), alongside the existing `@MockitoBean RunLifecycleStore` - together,
-  the ordinary `test` task still never needs a real Postgres.
-- **Dead config removed.** `RunnerProperties.journalDir`/`runner.journal-dir` (unused since
-  `FileBackedRunEventJournal` was deleted in the earlier cutover) and the Dockerfile's matching
-  `RUNNER_JOURNALDIR` env var are gone; every `RunnerProperties`/`new RunnerProperties(...)` test call
-  site updated to match.
-- **Acceptance matrix** - a new `RunEventBrokerJdbcAcceptanceTest` (`databaseIntegrationTest`) proves,
-  against a real `RunEventBroker` wrapping the real `JdbcRunStore` and a real Testcontainers Postgres
-  (not `FakeRunLifecycleStore`): concurrent appends under real subscriber traffic deliver every event
-  exactly once, in order, matching what Postgres itself persisted
-  (`concurrentAppendsWithALiveSubscriberDeliverEveryEventExactlyOnceInOrder`); a replay/subscribe race
-  against a concurrent append serializes deterministically, not just usually
-  (`replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered`); and a run's complete
-  history, committed with no subscriber ever attached (simulating a crashed/never-connected subscriber
-  process), is fully recovered by a brand-new `RunEventBroker` instance (fresh in-memory `RunEventHub`
-  state, same underlying store - modeling a real process restart) via `replayAndSubscribe` alone, purely
-  from what Postgres persisted (`aRunsCompleteHistorySurvivesWithNoLiveSubscriberAndIsFullyRecoveredViaReplay`).
+  tests) re-exclude `DataSourceAutoConfiguration`/`FlywayAutoConfiguration` at the test level,
+  alongside a `@MockitoBean RunLifecycleStore` - the ordinary `test` task still never needs a real
+  Postgres.
+- **Acceptance matrix** - `RunEventBrokerJdbcAcceptanceTest` (`databaseIntegrationTest`) proves,
+  against a real `RunEventBroker` wrapping the real `JdbcRunStore` and a real Testcontainers Postgres:
+  concurrent appends under real subscriber traffic deliver every event exactly once, in order; a
+  replay/subscribe race against a concurrent append serializes deterministically; and a run's
+  complete history survives and is fully recovered via `replayAndSubscribe` alone when no subscriber
+  was ever attached at all, including the specific window where the process dies between a commit and
+  the in-process `hub.publish` call.
 
-Verified live, beyond the automated suites:
-- **A real `bootRun`** against `localPostgresUp`'s container: Flyway migrated on startup, Hikari
-  connected, a real `SMOKE` run was queued/started/cancelled through the actual REST API, and its full
-  event timeline (`RUN_QUEUED` through `TEST_*`/`STEP_*` through `RUN_FINISHED`, 19 gapless sequences)
-  was confirmed by querying Postgres directly (`psql`) - not just trusting the API response.
-- **The real `deploy/docker-compose.yml` stack** (`docker compose up --build`, with a local-only,
-  gitignored `.env`): `postgres` reported healthy, `runner-service` then started, connected, migrated,
-  and served `/api/v1/capabilities` correctly scoped to the `PORTFOLIO` profile (no `LOCAL`) - proving
-  `depends_on: condition: service_healthy` and the `SPRING_DATASOURCE_*` wiring both work end to end.
-  (The `web`/Caddy container failed to bind port 80 on this specific machine - an unrelated, pre-existing
-  local port conflict with another service already listening there, not a regression in this change.)
-- **The full `dashboardE2eTest` suite** (18 test classes, real Chromium, real backend jar, real
-  Testcontainers Postgres) - passed only after one real, non-obvious fix: this root project has no
-  Spring Boot BOM of its own, so its `testcontainers-bom:1.20.4` import resolved the *actual*
-  `org.testcontainers:testcontainers` artifact at its own declared 1.20.4 rather than the 2.0.5 Spring
-  Boot 4.1.1's BOM transitively forces for `runner-service`'s `databaseIntegrationTest` (only that one
-  artifact moves - `postgresql`/`jdbc`/`database-commons` stay on 1.20.4 either way). 1.20.4's own
-  older `docker-java` client sends a hardcoded `GET /v1.32/info` Docker API probe that this specific
-  Docker Desktop build's npipe compatibility proxy answers with HTTP 400, failing every
-  `DockerClientProviderStrategy` with "Could not find a valid Docker environment" - confirmed live by
-  temporarily enabling `showStandardStreams` to see Testcontainers' own DEBUG log, since the default
-  `false` (deliberately quiet for real dashboard-process output) otherwise swallows it entirely. Fixed
-  with a single dependency `constraint` forcing `org.testcontainers:testcontainers:2.0.5` for this
-  project only, mirroring Spring Boot's own override rather than bumping `testcontainersVersion` itself
-  (no `testcontainers-bom:2.0.5` line exists to pin to - only the one core artifact moved). Not a defect
-  in this cutover's own code at all - a pre-existing latent version mismatch between two Gradle projects
-  that nothing had ever actually exercised Testcontainers from the root project to surface before.
-
-**D2.3 review round 2 (2026-09-06) - three P1s and one P2, all fixed.** A third review confirmed the
-architecture is sound (Postgres the single source of truth, status/event sharing one transaction, the
-broker's per-run lock correctly spanning both commit-then-publish and replay-then-subscribe) but found
-gaps the first review round's fixes did not close:
-
-- **[P1] The store could still bypass `RunStateMachine`.** `transitionIfNonTerminal`'s caller-supplied
-  `UnaryOperator<Run>` is trusted to call `Run.transitionTo` (which itself calls `RunStateMachine
-  .requireTransition`), but nothing stopped a hand-rolled operator from constructing a `new Run(...)`
-  directly with an arbitrary status instead - e.g. jumping straight from `QUEUED` to `SUCCEEDED`,
-  skipping `STARTING`/`RUNNING` entirely. Neither `requireSameIdentity` (identity fields only) nor
-  `requireLifecycleEventMatches` (event/status pairing only) would have caught it. Fixed with a new
-  `RunEventValidation.requireReachableTransition(before, after)`, called right after `transition.apply`
-  in both `JdbcRunStore` and `FakeRunLifecycleStore`: it independently calls `RunStateMachine
-  .requireTransition(before.status(), after.status())`, and additionally requires an already-set
-  `startedAt` to stay exactly as it was (nothing later, including a run's own terminal transition, may
-  change it) - a corruption `Run`'s own compact constructor has no way to catch on its own, since it only
-  ever validates one snapshot in isolation, never against what a specific transition started from.
-- **[P1] A rollback test had gone falsely green.** `aConflictingEventInsertRollsBackTheStatusChangeToo`
-  attempted a `STARTING` transition with a `RUN_STARTED` event attached - a combination round 1's own
-  `STARTING` fix now rejects at the Java level, before any SQL runs at all, so the primary-key conflict
-  this test exists to force was never actually reached; a broad `.isInstanceOf(RuntimeException.class)`
-  assertion silently accepted the wrong exception (`IllegalArgumentException` is-a `RuntimeException`)
-  as if it proved the intended thing. Fixed by first legitimately reaching `STARTING` with no event,
-  then forcing the sequence conflict on the *next* transition (`STARTING -> RUNNING` with `RUN_STARTED`
-  - the combination that actually requires one), and asserting the concrete `DuplicateKeyException`
-  Spring's own exception translation produces, not just "some `RuntimeException`". A new
-  `aFailingRunsRowUpdateRollsBackTheAlreadyInsertedEventToo` test proves the acceptance matrix's other
-  direction too: a temporary Postgres trigger that unconditionally rejects `UPDATE runs` (installed and
-  dropped within the one test method, never leaking into any other test sharing the static container)
-  proves an already-succeeded event insert rolls back completely when the subsequent status update
-  fails - not left durably committed on its own.
-- **[P1] The crash-window acceptance scenario didn't simulate the actual crash window.** The existing
-  `aRunsCompleteHistorySurvivesWithNoLiveSubscriberAndIsFullyRecoveredViaReplay` only proved a *cold*
-  recovery (no subscriber ever attached, replay from sequence 0) - not the D2 design's actual scenario:
-  a subscriber already saw events `1..N`, `N+1` commits, and the process dies *between that commit and
-  `hub.publish`*. A new `aCrashBetweenCommitAndPublishIsFullyRecoveredViaReconnectReplay` test models
-  this precisely: it commits the run's final event directly through the real `JdbcRunStore`, bypassing
-  `RunEventBroker` entirely (skipping the broker's own `hub.publish` call is exactly what "the process
-  died right there" means), confirms the original live subscriber genuinely never received it, then has
-  a brand-new `RunEventBroker` instance (a fresh in-memory `RunEventHub` - modeling the actual process
-  restart) reconnect with `afterSequence = N` and recover *exactly* the one missed event - no duplicate,
-  no gap - closing immediately since it was the run's own `RUN_FINISHED`.
-- **[P2] The concurrent-subscriber stress test didn't guarantee its own live-delivery half.** A plain
-  `Thread.sleep(10)` before subscribing does not guarantee the publisher is still mid-flight when the
-  subscription registers - on a slow/loaded runner all 200 appends could already be done, and the test
-  would then pass purely through the replay path despite its name claiming to exercise live traffic.
-  Fixed with two latches: the publisher writes a fixed 20-event prefix, signals it has, then blocks
-  until released; the test only subscribes (and only then releases the rest) once that prefix is
-  provably already durably written, guaranteeing the remaining 180 writes are genuinely concurrent with
-  the subscription, not merely coincidentally overlapping it.
-- **Minor cleanup**: `RunnerServiceApplication`'s Javadoc corrected from `localhost:5432` to the actual
-  `localhost:5433`; `JacksonConfig` and a `runner-service/build.gradle` comment no longer reference the
-  deleted `FileBackedRunEventJournal` (now `JdbcRunStore`).
-
-Verified after all fixes: full gate green throughout (root `test`, `runner-contract`, `runner-listener`,
-`runner-service` `test`, `databaseIntegrationTest` - `JdbcRunStoreTest` now 22 cases,
-`RunEventBrokerJdbcAcceptanceTest` now 4), `spotlessCheck` and `git diff --check` clean.
-
-**D2.4 - Artifact metadata - DONE 2026-09-06.** Per the "Artifacts must ingest incrementally" section
-above:
+**D2.4 - Artifact metadata - DONE.** Per the "Artifacts must ingest incrementally" section above:
 
 - **New `ArtifactRepository`** (interface) / **`JdbcArtifactRepository`** (real `@Component`,
   `JdbcTemplate`-backed): `ingest(entries)` batch-inserts with `ON CONFLICT (artifact_id) DO NOTHING`
@@ -800,239 +572,58 @@ above:
   instead of a clear failure. Fixed with a `uniqueArtifactId(label)` helper appending a fresh UUID to
   every artifact id used in the test class.
 
-Verified live, beyond the automated suites (`localPostgresUp` + `bootRun`): submitted a real `FIXTURE`
-run (`StepDrilldownFixtureTest`, which deliberately fails its third step) and polled
-`GET /api/v1/runs/{runId}/artifacts` while the run was still `RUNNING` - it already returned both
-artifacts (a `SCREENSHOT` and a `TRACE`) *before* the run reached its terminal `FAILED` status,
-proving the incremental `TEST_FAILED` ingestion hook actually works end to end, not just in a unit
-test. The final list after `FAILED` matched a direct `psql` query against the `artifacts` table
-exactly (same two rows, same `size_bytes`/`created_at`), and downloading the screenshot through the
-real HTTP endpoint returned the exact byte count Postgres recorded and a genuinely valid PNG - proving
-`ArtifactService#download`'s file-resolution path still works correctly with metadata now sourced from
-the database instead of the manifest file directly.
+Ingestion runs synchronously inside the same per-run lock the replay-atomicity protocol uses, before
+`hub.publish` - guaranteeing a `TEST_FAILED`/`TEST_ABORTED` event is never observable to an SSE
+subscriber before its artifacts are already durably ingested. A genuine `artifact_id` collision (the
+same id arriving with a different `runId`, path, type, or size - a real data-integrity problem, as
+opposed to a legitimate re-read of an identical entry) throws `ArtifactIngestionConflictException`
+rather than being silently discarded by `ON CONFLICT DO NOTHING`. A failed final drain is tracked
+explicitly, not just logged: a `runs.artifacts_ingestion_incomplete` column is set/cleared around the
+terminal drain, a bounded background reconciliation loop retries a flagged run up to 5 times before
+giving up permanently, and `GET .../artifacts` carries an `X-Artifacts-Ingestion-Incomplete` response
+header so a client can tell "zero artifacts" apart from "ingestion never finished". `createdAt` is
+truncated to microseconds before both the write and the conflict comparison, matching `TIMESTAMPTZ`'s
+storage precision and `JdbcRunStore`'s own precedent.
 
-**D2.4 review round (2026-09-06) - three P1s and one P2, all fixed.** A third review confirmed the
-direction was right but found real gaps the initial pass left open:
+**D2.5 - Restart recovery - DONE.** Per the "Restart behavior" section above:
 
-- **[P1] `TEST_FAILED`/`TEST_ABORTED` published before artifact ingestion completed.**
-  `RunEventBroker#append` used to call `hub.publish(event)` before (and, in an even earlier version,
-  entirely outside the per-run lock from) `artifactIngestionService.ingestAvailableEntries(...)` - a
-  client that invalidates its artifacts query the instant it observes that event over SSE could win
-  the race and see an empty list, with no further chance to refresh before `RUN_FINISHED`. Fixed by
-  moving ingestion to run first, still inside the same per-run lock, before `hub.publish` - the lock
-  that already exists for the replay-atomicity protocol also now guarantees ingestion is durably
-  complete before any subscriber can possibly observe the event that would make them query for it.
-  Proved deterministically with a new `RunEventBrokerTest` case: a blocking `ArtifactIngestionService`
-  test double holds ingestion open, and while it does, an already-registered live subscriber
-  provably has not received `TEST_FAILED` yet - only once ingestion is released does the event
-  arrive.
-- **[P1] `ON CONFLICT (artifact_id) DO NOTHING` silently accepted a genuine collision.** Idempotency
-  only actually applies to a byte-for-byte-identical re-read of the same entry - the same
-  `artifactId` arriving with a different `runId`, path, type, size, or any other field is a real
-  data-integrity problem, and `DO NOTHING` was silently discarding it with no signal at all.
-  `JdbcArtifactRepository#ingest` now inspects each row's own affected-count from the batch (0 means
-  a conflict), and for those re-reads the existing row and compares it field-for-field against the
-  incoming one - identical wins silently (the legitimate case), anything else throws a new
-  `ArtifactIngestionConflictException`. `FakeArtifactRepository` mirrors the same check. Three new
-  `JdbcArtifactRepositoryTest` cases prove: an identical re-ingest stays a no-op; the same id with
-  changed metadata is rejected (and does not overwrite the original row); the same id reused across
-  two different runs is rejected.
-- **[P1] A failed final drain had no guaranteed next attempt.** Logging and forgetting a failed
-  drain right before `RUN_FINISHED` meant a run could reach its terminal status with permanently
-  incomplete artifact metadata, and nothing durable recorded that fact - the API would show "zero
-  artifacts" indistinguishably from "ingestion never finished". Fixed with: a new
-  `runs.artifacts_ingestion_incomplete` column (`V2` migration - a new versioned migration, not an
-  edit to `V1`); `ArtifactIngestionService#ingestAvailableEntries` now returns an explicit
-  `ArtifactIngestionOutcome` and, only for the final (`runTerminal`) drain, marks/clears that flag via
-  `ArtifactRepository#markIngestionIncomplete`/`markIngestionComplete`; a bounded background
-  reconciliation loop (`@PostConstruct`-started, so a directly-constructed test instance never gets a
-  live thread it can't shut down) retries every currently-flagged run up to 5 times each, giving up
-  permanently (not infinitely) on one that never recovers; `ArtifactService#isIngestionIncomplete` and
-  a new `X-Artifacts-Ingestion-Incomplete` response header on `GET .../artifacts` let a client tell
-  the two states apart without changing the endpoint's existing array response shape. Six new
-  `ArtifactIngestionServiceTest` cases cover the outcome value, the flag being set/cleared, the
-  reconciliation loop actually recovering a fixed manifest, and the bounded cap actually stopping
-  retries (via a package-private, test-only attempt-count accessor).
-- **[P2] `TIMESTAMPTZ` truncates `createdAt` to microseconds.** The manifest writer records
-  `Instant.now()` at nanosecond precision; without normalizing, a genuinely-identical re-ingest of a
-  real (nanosecond-precision) entry would look like a [P1] conflict purely from a precision
-  difference that was never a real one - the original test fixtures used whole-second timestamps and
-  never exercised this. Fixed by truncating `createdAt` to microseconds before both the write and the
-  conflict-comparison in `JdbcArtifactRepository` (mirroring `JdbcRunStore`'s own precedent for
-  `Run`'s timestamps). A new `JdbcArtifactRepositoryTest` case uses a real nanosecond-precision
-  literal and asserts both the round-tripped value and a repeated re-ingest of the exact same entry.
+- **`RunRecoveryService`** (`@Component implements ApplicationRunner`): on startup, loads every
+  non-terminal `Run` via `RunLifecycleStore#findNonTerminal` and recovers each one to `ERROR` via
+  `RunLifecycleCoordinator#finishIfLive` - the same one-transaction status+event commit every other
+  terminal transition uses. No attempt is made to reattach to the run's old external process - it is
+  presumed gone, per the architecture rule above.
+- **Readiness gate, not a startup-ordering assumption**: `ApplicationRunner` runs after Tomcat has
+  already opened its listening socket, so the socket itself can't be held closed during recovery.
+  Instead, an `AtomicBoolean recoveryComplete` backs `requireRecoveryComplete()`, called by
+  `RunService#submit`, `RunService#cancel`, and `RunEventStreamController#stream` before doing
+  anything else, throwing `RunnerRecoveringException` (mapped to `503`). Read-only endpoints
+  (`GET /runs`, `GET /runs/{id}`, log/artifact downloads) stay ungated.
+- **Fail-closed, not fail-open, on a partial failure**: a per-run `try/catch` lets every run in the
+  pass be attempted even after one fails, but `recoveryComplete` is only ever set once every run
+  succeeded; a failure recovering any run, or loading the non-terminal set itself, throws out of
+  `ApplicationRunner#run`, which fails the whole application's startup - `restart: unless-stopped`
+  then retries the pass from scratch, and every run that already recovered stays durably `ERROR`, so
+  the retry only has the genuinely-still-failing run(s) left. The aggregate exception carries every
+  failed run's own cause as a suppressed exception.
+- **Idempotent by construction**: a run already recovered to `ERROR` is already terminal, so a later
+  restart's pass filters it out the same way any other terminal run is - never a second
+  `RUN_FINISHED`.
+- `findNonTerminal` is backed by a partial index (`V3`, keyed on `requested_at WHERE status IN (...)`)
+  using a literal status list rather than bind parameters, since PostgreSQL's planner cannot reliably
+  prove a parameterized condition implies a partial index's own predicate - `EXPLAIN` is asserted
+  directly in `RunRecoveryServiceJdbcAcceptanceTest` to confirm the index is actually used, not just
+  trusted by inspection.
+- `RunRecoveryServiceJdbcAcceptanceTest` (`databaseIntegrationTest`) proves the fail-closed path
+  against a real Postgres, including a genuine trigger-forced database-level failure during recovery
+  (not just a mocked store exception).
 
-Verified after all fixes: full gate green throughout (root `test`, `runner-contract`,
-`runner-listener`, `runner-service` `test`, `databaseIntegrationTest` - a stale
-`RunnerSchemaMigrationTest` assertion hardcoding "1 migration executed" updated to 2 once `V2`
-landed), `spotlessCheck`/`git diff --check` clean. Verified live again (`localPostgresUp` + `bootRun`
-+ a real `FIXTURE` run): artifacts still appeared while `RUNNING`, no `X-Artifacts-Ingestion-Incomplete`
-header on the normal (successful-ingestion) path, and `runs.artifacts_ingestion_incomplete = false`
-confirmed directly via `psql` for that run.
-
-**D2.5 - Restart recovery - DONE 2026-09-06.** Per the "Restart behavior" section above:
-
-- **New `RunRecoveryService`** (`@Component implements ApplicationRunner`): on startup, loads every
-  non-terminal `Run` (see `RunLifecycleStore#findNonTerminal`, added by the review round below) and
-  recovers each one to `ERROR` via `RunLifecycleCoordinator#finishIfLive` - the exact same one-transaction
-  status+event commit every other terminal transition already uses, so the "status and its
-  `RUN_FINISHED` event share a transaction" invariant applies to a recovery-produced transition too,
-  with no separate write path. No attempt is made to reattach to the run's old external process - it
-  is presumed gone, per the architecture rule above.
-- **Readiness gate, not a startup-ordering assumption**: `ApplicationRunner` runs after the context
-  refreshes, which is *after* Tomcat has already opened its listening socket - so the socket itself
-  cannot be held closed during recovery. Instead, an `AtomicBoolean recoveryComplete` (set in a
-  `finally` block once the pass finishes, success or failure) backs a `requireRecoveryComplete()`
-  method that both `RunService#submit` and `RunEventStreamController#stream` call before doing
-  anything else, throwing a new `RunnerRecoveringException` mapped to `503` by `RunExceptionHandler`
-  - exactly mirroring the existing `RunnerDegradedException` pattern. Read-only endpoints
-  (`GET /runs`, `GET /runs/{id}`, log/artifact downloads) are deliberately left ungated, per the
-  architecture doc's own precise scope naming only `submit`/SSE-subscribe.
-- **Idempotent by construction, no extra bookkeeping**: a run already recovered to `ERROR` on a
-  previous startup is already terminal, so a later restart's pass filters it out the same way any
-  other terminal run is - never a second `RUN_FINISHED`.
-- **One run's own recovery failure never blocks the rest of the pass, but does fail the pass as a
-  whole** (revised by the review round below - the original version instead swallowed every failure
-  and always marked recovery complete, which was the bug): a per-run `try/catch` around each
-  `finishIfLive` call logs the failure and continues to the next run rather than stopping early, but
-  the pass only ever marks `recoveryComplete = true` once every run in it actually succeeded.
-- **New `RunRecoveryServiceTest`** (6 cases, final count after the review round below): every
-  non-terminal status (`QUEUED`/`STARTING`/`RUNNING`) recovers to `ERROR` with the expected detail
-  and a trailing `RUN_FINISHED(ERROR)`, while an already-`SUCCEEDED` run is left completely untouched
-  (same status, same event count); a second recovery pass is a no-op; `requireRecoveryComplete()`
-  throws before the pass has run and stops throwing once it has; a run whose own recovery attempt is
-  made to fail still lets every other run in the same pass recover, but fails the pass as a whole and
-  keeps `requireRecoveryComplete()` rejecting traffic; a failure loading the non-terminal set itself
-  has the same fail-closed effect.
-- **Existing-test rewiring**: `RunService`/`RunEventStreamController` both gained a
-  `RunRecoveryService` constructor parameter; `RunServiceTest`'s three direct-construction call sites
-  use a new `recoveryAlreadyComplete(store, lifecycle)` helper (builds a real `RunRecoveryService` and
-  immediately calls `.run(null)` against an empty/all-terminal store so it completes instantly);
-  `RunEventStreamControllerTest`/`OpenApiContractTest`/`ServerBindingTest` add a
-  `@MockitoBean RunRecoveryService` (a safe no-op by default, since none of their scenarios stub
-  `requireRecoveryComplete()` to throw).
-
-Verified live (`localPostgresUp` + `bootRun`, real crash/restart cycle, not just the automated
-suite): submitted a real `PUBLIC`/`SMOKE` run, confirmed it reached `RUNNING` via
-`GET /api/v1/runs/{id}`, then force-killed the `bootRun` JVM (`taskkill /F`, simulating a crash mid-run,
-no graceful shutdown). Restarting `bootRun` logged `Recovered 1 non-terminal run(s) to ERROR on
-startup`; the run's status was `ERROR` with the exact expected detail text, and its SSE event history
-showed the complete, un-truncated timeline (`RUN_QUEUED` -> `RUN_STARTED` -> the two `TEST_STARTED`
-events already committed before the crash -> a trailing `RUN_FINISHED(ERROR)`) - proving recovery
-reuses the same durable event history rather than replacing it. A third restart (no crash this time,
-an ordinary clean restart of an already-`ERROR` run) logged no "Recovered" line at all and left the
-event stream at the same 5 events - confirmed idempotent live, not just in the unit test. `GET
-/api/v1/runs` (a read-only endpoint) continued to work throughout, including immediately after the
-crash-restart.
-
-**D2.5 review round (2026-09-06) - two P1s and two P2s, all fixed.** A review of the happy-path
-implementation above found real gaps in the failure path and in recovery's own read cost:
-
-- **[P1] A recovery failure used to open the gate, not keep it closed.** The original version
-  logged and swallowed both one run's own `finishIfLive` failure and a total `findAll()` failure,
-  then unconditionally set `recoveryComplete = true` in a `finally` block regardless - letting the
-  service accept new submissions, cancellations, and SSE subscriptions while a stale non-terminal
-  run sat un-reconciled, exactly the state the gate exists to prevent. Fixed: `RunRecoveryService`
-  now still attempts every run in the pass even after one fails (collecting failures rather than
-  stopping early), never sets `recoveryComplete` if any run failed to recover or if loading the
-  non-terminal set itself failed, and throws out of `ApplicationRunner#run` in either case - a
-  deliberate choice this time, not an accepted side effect. An `ApplicationRunner` throwing fails
-  the whole application's startup; `deploy/docker-compose.yml`'s existing `restart: unless-stopped`
-  policy then restarts the process, which retries the pass from scratch. Every run that did
-  successfully recover before the failure is already durably `ERROR` (its own transaction already
-  committed), so the retry only ever has the genuinely-still-failing run(s) left to attempt. The
-  previously fail-open unit test was inverted to assert the new fail-closed contract (it now expects
-  `run()` to throw and `requireRecoveryComplete()` to keep rejecting afterward), and a new
-  `aFailureLoadingTheNonTerminalRunsFailsThePassAndKeepsTheGateClosed` unit test covers the
-  load-failure half of the same contract.
-- **[P1] `cancel()` was not gated.** Tomcat already accepts connections while `ApplicationRunner`
-  recovery is still executing; a cancel request landing in that window could reach a stale run this
-  fresh JVM has no `ActiveRun` tracking for, throwing an `IllegalStateException` that surfaced as a
-  raw `500` instead of a clear `503`. Fixed by calling `recoveryService.requireRecoveryComplete()` at
-  the very start of `RunService#cancel`, mirroring `submit`'s own gate exactly - both mutating
-  endpoints are now genuinely closed during the recovery window, not just one of them.
-  `RunController`'s `cancelRun` `503` doc and a new `RunControllerTest` regression case
-  (`cancelReturns503WhenTheRunnerIsStillRecoveringFromARestart`) lock this in.
-- **[P2] Startup recovery used to load the whole run history.** `findAll()` loads every historical
-  run and its `CUSTOM` selections just to discard the terminal majority of them in Java - recovery
-  time grew with the whole run history, not with the (normally tiny) number of runs actually left to
-  recover. Fixed with a new `RunLifecycleStore#findNonTerminal` method, backed by a new partial index
-  (`V3__add_runs_non_terminal_partial_index.sql`) that stays tiny regardless of how large the
-  terminal run history grows, since only non-terminal rows are ever indexed - see the follow-up
-  review round below for the query/index-shape corrections this first version still needed.
-  `RunRecoveryService` now calls this instead of `findAll` plus a Java-side `isTerminal()` filter.
-- **[P2] No automated PostgreSQL acceptance test for recovery.** Every existing
-  `RunRecoveryServiceTest` case ran against `FakeRunLifecycleStore` only - the real behavior against a
-  real Postgres (row locking, the new partial-index-backed query, a real committed transaction per
-  recovered run) had only ever been proven by hand, which never repeats in CI. Fixed with a new
-  `RunRecoveryServiceJdbcAcceptanceTest` (`databaseIntegrationTest`) against a real `JdbcRunStore` -
-  see the follow-up review round below for how its own fail-closed case was itself corrected to
-  force a genuine database-level failure.
-
-Verified after all fixes: full gate green (root `test`, `runner-contract`, `runner-listener`,
-`runner-service` `test` and `databaseIntegrationTest` - `RunnerSchemaMigrationTest`'s migration-count
-assertion updated to 3 once `V3` landed), `spotlessCheck`/`git diff --check` clean. Verified the
-fail-closed path live, beyond the automated suites: submitted a run, force-killed `bootRun` while it
-was still `RUNNING`, then installed a temporary Postgres trigger that raises an exception on exactly
-that run's own recovery `UPDATE ... SET status = 'ERROR'` before restarting - `bootRun` failed to
-start (`IllegalStateException: Startup run-recovery pass failed to recover run(s) [...]`), Spring
-Boot logged `Application run failed`, Tomcat/HikariCP shut back down, and the process exited
-non-zero with no listening socket at all (`curl` connection refused) - not a silently-up service
-serving a permanent `503`. Removing the trigger and restarting again then recovered cleanly
-(`Recovered 1 non-terminal run(s) to ERROR on startup`), and the service accepted new submissions
-immediately afterward, confirming the retry-after-restart path genuinely works end to end, not just
-in principle.
-
-**D2.5 hardening round (2026-09-06) - two P2s and one P3, all fixed.** A follow-up review confirmed
-the fail-closed correctness fixes above were sound and found no new P1s, but flagged two hardening
-gaps in the P2/P2 work above plus one observability gap:
-
-- **[P2] The parameterized query might not use the partial index.** `findNonTerminal`'s original
-  query used `status IN (?, ?, ?)` - PostgreSQL's own partial-index documentation is explicit that
-  predicate matching happens during planning, against constant expressions, and a parameterized
-  condition cannot be reliably proven to imply a partial index's own literal predicate, especially
-  once the planner switches a prepared statement to a generic plan. Since the three statuses here
-  are a fixed part of the recovery protocol, never caller-supplied, `JdbcRunStore#findNonTerminal`
-  now builds the same literal `IN ('QUEUED', 'STARTING', 'RUNNING')` list the index predicate itself
-  uses - no bind parameters for this clause at all. The index itself was also re-keyed: it was
-  originally `ON runs (status) WHERE status IN (...)`, which could only use the index to satisfy the
-  `WHERE` clause and still needed a separate sort for `ORDER BY requested_at`; re-keyed to
-  `ON runs (requested_at) WHERE status IN (...)` (edited directly in `V3`, since it had not yet
-  shipped to any real deployment - same rule `V1`'s own migration already documents), so the index
-  can now satisfy the ordering too. A new `RunRecoveryServiceJdbcAcceptanceTest` case
-  (`findNonTerminalUsesThePartialIndex`) runs a real `EXPLAIN` against the query and asserts the plan
-  actually names `idx_runs_non_terminal`, rather than trusting the fix by inspection alone.
-- **[P2] The fail-closed acceptance test never triggered a real database failure.** The
-  `RunRecoveryServiceJdbcAcceptanceTest` fail-closed case used a wrapping `RunLifecycleStore` double
-  that threw before `JdbcRunStore` or PostgreSQL ever saw the call - it only proved
-  `RunRecoveryService` tolerates an exception from some store, not the scenario its own name
-  promised: a real recovery `UPDATE`/event `INSERT` transaction failing at the database level. Fixed
-  by installing a genuine, temporary Postgres trigger (the same technique the live verification
-  above already used, and the same established idiom
-  `JdbcRunStoreTest#aFailingRunsRowUpdateRollsBackTheAlreadyInsertedEventToo` already uses for a
-  different scenario) that rejects exactly the bad run's own recovery `UPDATE`, always removed in a
-  `finally` block since this test class shares one static container across every method.
-- **[P3] The aggregate exception lost each run's own original cause.** `RunRecoveryService` only
-  collected failed run ids; the actual exceptions were reachable only through the earlier log lines,
-  not through the exception an observability tool might capture. Fixed with a small
-  `RecoveryFailure(runId, cause)` record collected alongside the id, with every collected cause
-  attached to the final aggregate `IllegalStateException` as a suppressed exception - the thrown
-  exception itself now carries the complete causal chain for every failed run, not just their ids,
-  without changing anything a client ever sees (this exception never crosses the HTTP boundary; it
-  fails application startup before any request is served).
-
-Verified after all fixes: full gate green (root `test`, `runner-contract`, `runner-listener`,
-`runner-service` `test` and `databaseIntegrationTest`, including the new `EXPLAIN`-backed index test
-and the real-trigger-backed fail-closed test), `spotlessCheck`/`git diff --check` clean.
-
-**D2.6 - Production acceptance - DONE 2026-09-06.** No code changes to `runner-service` itself -
+**D2.6 - Production acceptance - DONE.** No code changes to `runner-service` itself -
 this phase is entirely the real end-to-end proof D2.1-D2.5 were built for, against the actual
 three-container production topology (`deploy/docker-compose.yml`), not `bootRun` + a bare local
 Postgres. One real config change did land here: `web`'s published host ports are now
-`${WEB_HTTP_BIND:-80}`/`${WEB_HTTPS_BIND:-443}` instead of hardcoded `80`/`443` (review finding - a
-local acceptance run needs a durable, reusable way to remap the host side when something else on
-the dev machine already holds 80/443, not a throwaway override file a later reviewer or CI run
-cannot reconstruct). Production is unaffected: both env vars are unset in any real deployment, so
+`${WEB_HTTP_BIND:-80}`/`${WEB_HTTPS_BIND:-443}` instead of hardcoded `80`/`443`, giving a local
+acceptance run a durable way to remap the host side when something else on the dev machine already
+holds 80/443. Production is unaffected: both env vars are unset in any real deployment, so
 Compose's own `${VAR:-default}` falls back to the real `80`/`443` exactly as before.
 
 **Reproducible commands** (run from the repository root; `deploy/.env` - gitignored - needs
@@ -1058,54 +649,24 @@ consistency checks) is committed in [`docs/RELEASE_EVIDENCE.md`](RELEASE_EVIDENC
 "Faza D2.6" section, following that file's existing evidence-log convention rather than a new,
 separate transcript file.
 
-- Built and started the real stack. All three containers came up; `postgres` published **no host
-  port at all** (confirmed via `docker compose ps`), and `runner-service` migrated cleanly through
-  v1→v3 against it on first boot.
-- Confirmed the network-isolation invariant still holds with real D2 traffic flowing: `web` timed
-  out trying to reach `postgres:5432` directly - `web` simply has no membership on the `data`
-  network at all (see §1's corrected explanation of why that topology, not `internal: true`, is
-  what actually enforces this) - while `runner-service`, the only service on both `edge` and `data`,
-  reached it successfully for Flyway/JDBC the entire time.
-- **[P1 fix] The key crash scenario now uses a genuine `SIGKILL`, not `docker compose restart`.**
-  `restart` sends `SIGTERM` first and gives Spring time for its own graceful shutdown (confirmed
-  live in an earlier pass: `"Commencing graceful shutdown"` appears, `@PreDestroy` hooks and Hikari
-  get to run, and a still-in-flight test run's own events kept flowing for several more seconds
-  before the process actually exited) - not the hard-crash `runner-service`/README already promise
-  recovery from. Re-verified with `docker compose kill -s SIGKILL runner-service`: no graceful
-  shutdown log line at all, the container exits immediately (code 137), and - checked directly in
-  Postgres, not just inferred - the run's row was left exactly mid-flight (`status = RUNNING`,
-  `finished_at` null, event history ending at whatever it last durably committed, no partial or
-  corrupt row). After `docker compose up -d runner-service`, the log showed `Recovered 1
-  non-terminal run(s) to ERROR on startup`; a direct `SELECT COUNT(*) FROM run_events WHERE
-  run_id = ... AND event_type = 'RUN_FINISHED'` returned exactly **1**.
-- **[P2 fix] The artifact check now covers the actual D2.4×D2.5 intersection the review named**, not
-  just an already-terminal run's artifacts surviving a restart: submitted a `PUBLIC`/`FIXTURE` run,
-  tightly polled `GET .../artifacts` until it returned both artifacts (a `SCREENSHOT` and a `TRACE`)
-  while a separate poll of `GET .../runs/{id}` still read `RUNNING` in the very same loop iteration,
-  and fired the `SIGKILL` immediately in that same iteration - the run was killed with its artifact
-  metadata already durably ingested but its own `RUN_FINISHED` not yet committed (confirmed directly
-  in Postgres: the `artifacts` rows already existed while `runs.status` was still `RUNNING`). After
-  recovery to `ERROR`, both artifact rows were byte-for-byte unchanged (same `artifact_id`s, same
-  `size_bytes`), and downloading each one through the real HTTP endpoint returned the exact byte
-  count Postgres recorded (1,620,071 / 1,316,252 bytes) and genuinely valid files (a real PNG, a real
-  ZIP) - proving artifact ingestion that happens *before* a crash survives being followed by recovery
-  to `ERROR`, not only an artifact that was already safely terminal beforehand.
-- **Reconnect-and-replay proven two ways against this same hard-killed run, no gap, no duplicate**: a
-  live SSE subscriber connected before the kill saw events up through `TEST_FAILED` (sequence 14)
-  and then genuinely dropped, with no `RUN_FINISHED` ever delivered to it. After recovery, a fresh
-  subscription with no `Last-Event-ID` returned the complete 15-event history in order, ending in
-  exactly one `RUN_FINISHED(ERROR)`; a second subscription resuming with `Last-Event-ID: 14` (exactly
-  where the dropped live subscriber had last seen an event) returned exactly the one event it had
-  missed - not a re-delivery of 1-14, not a gap.
-- Separately confirmed the idempotent-no-op path against the real stack too (a second, ordinary
-  `docker compose restart runner-service` with nothing left non-terminal logged no `Recovered` line
-  at all), and that an older, already-recovered run and a separately-completed terminal run both
-  remained fully readable through the real edge path afterward.
-- Re-ran the §5 RAM/disk measurement (`PUBLIC`/`REGRESSION`, same `docker stats` methodology) now
-  that both the D1 heap caps and D2's real Postgres persistence path are genuinely active - see the
-  "D2.6 remeasurement" note under §5. System-wide peak (~1.71 GB) was materially unchanged from the
-  pre-D2 figure; the 8 GB go/no-go recommendation is now confirmed against reality, not a pre-caps/
-  pre-persistence estimate.
+- All three containers come up; `postgres` publishes no host port at all, and `runner-service`
+  migrates cleanly against it on first boot.
+- The network-isolation invariant holds under real D2 traffic: `web` cannot reach `postgres:5432`
+  directly (no membership on the `data` network), while `runner-service` reaches it for Flyway/JDBC.
+- The crash scenario uses a genuine `SIGKILL`, not `docker compose restart` (which sends `SIGTERM`
+  and lets Spring shut down gracefully - not the hard-crash recovery is meant to handle): a
+  `SIGKILL`ed run is left mid-flight in Postgres (`status = RUNNING`, no partial/corrupt row), and
+  restarting `runner-service` recovers it to `ERROR` with exactly one `RUN_FINISHED` event.
+- Artifacts ingested before a crash (metadata durably written, but the run's own `RUN_FINISHED` not
+  yet committed) survive recovery unchanged and remain downloadable byte-for-byte.
+- Reconnect-and-replay is exact against a hard-killed run: a live subscriber sees events up through
+  the last one committed before the kill and then drops with no `RUN_FINISHED`; a fresh subscription
+  after recovery gets the complete history in order, and a subscription resuming with the dropped
+  subscriber's own `Last-Event-ID` gets exactly the missed event - no gap, no duplicate.
+- The idempotent-no-op path (an ordinary restart with nothing left non-terminal) and history for
+  older, already-terminal runs both hold against the real stack too.
+- The §5 RAM/disk measurement was re-run with both the D1 heap caps and D2's real Postgres
+  persistence path active - see the "D2.6 remeasurement" note under §5.
 
 ## 4. Security boundary
 
@@ -1120,17 +681,17 @@ receives any session at all (there is no intermediate "authenticated but not adm
 The `PORTFOLIO` deployment profile fails closed **before any listening socket is ever opened**:
 `RunnerSecurityEnvironmentPostProcessor` checks this during environment preparation (ordered right
 after `ConfigDataEnvironmentPostProcessor`), which runs before `SpringApplication` even creates the
-`ApplicationContext` - not an `ApplicationRunner` (a review finding: that only executes after the
-context has fully refreshed and the embedded Tomcat is already listening, briefly serving real
-anonymous traffic through the permissive chain on every restart of a misconfigured instance before
-getting a chance to throw). A malformed `RUNNER_SECURITY_ADMIN_GITHUB_ID` fails even earlier still,
+`ApplicationContext` - not an `ApplicationRunner`, which only executes after the context has fully
+refreshed and the embedded Tomcat is already listening, which would briefly serve real anonymous
+traffic through the permissive chain on every restart of a misconfigured instance before getting a
+chance to throw. A malformed `RUNNER_SECURITY_ADMIN_GITHUB_ID` fails even earlier still,
 at `AdminGithubAllowlist`'s own `@Bean` construction. `RunnerSecurityFailFastTest` proves this by
 binding a plain `ServerSocket` to the exact port a misconfigured instance was told to use,
 immediately after the expected startup exception - the bind succeeds, confirming the port was
 never touched.
 
-This check binds `runner.deployment-profile` via Spring Boot's own `Binder` API (a review
-finding), not a raw string comparison - comparing the literal `"PORTFOLIO"` string could disagree
+This check binds `runner.deployment-profile` via Spring Boot's own `Binder` API, not a raw string
+comparison - comparing the literal `"PORTFOLIO"` string could disagree
 with `RunAvailabilityConfig`'s own `@Value`-based enum conversion (case-insensitive: a lowercase
 `portfolio` would silently bypass this check while still resolving to `PORTFOLIO` later), so a
 security decision must never depend on whether an unrelated, later config binding happens to
@@ -1144,13 +705,12 @@ reports a `canManageRuns` boolean instead, which is `true` in the permissive cha
 OAuth2 configured - default local `bootRun`, `dashboardE2eTest`) regardless of authentication,
 exactly like this project's whole pre-D3.2 history; only once OAuth2 is genuinely enabled does
 `canManageRuns` require being the allowlisted admin. A separate `authenticationRequired` boolean
-hides the login control entirely when there is no login concept to offer (a review finding: an
-earlier version conflated "authenticated" with "can manage runs", making a permissive-chain
-deployment silently read-only). `CurrentUserController` derives `canManageRuns` from the real
-`ROLE_ADMIN` authority Spring Security itself grants, never merely from the principal being an
-`OAuth2User` (a review finding: today `GithubOAuth2UserService` never produces a non-admin
-session, but the endpoint's own contract should describe the actual authorization rule rather than
-rely on that fact never drifting).
+hides the login control entirely when there is no login concept to offer, so "authenticated" and
+"can manage runs" never get conflated into a permissive-chain deployment that reads as silently
+read-only. `CurrentUserController` derives `canManageRuns` from the real `ROLE_ADMIN` authority
+Spring Security itself grants, never merely from the principal being an `OAuth2User` - the endpoint's
+own contract describes the actual authorization rule rather than relying on
+`GithubOAuth2UserService` never producing a non-admin session.
 
 The frontend also never enables a Run/Cancel control on `canManageRuns` alone: `useCanManageRuns()`
 additionally requires the CSRF token to be primed (`useCsrfReady`, an error-only-retry query
@@ -1196,15 +756,14 @@ client IP). A violation returns `429` with the same `ProblemDetail` contract as 
 security response, plus a real `Retry-After` header. `runner.queue-capacity` (existing) is
 explicitly not a rate limit - it bounds queued runs, never call frequency.
 
-Anonymous, unauthenticated surfaces are the largest attack surface and were the easiest to
-under-cover initially (a review finding) - SSE connections specifically get their own per-client-IP
-concurrent-connection cap (`SseConnectionsPerIpTracker`, 3 by default), enforced *alongside* the
-existing global `sseMaxSubscribers` ceiling: without it, one client alone could occupy every global
-slot.
+Anonymous, unauthenticated surfaces are the largest attack surface here - SSE connections
+specifically get their own per-client-IP concurrent-connection cap (`SseConnectionsPerIpTracker`, 3
+by default), enforced *alongside* the existing global `sseMaxSubscribers` ceiling: without it, one
+client alone could occupy every global slot.
 
-**Client-IP keys are only trustworthy because of a verified reverse-proxy trust boundary** (a
-review finding: don't trust `X-Forwarded-For` blindly, even behind a reverse proxy this project
-controls). Read directly from Spring Boot 4's own source
+**Client-IP keys are only trustworthy because of a verified reverse-proxy trust boundary** - never
+trust `X-Forwarded-For` blindly, even behind a reverse proxy this project controls. Read directly
+from Spring Boot 4's own source
 (`TomcatWebServerFactoryCustomizer.customizeRemoteIpValve`): `SERVER_FORWARD_HEADERS_STRATEGY=native`
 activates Tomcat's own `RemoteIpValve` (`server.tomcat.remoteip.internal-proxies`, whose default
 already covers every private/Docker-internal range), which only honors `X-Forwarded-For` when the
@@ -1217,16 +776,13 @@ straight to `DispatcherServlet`, never booting a real embedded Tomcat) - real ve
 mechanism happens only against a genuine Compose stack with a real Caddy in front, not simulated
 locally; see `docs/RELEASE_EVIDENCE.md`'s D3.3 section for what was and wasn't verified this way.
 
-**A real bug, found only by live verification**: `AbuseRateLimitFilter` was first registered after
-`AuthorizationFilter` (reasoning that 401/403 should always win over rate-limiting), which silently
-never rate-limited the OAuth-authorization/callback routes at all - both are actually handled, and
-their response fully committed, by Spring Security's own `OAuth2AuthorizationRequestRedirectFilter`/
-`OAuth2LoginAuthenticationFilter`, well before `AuthorizationFilter` ever runs. Fixed by registering
-after `SecurityContextHolderFilter` instead - still early enough to catch the OAuth routes, still
-late enough that an already-authenticated admin's session `Authentication` is available for the
-numeric-id key extraction on the create/cancel-run surfaces. Re-verified live against a real
-`bootRun`, including that the fixed-window counter actually resets once its window elapses (not a
-permanent latch) - see `docs/RELEASE_EVIDENCE.md`'s D3.3 section for the transcript.
+`AbuseRateLimitFilter` is registered after `SecurityContextHolderFilter`, not after
+`AuthorizationFilter`: the OAuth-authorization/callback routes are handled and their response fully
+committed by Spring Security's own `OAuth2AuthorizationRequestRedirectFilter`/
+`OAuth2LoginAuthenticationFilter` before `AuthorizationFilter` ever runs, so registering later would
+silently never rate-limit them. `SecurityContextHolderFilter` is early enough to still catch those
+routes while late enough that an already-authenticated admin's session `Authentication` is available
+for the numeric-id key extraction on the create/cancel-run surfaces.
 
 The request body itself is capped before any JSON deserialization is even attempted
 (`RequestBodySizeLimitFilter`, registered in both chains - a resource-protection concern, not
@@ -1258,24 +814,19 @@ explicit on both `SecurityFilterChain` beans - turning what was already the corr
 (Spring Security never adds `Access-Control-Allow-Origin` without an explicit CORS configuration)
 into a stated, tested decision rather than one that was merely never wrong by omission.
 
-**Review round 2 findings, all fixed** (full transcripts in `docs/RELEASE_EVIDENCE.md`'s D3.3
-section): a plain `Filter` bean is auto-registered by Spring Boot as a generic servlet-container
-filter *in addition to* any explicit `SecurityFilterChain` wiring for that same bean - left
-unaddressed, `AbuseRateLimitFilter` could also have run under the permissive/local chain at an
-ordering Spring Boot's own defaults controlled, not this project's. Fixed with a disabled
-`FilterRegistrationBean` per filter in `SecurityConfig`, so the explicit chain wiring is now the
-only place either filter runs - proven by two real-embedded-Tomcat tests
-(`PermissiveChainHasNoAbuseRateLimitTest`/`OAuth2ChainAppliesAbuseRateLimitTest`) rather than
-`MockMvc`, since this auto-registration only exists in a real servlet container.
-`InMemoryRateLimiter`'s per-key map had no upper bound - a real flood of genuinely distinct client
-IPs (not just spoofed headers) could grow it forever; it now sweeps expired windows periodically
-and enforces a hard maximum tracked-key count with oldest-entry eviction as a fallback. Multi-rule
-checks (create-run's per-minute *and* per-hour limits) are now one atomic check-then-commit
-operation instead of two independent ones, so a request rejected by one rule never silently
-consumes another rule's budget, and `Retry-After` now rounds up rather than truncating. The
-body-size filter was redesigned to buffer and validate the entire request before ever invoking the
-rest of the filter chain, guaranteeing a real `413` even against a chunked or falsified
-`Content-Length`, where the original stream-based check could not.
+Both `AbuseRateLimitFilter` and the body-size filter are also registered as disabled
+`FilterRegistrationBean`s in `SecurityConfig`, so Spring Boot's automatic servlet-container
+registration of any plain `Filter` bean never runs either one a second time outside its explicit
+`SecurityFilterChain` wiring (`PermissiveChainHasNoAbuseRateLimitTest`/
+`OAuth2ChainAppliesAbuseRateLimitTest` prove this against a real embedded Tomcat, since the
+auto-registration behavior only exists there, not under `MockMvc`). `InMemoryRateLimiter`'s per-key
+map sweeps expired windows periodically and enforces a hard maximum tracked-key count with
+oldest-entry eviction, bounding memory against a flood of genuinely distinct client IPs. Multi-rule
+checks (create-run's per-minute *and* per-hour limits) are one atomic check-then-commit operation, so
+a request rejected by one rule never silently consumes another rule's budget, and `Retry-After`
+rounds up rather than truncating. The body-size filter buffers and validates the entire request
+before invoking the rest of the filter chain, guaranteeing a real `413` even against a chunked or
+falsified `Content-Length`.
 
 | Surface | Access |
 |---|---|
@@ -1296,12 +847,11 @@ rest of the filter chain, guaranteeing a real `413` even against a chunked or fa
 An audit of what D3.1-D3.3 already covered incidentally, closing the real gaps rather than
 re-testing what already had coverage. Session cookie **idle** timeout shortened from `12h` to `4h`
 (`server.servlet.session.timeout`) - a rarely-used single-admin session doesn't need a long idle
-window. Precisely scoped, per a review finding: this is an *idle* timeout under the Servlet
-`HttpSession` contract (the clock resets on every access), not an absolute session lifetime - an
-actively-used session is never force-expired at the 4h mark regardless of how long it has existed.
-Judged a reasonable "forgot to log out" bound for this single-admin, `HttpOnly`+`Secure`-cookie
-deployment, not a defense against an already-stolen active session (a deliberate scope decision,
-not an oversight - see `docs/RELEASE_EVIDENCE.md`'s D3.4 review-round section). New tests close
+window. This is an *idle* timeout under the Servlet `HttpSession` contract (the clock resets on
+every access), not an absolute session lifetime - an actively-used session is never force-expired at
+the 4h mark regardless of how long it has existed. Judged a reasonable "forgot to log out" bound for
+this single-admin, `HttpOnly`+`Secure`-cookie deployment, not a defense against an already-stolen
+active session (a deliberate scope decision - see `docs/RELEASE_EVIDENCE.md`'s D3.4 section). New tests close
 five concrete gaps: a mismatched (not merely missing) CSRF token still gets `403`; an invalidated
 session is provably treated as fully anonymous on its very next use (never a lingering admin
 session, never a `500`) - proving only the post-invalidation state, not the idle-timeout clock
@@ -1325,8 +875,7 @@ non-allowlisted GitHub identity being rejected outright with no admin session at
 
 Measured with `docker stats` against the real three-container stack above
 (`deploy/docker-compose.yml` + the local-only `deploy/docker-compose.debug.yml` override for port
-access - see "Verified"). **Corrected after review**: an earlier pass sampled `PUBLIC`/`JOURNEY`
-every 5s and reported a ~1.37 GB peak - both choices understated the real number. `Suite.JOURNEY`
+access - see "Verified"). Sampling `PUBLIC`/`JOURNEY` every 5s understates the real number: `Suite.JOURNEY`
 excludes `mutation`, and 5 of the 6 journey-tagged classes are `mutation`-tagged - so `PUBLIC`/
 `JOURNEY` actually runs just one class (`FeaturedRoomParityTest`), not a representative "heaviest
 public path." `PUBLIC`/`REGRESSION` is the real heaviest `PUBLIC` suite (every read-only UI/API/
@@ -1465,39 +1014,22 @@ initialDelay = 0)`, default hourly), with two independent, precedence-ordered pr
   validated to never exceed `runHistoryMaxAge`), removing just a run's artifact files/metadata
   while its row and event history live on.
 
-Both are crash-safe: an atomic conditional `UPDATE ... WHERE <tombstone column> IS NULL` is what
-lets a single sweep safely resume a run left tombstoned by an earlier, crashed process, and a
-tombstoned run is excluded from every public read path (`findById`/`findAll`, and SSE replay
-through the same lookup) the instant the tombstone commits - not only once its files finish
-deleting. A second, in-process `ReentrantLock` (non-blocking `tryLock`) additionally guards a
-whole real sweep's own duration - a review-round finding: the tombstone `UPDATE` alone cannot tell
-"resuming a crashed sweep" apart from "racing a sweep that is genuinely still running right now,"
-so a second, truly concurrent sweep needs its own separate guard (see "Review round" below).
-Manual dry-run preview and on-demand trigger are exposed as admin-only, `@Hidden` (kept out of the
-public OpenAPI doc), rate-limited (`runner.retention-rate-limit`, 10/hour by default) endpoints:
+Both are crash-safe: an atomic conditional `UPDATE ... WHERE <tombstone column> IS NULL` lets a
+single sweep safely resume a run left tombstoned by an earlier, crashed process, and a tombstoned run
+is excluded from every public read path (`findById`/`findAll`, and SSE replay through the same
+lookup) the instant the tombstone commits - not only once its files finish deleting. A second,
+in-process `ReentrantLock` (non-blocking `tryLock`) additionally guards a whole real sweep's own
+duration, since the tombstone `UPDATE` alone can't tell "resuming a crashed sweep" apart from
+"racing a sweep that is genuinely still running right now." A shared per-run `SELECT ... FOR UPDATE`
+row lock coordinates artifact ingestion against a concurrent purge. Manual dry-run preview and
+on-demand trigger are exposed as admin-only, `@Hidden` (kept out of the public OpenAPI doc),
+rate-limited (`runner.retention-rate-limit`, 10/hour by default) endpoints:
 `GET`/`POST /api/v1/retention/{preview,run}`.
-
-**Live-verified against a real running stack, not assumed**: a real 40-day-old terminal run seeded
-directly via `psql`, with matching real artifact/log/raw-event files, was found and deleted by the
-scheduler's own startup tick (`initialDelay = 0`) before a manual `preview` call could even observe
-it as a candidate - confirmed via both `psql` (0 rows) and the filesystem (no artifact directory
-remains for that run id). Full detail, including a real orchestration bug found and fixed during
-implementation (a claim-vs-resume conflation that silently dropped every crash-resume candidate),
-is in `docs/RELEASE_EVIDENCE.md`'s "Faza D4.1" section.
 
 This directly addresses §5's "no margin for D4's retention job running alongside a live suite run"
 caveat and the `runner-data`/`pgdata` unbounded-growth concern - both now have a real, tested upper
-bound rather than growing forever.
-
-**Review round (2026-09-07)** found two further concurrency gaps a purely sequential test suite
-could not have caught - a second sweep genuinely running at the same time as a first (not merely
-resuming a crashed one), and an artifact-ingestion retry racing a concurrent purge under real
-overlapping transactions, not just a same-statement check - both closed with, respectively, the
-in-process sweep lock mentioned above and a real per-run `SELECT ... FOR UPDATE` row lock shared
-by ingest and purge; plus a client-visible window where a purge-claimed run's artifacts still
-looked available, and the retention endpoints' own missing rate limit. Full detail, including the
-two tests that force genuine concurrent-transaction interleaving via a second raw JDBC connection,
-is in `docs/RELEASE_EVIDENCE.md`'s D4.1 "Review round" section.
+bound rather than growing forever. See `docs/RELEASE_EVIDENCE.md`'s "Faza D4.1" section for the live
+verification transcript.
 
 ## 7. Backup and restore (D4.5)
 
@@ -1521,22 +1053,17 @@ image and container lifecycle - a backup failure must never be coupled to the ap
 restart/health behavior, and `pg_dump`/`age`/`rclone` have no reason to live inside a JVM image at
 all.
 
-**Two separate Compose files, not one - a real review-round finding, not a stylistic choice.** The
-`backup` service originally lived in the base `docker-compose.yml`, gated by `profiles: ["backup"]`.
-That looked safe but was not: Docker Compose interpolates every `${VAR:?message}` in a file's own
-service definitions while building its config model, *regardless of which profiles are actually
-active* - a bare `docker compose -f docker-compose.yml up` (the ordinary deployment path, with no
-`--profile backup` in sight and no `BACKUP_*` vars ever set) failed outright the moment those four
-required vars were interpolated, confirmed live via `docker compose ... config --services`. Moved the
-whole service into `deploy/docker-compose.backup.yml`, only ever combined in explicitly
-(`-f docker-compose.yml -f docker-compose.backup.yml`) - the base file now validates cleanly with
-zero `BACKUP_*` vars set, confirmed the same way. The same overlay also fixed a second, independent
-gap: `backup` was originally wired to only the `data` network, which is `internal: true` (no gateway
-at all, by design) - it could reach `postgres` but had no route to the internet, so a real off-site
-upload could never have succeeded; the local `rclone type = local` drill test never caught this
-because a bind-mounted directory needs no network egress at all. `docker-compose.backup.yml` adds a
-second, plain (non-internal) `backup-egress` network to `backup` alongside `data` -
-`postgres`/`runner-service`/`web` are all untouched, still exactly as isolated as before.
+**Two separate Compose files, not one.** A `profiles: ["backup"]`-gated service in the base
+`docker-compose.yml` isn't enough: Docker Compose interpolates every `${VAR:?message}` in a file's
+service definitions while building its config model *regardless of which profiles are active*, so a
+bare `docker compose -f docker-compose.yml up` (no `--profile backup`, no `BACKUP_*` vars set) would
+fail outright the moment those required vars were interpolated. The whole `backup` service instead
+lives in `deploy/docker-compose.backup.yml`, only ever combined in explicitly
+(`-f docker-compose.yml -f docker-compose.backup.yml`) - the base file validates cleanly with zero
+`BACKUP_*` vars set. `backup` is wired to a second, plain (non-internal) `backup-egress` network
+alongside the `internal: true` `data` network - `data` alone would let it reach `postgres` but gives
+it no route to the internet, so a real off-site upload could never succeed; `postgres`/
+`runner-service`/`web` are untouched, still exactly as isolated as before.
 
 **The pipeline (`backup.sh`)**: `pg_dump --format=custom` streams directly into `age --encrypt
 --recipient <public-key>` - **no plaintext database dump is ever written to disk**, at any point, on
@@ -1549,126 +1076,77 @@ copyto` to an S3-compatible remote (Backblaze B2 is the reference target, but
 `BACKUP_REMOTE`/`BACKUP_BUCKET`/`BACKUP_PREFIX` are plain rclone config, so this is not hard-wired to
 one provider), the upload is independently re-verified with `rclone check` (a real checksum
 comparison, not just trusting `copyto`'s own internal retry logic), and only *then* is the local copy
-deleted. The whole cycle runs under a non-blocking `flock` held for the script's own duration - a
-review-round finding: without it, two concurrent invocations (an overlapping systemd timer run and a
-manual one, say) could race the same filename, an in-flight `*.partial`, or a double upload; now a
-second, genuinely concurrent invocation fails immediately and loudly instead.
+deleted. The whole cycle runs under a non-blocking `flock` held for the script's own duration, so two
+concurrent invocations (an overlapping systemd timer run and a manual one, say) can't race the same
+filename, an in-flight `*.partial`, or a double upload - a second, genuinely concurrent invocation
+fails immediately and loudly instead.
 
-**Retry-before-cleanup - a real bug found and fixed in review, not just a rewording.** An earlier
-version of this script called a leftover local `*.dump.age` a "retry candidate" in a comment, but
-never actually retried it - it only ever deleted such files once they aged past
-`BACKUP_LOCAL_RETENTION_DAYS`, which directly contradicted the script's own "delete only after
-verified" guarantee (a file could be discarded having *never* been confirmed uploaded at all).
-`backup.sh` now attempts to upload-and-verify every existing local `*.dump.age` file *first*, before
-even starting a new dump; a file only ever leaves local disk once that has genuinely succeeded (a
-second review round specifically demanded proof this retry genuinely happens on the *next* run, not
-just that a failed file survives the run that failed to upload it - see the live-verification
-paragraph below). A stale `*.partial` (only ever possible from a crashed prior run now that `flock`
-excludes a genuinely concurrent one) is still always removed unconditionally on every run.
+**Retry-before-cleanup.** `backup.sh` attempts to upload-and-verify every existing local
+`*.dump.age` file *first*, before even starting a new dump; a file only ever leaves local disk once
+that has genuinely succeeded - it is never discarded on age alone without a confirmed upload. A
+stale `*.partial` (only ever possible from a crashed prior run, since `flock` excludes a genuinely
+concurrent one) is always removed unconditionally on every run.
 
-**Disk-budget guard - sized to the actual dump, not a flat floor alone.** A first version of this
-guard only ever checked a flat `BACKUP_MIN_FREE_BYTES` floor (100 MiB) regardless of how large the
-database about to be dumped actually is - a second review round pointed out that 101 MiB free with a
-several-hundred-MiB database would have passed that check and then exhausted the filesystem mid-dump.
-Fixed: required free space is now `BACKUP_MIN_FREE_BYTES` (general headroom) + the source database's
-own real, live-measured size (`SELECT pg_database_size(current_database())` - a conservative estimate,
-since `pg_dump`'s own compressed custom-format output is typically *smaller* than this raw figure) +
-`BACKUP_DUMP_RESERVE_BYTES` (an additional flat safety margin, default 100 MiB). If that fails - most
-plausibly meaning uploads have been failing repeatedly and unverified archives have piled up, though
-it could just as well mean the database has genuinely outgrown its old defaults - the script fails
-closed and refuses to start a new dump at all, loudly, rather than either risking real disk exhaustion
-mid-dump or (the original, actually-shipped behavior before either review round) silently discarding
-an unconfirmed backup just to make room.
+**Disk-budget guard - sized to the actual dump, not a flat floor alone.** Required free space is
+`BACKUP_MIN_FREE_BYTES` (general headroom) + the source database's own real, live-measured size
+(`SELECT pg_database_size(current_database())` - a conservative estimate, since `pg_dump`'s own
+compressed custom-format output is typically *smaller* than this raw figure) +
+`BACKUP_DUMP_RESERVE_BYTES` (an additional flat safety margin, default 100 MiB). If that fails -
+most plausibly meaning uploads have been failing repeatedly and unverified archives have piled up,
+though it could just as well mean the database has genuinely outgrown its old defaults - the script
+fails closed and refuses to start a new dump at all, rather than risking real disk exhaustion mid-dump
+or silently discarding an unconfirmed backup just to make room.
 
 **Retention**: primarily the bucket's own lifecycle policy (configured on the bucket itself, outside
 this repo's control - not yet configured, since no real bucket exists before D5); `backup.sh` also
 enforces an optional, independent second bound (`BACKUP_RETENTION_DAYS`, `rclone delete --min-age`)
-as defense in depth, made deliberately non-fatal on its own failure (a self-caught hardening fix: a
-transient cleanup failure must never make an already-successful, already-verified backup report as
-failed).
+as defense in depth, made deliberately non-fatal on its own failure - a transient cleanup failure
+must never make an already-successful, already-verified backup report as failed.
 
 **Key management - recipient/identity split, deliberately asymmetric.** `backup.sh` only ever holds
 the **public** age recipient (`BACKUP_AGE_RECIPIENT`, set in `deploy/.env` - not a secret, safe to
 have on the production host). The matching **private** identity key never resides permanently in the
 standing deployment - it is generated once, offline, via `age-keygen`, and kept outside the
 deployment entirely (a password manager, per the user's own explicit D4.5 decision), supplied only
-at actual restore time as a mounted, read-only file - genuinely present on the host, temporarily,
-for the duration of that one restore invocation (a review-round wording correction: "never touches
-this host" overclaimed this; it is present, just never part of the *standing* config).
+at actual restore time as a mounted, read-only file - genuinely present on the host, temporarily, for
+the duration of that one restore invocation, never part of the *standing* config.
 `docker-compose.backup.yml` deliberately defines no standing `restore` service for exactly this
 reason; a restore is always a manual, explicit `docker compose ... run --rm` invocation with that
 mount added on top (see that file's own header comment for the full command).
 
-**Restore safety - five independent findings across two review rounds, all closed.** `restore.sh`
-still refuses to run without an explicit backup identifier as its first argument (never guesses
-"latest"), but that argument is now also validated against a strict regex matching `backup.sh`'s own
-naming convention *before* it is used to build any local or remote path - a first-round finding, an
-uncontrolled-path gap (path traversal, an absolute-path escape) in an earlier version that passed it
-through unvalidated. The restore itself runs under `pg_restore --single-transaction` (which, per
-PostgreSQL's own `pg_restore` docs, implies `--exit-on-error`) plus `--no-owner --no-privileges` -
-either the whole archive applies, or none of it does.
-
-A second review round found the target-identity checks from the first round were not actually
-sufficient. `restore.sh` originally only parsed `target_db` out of `TARGET_DATABASE_URL`'s own
-string for display, and its destructive-restore guard checked only whether a `runs` table already
-existed - a mistyped or misdirected connection string parses just as "successfully" as a correct one,
-so a genuinely wrong-but-fresh (never-migrated) target database would have been silently accepted as
-if it were the intended empty/disposable one. Fixed: a new, required `RESTORE_EXPECTED_DATABASE` is
-cross-checked against what Postgres itself reports via `SELECT current_database()` - never just a
-parsed string - and the script refuses outright on any mismatch, before touching rclone/age/Postgres
-at all. The destructive-restore acknowledgment was also tightened: `RESTORE_CONFIRM_DESTRUCTIVE` must
-now equal exactly `<real-database-name>:<backup-identifier>` (the two facts specific to *this*
-restore), never a generic `yes` that a script or a copy-pasted runbook step could silently reuse
-across a completely different incident without ever re-confirming intent - the required value is
-printed in the script's own refusal message, never something the caller has to compute by hand. The
-real, now database-confirmed target name is printed alongside the backup identifier before anything
-destructive happens - the two facts an operator mid-incident actually needs to be certain about.
+**Restore safety.** `restore.sh` refuses to run without an explicit backup identifier as its first
+argument (never guesses "latest"), and that argument is validated against a strict regex matching
+`backup.sh`'s own naming convention before it is used to build any local or remote path. The restore
+itself runs under `pg_restore --single-transaction` (which, per PostgreSQL's own `pg_restore` docs,
+implies `--exit-on-error`) plus `--no-owner --no-privileges` - either the whole archive applies, or
+none of it does. A required `RESTORE_EXPECTED_DATABASE` is cross-checked against what Postgres itself
+reports via `SELECT current_database()` - never just a parsed connection-string value - and the
+script refuses outright on any mismatch, before touching rclone/age/Postgres at all. The
+destructive-restore acknowledgment, `RESTORE_CONFIRM_DESTRUCTIVE`, must equal exactly
+`<real-database-name>:<backup-identifier>` (the two facts specific to *this* restore), never a
+generic `yes` that could be silently reused across a completely different incident - the required
+value is printed in the script's own refusal message.
 
 **RPO/RTO**: not yet measured against a real production host or a real off-site round trip (no real
 deployment exists before D5) - see the D5 acceptance list below for what closes this out for real.
 Today's automated drill (below) proves the mechanism end to end but times only a local,
 Docker-Desktop-speed round trip, not a representative RPO/RTO figure.
 
-**Live-verified against a real system, not just reasoned about, across three rounds.**
-`BackupRestoreDrillTest` (`runner-service/src/databaseIntegrationTest/`) builds the real
-`deploy/backup` image once per class, then eight separate scenarios, all against real Testcontainers
+**Live-verified against a real system.** `BackupRestoreDrillTest`
+(`runner-service/src/databaseIntegrationTest/`) builds the real `deploy/backup` image once per
+class, then eight separate scenarios, all against real Testcontainers
 `postgres:17-alpine` instances and the real `docker run --network container:<id>` mechanism (sharing
 a Postgres container's own network namespace - the same way a production host reaches `postgres` by
-Compose DNS, just addressed as `127.0.0.1:5432` instead): (1) the full happy-path round trip - real
-Flyway migrations plus one real row in every one of
-`runs`/`run_selected_tests`/`run_events`/`artifacts`, migration counts compared dynamically against
-the source's own real count rather than a hardcoded literal; (2) an invalid backup identifier is
-refused before restore.sh ever touches rclone/age/Postgres; (3) a destructive restore into a target
-with an existing, populated `runs` table is refused both with no acknowledgment at all *and* with a
-present-but-wrong one, proving the tied-confirmation format is actually enforced, not just checked for
-presence; (4) a wrong-but-plausible `RESTORE_EXPECTED_DATABASE` is refused before anything else runs;
-(5) decrypting with the wrong identity key fails loudly, and the target is confirmed to have received
-nothing at all; (6) a genuinely failed upload (a read-only destination, simulating a
-network/credentials/bucket failure) leaves the local encrypted archive on disk, unretried-but-intact;
-(7) - the second round's own specific demand - running `backup.sh` a *second* time against that exact
-same survivor, this time with a writable bucket, confirms it is genuinely retried and uploaded
-alongside that second run's own fresh dump (two real objects off-site afterward, zero left locally),
-not merely that it survives the first failure; (8) a real background container holding the identical
-`flock` lock file `backup.sh` itself uses (via a "LOCK_ACQUIRED" announcement waited on properly, not
-a race against the lock *file*'s mere existence) proves a genuinely concurrent invocation fails fast
-with the lock-held message rather than blocking, racing, or corrupting anything.
-
-The `docker()` test helper that drives every one of these `docker run`/`build` invocations also
-gained a second-round fix of its own: a bounded `Process#waitFor(timeout, unit)` (reading output on a
-separate thread, since blocking on `InputStream#readAllBytes()` first has no timeout of its own) plus
-an explicit, unique `--name` on every `run` invocation so a hang has a guaranteed cleanup path
-(`docker kill`/`docker rm -f` by name) - destroying the local Java `Process` handle alone only ever
-stops the local `docker` CLI client, never the container the daemon keeps executing regardless,
-mirroring the same failure-path discipline `DashboardProcess` already established elsewhere in this
-repo, adapted to Docker's own execution model.
-
-All eight scenarios passed on the first real run of the twice-rewritten suite; the full
-`databaseIntegrationTest` suite was re-run afterward with no regressions after each round's fixes.
-`docker compose ... config` was re-validated against both the base file alone (zero `BACKUP_*` vars,
-now succeeds) and the base+backup overlay together (all vars set, `backup`'s own resolved network
-list correctly shows both `data` and `backup-egress`, and the new `BACKUP_MIN_FREE_BYTES`/
-`BACKUP_DUMP_RESERVE_BYTES` vars resolve through the overlay) - see the transcript in
-`docs/RELEASE_EVIDENCE.md`'s D4.5 section for the exact commands and output.
+Compose DNS, just addressed as `127.0.0.1:5432` instead), proving: the full happy-path round trip
+(real Flyway migrations plus one real row in every table); an invalid backup identifier is refused
+before `restore.sh` ever touches rclone/age/Postgres; a destructive restore into a target with an
+existing, populated `runs` table is refused both with no acknowledgment and with a present-but-wrong
+one; a wrong-but-plausible `RESTORE_EXPECTED_DATABASE` is refused before anything else runs;
+decrypting with the wrong identity key fails loudly with the target receiving nothing; a genuinely
+failed upload leaves the local encrypted archive on disk, unretried-but-intact, and a second
+`backup.sh` run against that same survivor genuinely retries and uploads it; and a real concurrent
+invocation against the same `flock` lock file fails fast rather than blocking, racing, or corrupting
+anything. See `docs/RELEASE_EVIDENCE.md`'s D4.5 section for the full transcript.
 
 **Required for the D5 acceptance pass (not done here - no real production host or bucket exists
 yet)**: dump a real production Postgres; upload it off-site for real, against a real Backblaze B2
@@ -1681,188 +1159,44 @@ to survive the loss of.
 
 ## Verified
 
-Every claim above was checked against a real, running Docker Compose stack on this machine, across
-two rounds - an initial spike, then a review round that found five real, concrete problems in it
-(not style nitpicks), each reproduced and fixed for real, not just reasoned about:
+Every claim above was checked against a real, running Docker Compose stack, not reasoned about from
+the Compose/Dockerfile/Caddyfile source alone. Confirmed live:
 
-**Round 1 (initial spike):**
-- Built both images for real (`docker compose build`) - caught and fixed a real bug: `gradlew` had
-  CRLF line endings on this Windows machine's working tree (a stale, pre-`.gitattributes` checkout,
-  not a recurrence of the C5.6 fix - confirmed via `git hash-object` the content itself was
-  unchanged from `HEAD` once renormalized), which broke its `#!/bin/sh` shebang inside the Linux
-  container (`./gradlew: not found`) until fixed.
-- Found and fixed a real routing bug via direct curl, not assumed from the Caddyfile: `/api/*` and
-  `/actuator/health` were both silently served the React SPA shell instead of being proxied, because
-  Caddy evaluates directives in its own fixed internal order (not the order written in the file) -
-  `try_files`/`file_server` were rewriting the request to `/index.html` before `reverse_proxy` ever
-  saw the original path. Fixed by wrapping the whole site block in one `route { }` block.
-- Confirmed SSE actually streams through Caddy in real time (curled `/api/v1/runs/{id}/events`
-  directly, watched `RUN_QUEUED`/`RUN_STARTED` events arrive live, not buffered/delayed).
-- Launched real suites through the deployed stack's own public API and confirmed artifact/log
-  files land on, and survive a container restart via, the named `runner-data` volume (independently
-  confirmed from a separate throwaway container mounting the same volume).
+- Both images build; the whole Caddy site block is wrapped in one `route { }` block so `/api/*` and
+  `/actuator/health` are proxied rather than silently caught by the SPA's `try_files`/`file_server`
+  fallback (Caddy evaluates directives in its own fixed internal order, not file order).
+- SSE streams through Caddy in real time, not buffered/delayed.
+- Artifact/log files land on, and survive a container restart via, the named `runner-data` volume.
+- A root `.dockerignore` keeps the host's own `node_modules` and other dev-only content out of the
+  build context (215 MB down to under 1 MB; neither image contains any node tooling).
+- No host port is published in the base `docker-compose.yml`; `deploy/docker-compose.debug.yml` is a
+  separate, clearly-labeled override for local troubleshooting only.
+- The `edge`/`data` network split is real, not just declared: `web` cannot reach `postgres:5432`,
+  `runner-service` can.
+- `runner-service`'s Dockerfile uses exec-form `CMD ["java", "-jar", ...]` against a fixed jar path,
+  so `docker stop`/`restart` reaches the JVM directly (`java` as PID 1, graceful shutdown completes
+  in ~1 second) rather than being swallowed by a shell-form `CMD`.
+- `RunAvailabilityPolicy` genuinely hides `LOCAL` from `/api/v1/capabilities` and rejects it at
+  `POST /api/v1/runs` with `400` under `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO`, through the full
+  Caddy-fronted stack, without regressing the network isolation above.
+- `SITE_ADDRESS` is passed to `web` as a bare variable reference (`environment: [SITE_ADDRESS]`, no
+  `:-` default) - Compose's `${VAR:-}` form always sets an empty string when unset rather than
+  omitting the variable, and Caddy's own placeholder default only applies when it's genuinely
+  undefined; an empty value instead parses as a bare global-options block and fails Caddy's startup
+  entirely.
+- The named `caddy-data`/`caddy-config` volumes are real and populated, avoiding a re-issued
+  certificate (and Let's Encrypt rate limits) on every container recreate.
+- `runner-service`'s Dockerfile sets `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO` itself (fail-closed by
+  default, with `docker-compose.yml` repeating the same value as belt-and-braces documentation, not
+  the only thing enforcing it) - a bare `docker run` with no Compose override still returns `PUBLIC`
+  only from `/api/v1/capabilities`.
+- `runner-service` sets `init: true` (tini as PID 1) so a real run's process tree - the Gradle
+  wrapper, its daemon, and any spawned Chromium instances - is fully reaped on both normal
+  completion and mid-flight cancellation, with no zombies or orphans left behind.
 
-**Round 2 (review findings, all five confirmed real and fixed, then reverified against a rebuilt
-stack):**
-1. **No `.dockerignore` existed** - `deploy/web/Dockerfile`'s `COPY runner-dashboard/ ./` would
-   have copied this dev machine's own host `node_modules` (confirmed it exists on disk) over the
-   Linux-native one `npm ci` had just installed. Added a root `.dockerignore`
-   (`.git`/`.gradle`/`.idea`/`**/build`/`node_modules`/`dist`/`coverage`/`deploy/.env`/runtime
-   event-log-artifact directories). Rebuilt and confirmed for real: build-context transfer dropped
-   from **215 MB to under 1 MB**, and neither image contains any trace of `runner-dashboard/` node
-   tooling (`find`/`which node npm` both came back empty inside each image).
-2. **`runner-service`'s host port published even with the debug env var unset** -
-   `${RUNNER_SERVICE_DEBUG_PORT:-127.0.0.1:8080}` still published a port either way. Removed
-   `ports:` from `runner-service`/`web` in the base `docker-compose.yml` entirely; added
-   `deploy/docker-compose.debug.yml` as a separate, clearly-labeled override for local/D0 use only.
-3. **`web` could reach `postgres`** - no explicit networks meant all three shared Compose's default
-   network. Split into `edge` (`web`↔`runner-service`) and `data` (`runner-service`↔`postgres`,
-   `internal: true`). Reverified live after rebuilding: `docker exec deploy-web-1 wget postgres:5432`
-   times out (unreachable), `docker exec deploy-runner-service-1` reaching the same address
-   succeeds - the isolation is real, not just declared.
-4. **Shell-form `CMD` risked `docker stop`/`restart` not reaching the JVM**, and hardcoded a
-   version-specific jar filename. Copied the built jar to a fixed `/app/runner-service.jar`, moved
-   `-Xmx` to `JAVA_TOOL_OPTIONS` (the JVM reads this directly, no shell expansion needed), and
-   switched to exec-form `CMD ["java", "-jar", "/app/runner-service.jar"]`. Reverified live:
-   `ps aux` inside the running container shows `java` as PID 1; `docker compose stop
-   runner-service` completed in **1.2 seconds** with the log showing Spring's own
-   `"Commencing graceful shutdown... Graceful shutdown complete"` - the signal genuinely reaches
-   the JVM directly now.
-5. **The RAM measurement used the wrong suite and coarse sampling** - see §5's own correction
-   above: `PUBLIC`/`JOURNEY` only exercises one class (5 of 6 journey classes are `mutation`-tagged,
-   excluded from `Suite.JOURNEY`), and 5s sampling could miss short spikes.
-   `PUBLIC`/`REGRESSION` with 2s sampling found a real peak of **1.70 GB**, not the 1.37 GB first
-   reported - the go/no-go recommendation in §5 was revised accordingly (4 GB floor, not 2 GB).
-
-Also fixed as part of this round: the Caddyfile's `SITE_ADDRESS` comment previously implied TLS
-would "just work" once a domain exists - corrected to explicitly name the three things D1 still has
-to wire (env var passthrough, `80`/`443` publication, persistent Caddy `/data`/`/config` volumes),
-and `docs/DEPLOYMENT_SPIKE.md` (the preceding, narrower D0 investigation - bare-metal RAM
-measurement methodology only, written before any of this section's real Docker artifacts existed)
-now carries an explicit superseded notice pointing here, with its own since-reversed "Spring Boot
-should serve the frontend" recommendation struck through rather than left to contradict this
-document silently.
-
-Cleaned up fully after both rounds: `docker compose down -v` (containers + all named volumes
-removed each time), both built images removed, the local `.env` (a spike-only throwaway password)
-deleted, confirmed via `docker ps -a`/`docker images` that nothing from either round survives.
-
-**Round 3 (D1 implementation, 2026-09-06)** - `RunAvailabilityPolicy` wired end to end, plus the
-TLS/heap-cap task list from §5, all built and proven against a real rebuilt-and-run stack, not just
-designed:
-
-1. **`RunAvailabilityPolicy`** implemented as designed above and verified live (see §2's own
-   "Verified live" note) - `RUNNER_DEPLOYMENTPROFILE=PORTFOLIO` genuinely hides `LOCAL` from
-   `/api/v1/capabilities` and rejects it at `POST /api/v1/runs` with `400`, both through a real
-   deployed `runner-service` and (below) through the full Caddy-fronted stack.
-2. **A real bug found and fixed via this round's own Docker build**: `docker-compose.yml` originally
-   wrote `environment: [SITE_ADDRESS=${SITE_ADDRESS:-}]` for `web` - Compose then always sets the
-   container's `SITE_ADDRESS` to an empty string when `deploy/.env` doesn't define it, rather than
-   omitting the variable entirely. Caddy's own `{$SITE_ADDRESS::80}` placeholder default only
-   applies when the variable is genuinely *undefined*, not merely empty - an empty site address
-   instead parses as a bare global-options block, and Caddy failed to start at all:
-   `Error: adapting config using caddyfile: /etc/caddy/Caddyfile:10: unrecognized global option:
-   encode`. Fixed by making it a bare variable reference (`environment: [SITE_ADDRESS]`, no `:-`
-   default) and commenting out `SITE_ADDRESS=` in `.env.example` (a real value uncommented there,
-   not merely present-and-empty, is what a future real domain requires) - reverified live: `web`
-   started cleanly, logged `"server running"` on `:80`, no automatic-HTTPS warning beyond the
-   expected "no domain configured" one.
-3. Rebuilt both images (`docker compose build`, ~2 minutes, including a full `playwrightInstall
-   --with-deps` + `:runner-service:bootJar` inside the `runner-service` image) and brought the full
-   three-container stack up (host ports temporarily remapped to `8087`/`8443` for this verification
-   only, since the host's port `80` was already legitimately held by this same machine's own
-   long-running local RBP Docker stack, confirmed via `docker ps` before assuming a real conflict -
-   never touched that unrelated container). Reverified through the real Caddy-fronted stack, not
-   just against `runner-service` directly: `GET /api/v1/capabilities` through Caddy returned
-   `PUBLIC` only (the `PORTFOLIO` profile propagating all the way through), `/actuator/health`
-   returned `UP`, a client-side route (`/runs`) still resolved to the SPA shell, and the network
-   split from Round 2 still holds (`web` timed out reaching `postgres:5432`; `runner-service`
-   connected to it immediately) - the new `RUNNER_DEPLOYMENTPROFILE`/`SITE_ADDRESS` wiring didn't
-   regress anything Round 2 already proved.
-4. Confirmed the named `caddy-data`/`caddy-config` volumes are real and populated (Caddy's own log:
-   `"autosaved config (load with --resume flag)"` against `/config/caddy/autosave.json`, the
-   `/config` named volume, not container-local storage) - the persistence D1's task list called for
-   to avoid re-requesting a certificate (and hitting Let's Encrypt's rate limits) on every container
-   recreate.
-5. Root `build.gradle`'s new `tasks.withType(Test).configureEach { maxHeapSize = '512m' }` and the
-   backend Java changes were verified the ordinary way first (`./gradlew.bat spotlessApply test
-   :runner-contract:test :runner-listener:test :runner-service:test`, all green, including new
-   `RunAvailabilityPolicyTest`/expanded `RunRequestValidatorTest`/`CapabilitiesResponseTest`/a new
-   `CapabilitiesControllerPortfolioProfileTest`) before the Docker round above - this Docker round
-   is what additionally proves the *deployment wiring* (env var plumbing, Caddy routing under the
-   new profile), not the policy logic itself, which the JVM-level tests already cover.
-
-Cleaned up fully afterward: `docker compose down -v` (containers + all four named volumes removed),
-both rebuilt images removed, the local `.env` (this round's own throwaway password) deleted,
-`docker ps -a`/`docker images`/`docker volume ls` confirmed nothing from this round survives -
-only the pre-existing, unrelated local RBP stack (never touched) remained. The host-port remap used
-for verification was reverted in `docker-compose.yml` back to the real `80`/`443` afterward - it was
-never the committed state, only a same-machine workaround for this round's own verification.
-
-**Round 4 (review-round fixes, 2026-09-06, same day)** - a review of Round 3 found one P1 and
-several P2/P3 gaps, all fixed and reverified against a rebuilt image/stack, not just reasoned about:
-
-1. **[P1] The portfolio submission boundary had no permanent regression test** - every
-   `RunServiceTest` case constructed `RunService` with `RunAvailabilityPolicy.localDev()`, so
-   `RunAvailabilityPolicyTest`/`RunRequestValidatorTest`/`CapabilitiesResponseTest` alone would stay
-   green even if a future change accidentally dropped the validator call from `RunService.submit`
-   itself. Added `rejectsALocalSubmissionUnderThePortfolioProfileWithNoSideEffects` (asserts
-   `UnsupportedRunCombinationException`, an empty repository, zero emitted events, and an empty
-   process-launcher command list - mirroring the existing
-   `anInvalidCustomSelectionNeverSavesARunOrEmitsAnyEvent` test's own shape) and its companion
-   `allowsAPublicSubmissionUnderThePortfolioProfile` (proves the same `PORTFOLIO` policy still lets
-   a `PUBLIC` run reach a launched process) to `RunServiceTest`.
-2. **[P2] The production image was permissive (`LOCAL_DEV`) unless Compose explicitly overrode it**
-   - `deploy/runner-service/Dockerfile` now sets `ENV RUNNER_DEPLOYMENTPROFILE=PORTFOLIO` itself
-   (fail-closed), with `docker-compose.yml` setting the identical value again as deliberate
-   belt-and-braces documentation rather than the only thing enforcing it. **Verified live**: built
-   the image, ran it directly with `docker run` and zero Compose environment override at all -
-   `GET /api/v1/capabilities` still returned `PUBLIC` only.
-3. **[P2] No init/reaper for the process-spawning container** - `runner-service` now sets
-   `init: true` in `docker-compose.yml` (Docker's own minimal init, tini, becomes PID 1). **Verified
-   live inside the container** (`docker exec ... ps aux`, not just host-visible processes): PID 1 is
-   `/sbin/docker-init`, `java` is PID 7; submitted a real `PUBLIC`/`SMOKE` run through to `SUCCEEDED`
-   and confirmed a clean process table afterward (no leftover Gradle/JUnit/Chromium processes);
-   submitted a second run and cancelled it mid-flight while it was genuinely running (`ps aux`
-   confirmed the real process tree at that moment: the `gradlew` wrapper process, its Gradle daemon
-   child with the new `-Xmx512m` cap already visible on the daemon JVM's own command line, live) -
-   after cancellation completed (`status: CANCELLED`), the process table was clean again, no
-   zombies or orphans. A dedicated `TIMED_OUT` repro was not additionally engineered: `RunService`
-   routes both cancellation and timeout through the identical `terminateWithinLifecycleGate`/
-   `processLauncher.terminate()` code path, so the cancellation check above already exercises the
-   code this fix targets.
-4. **[P2] Deployment docs still described the pre-Round-3 state** - §1's TLS bullet and the §5 D1
-   task list both still said `SITE_ADDRESS` wasn't passed through/no ports published/no persistent
-   volumes (all now done), and the task list additionally still showed the buggy `${SITE_ADDRESS:-}`
-   form as if it were the real fix. Corrected both to describe the actual bare-variable-reference
-   approach and point at this round's own writeup for why the distinction matters.
-5. **[P3] `CapabilitiesResponse`'s own Javadoc still referenced `#current()`** (no-arg) - updated to
-   `#current(RunAvailabilityPolicy)`.
-6. **[P3] The Dockerfile's header comment still called this a "D0 spike image"** - reworded to
-   "Production image for runner-service (Faza D1 ...)".
-7. **[P3, explicitly deferred, not a D1 blocker]** - base image versions (`eclipse-temurin:21-jdk-
-   jammy`, `node:24-slim`, `caddy:2-alpine`, `postgres:17-alpine`) are still moving tags, not pinned
-   to an exact version+digest. Tracked in "Still open after D1" below, to be done no later than D5.
-
-Verified after all fixes: `./gradlew.bat spotlessApply test :runner-contract:test
-:runner-listener:test :runner-service:test` green (`RunServiceTest` now 30/30, including the two new
-portfolio-boundary tests). Docker: rebuilt `deploy-runner-service` fresh, confirmed the fail-closed
-default via a bare `docker run` (point 2 above), then brought up `runner-service`+`postgres` via
-`docker-compose.debug.yml`'s direct loopback port (bypassing `web`/Caddy entirely, since this
-round's checks only needed `runner-service` itself and the host's port `80` was still legitimately
-held by this machine's own pre-existing local RBP stack) for the `init: true` process-tree checks
-(point 3 above). Cleaned up fully afterward the same way as Round 3: `docker compose down -v`, both
-images removed, the throwaway `.env` deleted, confirmed via `docker ps -a`/`docker images`/
-`docker volume ls` that nothing from this round survives.
-
-**Still open after D1**: a real domain to actually exercise TLS issuance end to end (`SITE_ADDRESS`
-has only been verified unset, i.e. plain `:80` - D5 buys the domain); re-running the RAM/disk
-measurement in §5 now that heap caps actually exist and once D2's persistence path is active, before
-the D5 purchase; D2 (Postgres) and D3 (auth on launch/cancel) remain fully unimplemented, per the
-schema/protocol and security-boundary sections above. **Explicitly deferred, not a D1 blocker per
-this round's own review** (backlog, revisit no later than D5): every base image
-(`eclipse-temurin:21-jdk-jammy`, `node:24-slim`, `caddy:2-alpine`, `postgres:17-alpine`) is pinned
-to a moving tag, not an exact version+digest - two builds of the identical commit are not
-guaranteed to produce an identical deployment today. Pin each to `image:x.y.z@sha256:...` before
-D5, ideally with Renovate/Dependabot opened against the digest so updates stay a reviewed PR rather
-than a silent drift.
+**Still open**: a real domain to actually exercise TLS issuance end to end (`SITE_ADDRESS` has only
+been verified unset, i.e. plain `:80` - D5 buys the domain); re-running the RAM/disk measurement in
+§5 before the D5 purchase; every base image (`eclipse-temurin:21-jdk-jammy`, `node:24-slim`,
+`caddy:2-alpine`, `postgres:17-alpine`) is pinned to a moving tag, not an exact version+digest, so two
+builds of the identical commit aren't guaranteed to produce an identical deployment today - pin each
+to `image:x.y.z@sha256:...` before D5, ideally with Renovate/Dependabot opened against the digest.

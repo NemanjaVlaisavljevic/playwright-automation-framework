@@ -16,10 +16,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
-/**
- * D4.2 - proves {@link DiskUsageService#databaseBytes()} against a real Postgres, not just a
- * reasoning-only claim about what {@code pg_database_size(current_database())} returns.
- */
+/** Verifies {@link DiskUsageService#databaseBytes()} against a real Postgres. */
 @Testcontainers
 class DiskUsageServiceDatabaseIntegrationTest {
 
@@ -53,8 +50,7 @@ class DiskUsageServiceDatabaseIntegrationTest {
   void databaseBytesReturnsARealPositiveSizeFromTheLiveDatabase() {
     long size = diskUsageService.databaseBytes();
 
-    // Even a freshly-migrated, otherwise-empty schema occupies real disk (the catalog itself,
-    // Flyway's own history table) - a real Postgres never reports 0 for pg_database_size.
+    // Even a freshly-migrated, empty schema occupies real disk - pg_database_size never reports 0.
     assertThat(size).isPositive();
   }
 

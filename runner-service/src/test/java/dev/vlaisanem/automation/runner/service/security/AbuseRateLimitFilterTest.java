@@ -6,10 +6,9 @@ import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /**
- * Regression test for the D3.3 review finding: {@code Duration.toSeconds()} truncates, so 59.9
- * remaining seconds would floor to {@code Retry-After: 59} - advising a client to retry slightly
- * before the window has actually elapsed. {@link AbuseRateLimitFilter#ceilSecondsAtLeastOne} must
- * round up instead.
+ * {@link AbuseRateLimitFilter#ceilSecondsAtLeastOne} must round up: {@code Duration.toSeconds()}
+ * truncates, which would floor 59.9 remaining seconds to {@code Retry-After: 59} and advise a retry
+ * before the window has actually elapsed.
  */
 class AbuseRateLimitFilterTest {
 

@@ -24,27 +24,10 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * D4.3.1 - proves what an anonymous caller actually sees, against {@code application.yml}'s real
- * {@code show-details: never}/{@code show-components: never} defaults (no override here, unlike
- * {@code HealthEndpointGroupMembershipTest}) - a body with only a top-level {@code status} key, no
- * {@code components} object, and no leaked contributor name, exception message, or file-system
- * path, on both probe sub-paths. {@code db} is intentionally left reachable-or-not by chance (the
- * point of this test is response *shape*, not a specific status), so no explicit assertion is made
- * on the {@code status} value itself.
- *
- * <p>No OAuth2 credentials are configured here, so {@code SecurityConfig}'s <em>permissive</em>
- * chain is the one active - it permits everything regardless of {@code permitAll()} lists, so this
- * class alone cannot catch a regression that accidentally dropped these paths from the real {@code
- * oauth2SecurityFilterChain}. {@code
- * dev.vlaisanem.automation.runner.service.security.OAuth2ChainAppliesAbuseRateLimitTest}'s own
- * {@code probeSubPathIsReachableAnonymouslyOnTheOAuth2ChainToo} runs the identical assertions
- * against that chain instead - the one every production (PORTFOLIO) deployment actually runs under.
- *
- * <p>Same context-construction reasoning as {@code HealthEndpointGroupMembershipTest}: {@code
- * DataSourceAutoConfiguration} is not excluded (the readiness group's {@code include} list requires
- * the real {@code db} contributor to exist), {@code FlywayAutoConfiguration} stays excluded, and
- * {@code hikari.initialization-fail-timeout=-1} keeps context startup from failing when nothing is
- * listening on the configured (unreachable-in-this-test) datasource URL.
+ * Proves an anonymous caller sees only a top-level {@code status}, no components or leaked details,
+ * matching the real show-details/show-components=never defaults. Runs against the permissive
+ * (non-OAuth2) chain; {@code OAuth2ChainAppliesAbuseRateLimitTest} covers the same shape on the
+ * real production OAuth2 chain.
  */
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,

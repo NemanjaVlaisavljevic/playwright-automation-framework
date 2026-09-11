@@ -9,16 +9,12 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 
 /**
- * Reads the committed, JUnit-discovery-generated {@code CUSTOM}-suite catalog off disk - the same
- * file {@code TestCatalogGenerator} (main suite, {@code tooling} package) writes and {@code
- * testCatalogCheck} (root {@code build.gradle}) keeps free of drift in CI. Read fresh on every call
- * rather than cached: this is a small, infrequently-hit file, and re-reading avoids any
- * cache-invalidation reasoning for what is, in production, a file nothing rewrites while the
- * process is running.
+ * Reads the committed, JUnit-discovery-generated {@code CUSTOM}-suite catalog off disk. Read fresh
+ * on every call rather than cached: a small, infrequently-hit file, avoiding any cache-invalidation
+ * reasoning for a file nothing rewrites while the process is running.
  *
- * <p>The deserialized content is re-validated on every read via {@link TestCatalogContentValidator}
- * - the file is a build artifact on disk in a deployed container, not something this service can
- * assume stayed byte-for-byte as generated.
+ * <p>Re-validated on every read via {@link TestCatalogContentValidator} - a build artifact on disk
+ * in a deployed container, not something this service can assume stayed byte-for-byte as generated.
  */
 @Service
 public class TestCatalogService {

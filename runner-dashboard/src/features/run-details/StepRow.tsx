@@ -22,8 +22,7 @@ export function StepRow({
   return (
     <li
       id={stepRowElementId(testId, step.stepId)}
-      // Same programmatically-focusable pattern as the test row above it (see
-      // `TestResultRow.tsx`) - a deep link or Live Focus reveal can target a step directly.
+      // Programmatically focusable so a deep link or Live Focus reveal can target this step.
       tabIndex={-1}
       className={cx(styles.stepItem, styles.focusableRow)}
     >

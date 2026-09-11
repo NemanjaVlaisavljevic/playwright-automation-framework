@@ -13,10 +13,8 @@ export interface AppShellProps {
 }
 
 /**
- * The app-wide chrome (header/sidebar/health indicator) wrapping every route via a React Router
- * layout route (see `router.tsx`) - the health check used to live inside `RunListPage` alone, so
- * `/runs/:runId` never showed it; moving it here means "is the runner service reachable at all"
- * is visible no matter which page a user is on.
+ * App-wide chrome (header/sidebar/health indicator) wrapping every route via a React Router
+ * layout route (see `router.tsx`), so the health indicator is visible on every page.
  */
 export function AppShell({
   healthRefetchIntervalMs = 10_000,
@@ -25,9 +23,8 @@ export function AppShell({
     queryKey: queryKeys.health,
     queryFn: getHealth,
     refetchInterval: healthRefetchIntervalMs,
-    // TanStack Query pauses refetchInterval while the document isn't visible/focused by default -
-    // exactly the scenario this polling exists for (a dashboard tab left open, unfocused, while
-    // the backend restarts), so recovery must not depend on the tab regaining focus first.
+    // Without this, TanStack Query pauses polling while the tab is unfocused - defeating recovery
+    // detection for a dashboard left open in the background.
     refetchIntervalInBackground: true,
   });
 

@@ -46,14 +46,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D2.2 - proves {@link JdbcRunStore} actually delivers the atomic sequence the replay-atomicity
- * protocol requires against a real PostgreSQL: round-trips a {@code Run} (including its {@code
- * CUSTOM} selection and microsecond-truncated timestamps), allocates a gapless event sequence
- * through both the lifecycle path ({@code transitionIfNonTerminal}) and the pure append-only path
- * ({@code appendEventIfNonTerminal}), rejects an event factory that returns a mismatched identity
- * (wrong {@code runId}/{@code sequence}/type), and proves both a genuine two-connection concurrency
- * race and a genuine rollback. Not yet wired into {@code RunService}/{@code
- * RunLifecycleCoordinator} - see {@link JdbcRunStore}'s own Javadoc.
+ * Verifies {@link JdbcRunStore} against real PostgreSQL: round-trips a {@code Run}, allocates a
+ * gapless event sequence, rejects mismatched event factories, and proves real rollback and row-lock
+ * concurrency. Not yet wired into {@code RunService} (see {@link JdbcRunStore} Javadoc).
  */
 @Testcontainers
 class JdbcRunStoreTest {
@@ -118,11 +113,8 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * PostgreSQL's {@code TIMESTAMPTZ} only stores microsecond precision - a review finding: a plain
-   * whole-second {@link Instant} in every other test here would never have exposed a mismatch
-   * between {@code queue()}'s own in-memory return value and what {@code findById()} later reads
-   * back. Uses a deliberately nanosecond-precision literal and asserts both sides agree on the
-   * truncated value - not just that {@code findById()} "still returns something reasonable."
+   * {@code TIMESTAMPTZ} stores only microsecond precision. A nanosecond-precision literal proves
+   * {@code queue()}'s in-memory return and {@code findById()}'s read agree on the truncated value.
    */
   @Test
   void timestampsAreTruncatedToMicrosConsistentlyInMemoryAndOnRead() {
@@ -295,10 +287,8 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * [P1] fix - {@code transitionIfNonTerminal} used to only validate the lifecycle event/status
-   * match inside {@code if (eventFactory != null)}, so a caller passing a {@code null} factory for
-   * {@code RUNNING} silently committed with no {@code RUN_STARTED} event at all. The validation is
-   * now unconditional - proves the rejection and the rollback.
+   * {@code RUNNING} must always come with a {@code RUN_STARTED} event factory; a null factory must
+   * be rejected, not silently committed without one.
    */
   @Test
   void transitionToRunningWithoutAnEventFactoryIsRejected() {
@@ -319,7 +309,7 @@ class JdbcRunStoreTest {
     assertEventCount(runId, 1);
   }
 
-  /** Same [P1] fix as above, for a terminal status instead of {@code RUNNING}. */
+  /** Same requirement as above, for a terminal status instead of {@code RUNNING}. */
   @Test
   void transitionToATerminalStatusWithoutAnEventFactoryIsRejected() {
     String runId = newRunId();
@@ -345,9 +335,8 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * The other half of the same [P1] fix: {@code STARTING} must never carry an event at all - before
-   * this fix, {@code requireLifecycleEventMatches} was never even invoked for {@code STARTING}, so
-   * an arbitrary event attached to it would have been silently accepted and inserted.
+   * {@code STARTING} must never carry an event factory; one attached to it must be rejected, not
+   * silently accepted and inserted.
    */
   @Test
   void transitionToStartingWithAnEventFactoryIsRejected() {
@@ -369,11 +358,8 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * [P2] fix - a hand-rolled {@code UnaryOperator<Run>} is free to construct an arbitrary {@link
-   * Run} instead of only changing status/timing/result; nothing in {@code Run.transitionTo} itself
-   * would stop it. Proves {@code RunEventValidation#requireSameIdentity} now catches a transition
-   * that rewrites {@code requestedAt} (standing in for any of the immutable identity fields) and
-   * rolls the whole attempt back.
+   * A hand-rolled {@code UnaryOperator<Run>} could construct an arbitrary {@link Run} with changed
+   * identity fields; {@code RunEventValidation#requireSameIdentity} must catch and roll that back.
    */
   @Test
   void transitionRejectsATransitionThatChangesRunIdentity() {
@@ -503,14 +489,9 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * [P2] fix - the latch-based {@link #exactlyOneOfTwoConcurrentTerminalAttemptsOnTheSameRunWins}
-   * below only proves the two attempts don't corrupt each other; a scheduler could in principle
-   * serialize them without either ever actually blocking on the row lock, and that test would still
-   * pass. This test is the deterministic proof: it opens a second, raw JDBC connection, takes
-   * {@code SELECT ... FOR UPDATE} on the row itself and deliberately holds it open (no commit),
-   * then proves a concurrent {@code transitionIfNonTerminal} call genuinely cannot complete within
-   * a short timeout while that lock is held - only once the locking connection commits does the
-   * pending transition actually finish.
+   * Deterministic proof that a concurrent transition genuinely blocks on the row lock, unlike the
+   * latch-based {@link #exactlyOneOfTwoConcurrentTerminalAttemptsOnTheSameRunWins} stress test
+   * below, which could pass even if a scheduler just serialized the two attempts.
    */
   @Test
   void aSecondTransactionBlocksUntilTheFirstsRowLockIsReleased() throws Exception {
@@ -562,15 +543,10 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * The scenario {@code RunService}'s own cancel-racing-completion concern is really about: two
-   * genuinely concurrent connections both try to finalize the same {@code RUNNING} run to a
-   * different terminal status. {@code SELECT ... FOR UPDATE} means one blocks until the other
-   * commits, then observes the row as already terminal and backs off - exactly one wins, matching
-   * {@code RunRepository#transitionIfNonTerminal}'s own "benign lost race" contract. (This proves
-   * only DB-writer serialization, not the full in-process publish lock D2.3 still owes - see {@link
-   * JdbcRunStore}'s own Javadoc.) A stress companion to {@link
-   * #aSecondTransactionBlocksUntilTheFirstsRowLockIsReleased}'s deterministic proof above, not a
-   * replacement for it.
+   * Models {@code RunService}'s cancel-vs-completion race: two connections finalize the same run to
+   * different terminal statuses; {@code SELECT ... FOR UPDATE} ensures exactly one wins. Proves
+   * only DB-writer serialization, not the in-process publish lock - a stress companion to {@link
+   * #aSecondTransactionBlocksUntilTheFirstsRowLockIsReleased}, not a replacement.
    */
   @Test
   void exactlyOneOfTwoConcurrentTerminalAttemptsOnTheSameRunWins() throws Exception {
@@ -641,29 +617,16 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * [P1] fix - the previous version of this test attempted a {@code STARTING} transition with a
-   * {@code RUN_STARTED} event factory attached. Since the D2.3 review round's [P1] fix made {@code
-   * STARTING} require {@code event == null} (see {@code
-   * RunEventValidation#requireLifecycleEventMatches}), that combination is now rejected by
-   * Java-level validation before any SQL runs at all - the conflicting-sequence primary-key
-   * violation this test exists to force was never actually reached, and the broad {@code
-   * RuntimeException} assertion (an {@code IllegalArgumentException} is also a {@code
-   * RuntimeException}) silently hid that the test had stopped testing what its name claims. Fixed
-   * by first legitimately reaching {@code STARTING} with no event (as {@code
-   * RunLifecycleCoordinator#markStarting} itself does), then forcing the conflict on the
-   * <em>next</em> transition ({@code STARTING -> RUNNING} with a {@code RUN_STARTED} event, the
-   * combination that combination actually requires), and asserting the concrete {@link
-   * DuplicateKeyException} Spring's own exception translation produces for a Postgres primary-key
-   * violation - not just "some RuntimeException was thrown".
+   * Forces a real Postgres primary-key violation, not Java-level validation, by legitimately
+   * reaching {@code STARTING} first then colliding the next event's sequence. Asserts the concrete
+   * {@link DuplicateKeyException} to confirm the DB was actually reached.
    */
   @Test
   void aConflictingEventInsertRollsBackTheStatusChangeToo() throws SQLException {
     String runId = newRunId();
     Instant requestedAt = Instant.parse("2026-01-01T00:00:00Z");
     queueAndStart(runId, requestedAt);
-    // Reset the counter back to 1 to simulate the exact inconsistency this test needs: the next
-    // event insert will collide with the RUN_QUEUED row already at sequence 1, deterministically
-    // forcing the primary-key violation this test needs, without touching any other constraint.
+    // Forces the next event insert to collide with the existing sequence-1 row.
     try (Connection connection =
             DriverManager.getConnection(jdbcUrl, POSTGRES.getUsername(), POSTGRES.getPassword());
         PreparedStatement statement =
@@ -690,13 +653,9 @@ class JdbcRunStoreTest {
   }
 
   /**
-   * [P1] fix - the acceptance matrix also calls for the opposite direction: the event insert half
-   * of the transaction succeeds, but the subsequent {@code UPDATE runs} then fails - the whole
-   * transaction, including that already-inserted event, must still roll back completely. Nothing in
-   * this schema can naturally fail only the {@code UPDATE runs} half on demand, so this test
-   * installs a temporary Postgres trigger that unconditionally rejects any {@code UPDATE} on {@code
-   * runs} for the whole duration of the {@code try} block, and removes it again in a {@code
-   * finally} - it must never leak into any other test sharing this class's static container/schema.
+   * Opposite direction of the rollback proof: the event insert succeeds but the subsequent {@code
+   * UPDATE runs} fails, forced via a temporary Postgres trigger (removed in {@code finally} so it
+   * never leaks into other tests sharing this class's static schema).
    */
   @Test
   void aFailingRunsRowUpdateRollsBackTheAlreadyInsertedEventToo() throws SQLException {
@@ -722,9 +681,8 @@ class JdbcRunStoreTest {
     assertThat(afterFailedAttempt.status())
         .as("the RUNNING transition must not have survived the rolled-back transaction")
         .isEqualTo(RunStatus.STARTING);
-    // The RUN_STARTED event insert succeeded before the failing UPDATE - if the transaction were
-    // not fully atomic, this count would be 2, not 1: the event durably committed on its own even
-    // though the run's own status update failed.
+    // If the transaction weren't atomic, this would be 2: the event would have durably committed
+    // even though the status update failed.
     assertEventCount(runId, 1);
   }
 
@@ -830,17 +788,13 @@ class JdbcRunStoreTest {
     Instant sameFinish = Instant.parse("2026-06-01T00:00:00Z");
     String earlierRequested = newRunId();
     String laterRequested = newRunId();
-    // requestedAt must be <= finishedAt (chk_runs_finished_at_after_requested) - both comfortably
-    // before sameFinish.
+    // requestedAt must be <= finishedAt (chk_runs_finished_at_after_requested).
     seedTerminalRun(earlierRequested, sameFinish.minus(Duration.ofDays(2)), sameFinish);
     seedTerminalRun(laterRequested, sameFinish.minus(Duration.ofDays(1)), sameFinish);
 
-    // Same finished_at for both - requested_at DESC must break the tie: laterRequested outranks
-    // earlierRequested. This test class shares one accumulating Postgres schema across every test
-    // method, so the eligible set at maxCount=1 also includes whatever other tests' own runs
-    // happen to rank below the single most-recent row overall - only laterRequested (the most
-    // recent finished_at seeded anywhere in this shared class) is guaranteed to be rank 1 and thus
-    // excluded; every assertion below is scoped to these two specific runIds, not the full set.
+    // Same finished_at for both - requested_at DESC breaks the tie. This class shares one
+    // accumulating schema across test methods, so assertions below are scoped to these two
+    // runIds only, not the full eligible set.
     List<String> first =
         store.findEligibleForCleanup(sameFinish.plusSeconds(1), Duration.ofDays(36500), 1);
     List<String> second =
@@ -932,9 +886,8 @@ class JdbcRunStoreTest {
 
   /**
    * Proves {@code chk_runs_cleanup_only_when_terminal}/{@code
-   * chk_runs_artifacts_purge_only_when_terminal} as real database invariants - not just something
-   * {@link JdbcRunStore#claimForCleanup}/{@link JdbcRunStore#claimForArtifactPurge}'s own {@code
-   * WHERE status IN (...)} clause is trusted to always get right.
+   * chk_runs_artifacts_purge_only_when_terminal} as real DB constraints, not just something the
+   * repository's own {@code WHERE status IN (...)} clause is trusted to get right.
    */
   @Test
   void retentionColumnsCanOnlyEverBeSetForATerminalRunAtTheDatabaseLevel() throws SQLException {

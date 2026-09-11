@@ -66,9 +66,9 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for the review's finding: nothing previously proved the request body's own
-   * {@code testKeys} actually reach {@link RunService#submit}, or that the response's {@code
-   * selectedTests} reflects what the service returned rather than some other hardcoded shape.
+   * Proves the request body's {@code testKeys} actually reach {@link RunService#submit}, and that
+   * the response's {@code selectedTests} reflects what the service returns rather than a hardcoded
+   * shape.
    */
   @Test
   void createPassesTestKeysThroughAndReturnsTheMatchingSelectionSnapshot() throws Exception {
@@ -149,10 +149,9 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for D3.3: {@code @Size(max = 25)} on {@code testKeys} is a defense-in-depth
-   * layer independent of {@code CustomTestSelectionValidator}'s own identical 25-key cap - this
-   * proves Bean Validation itself rejects an oversized list with a plain {@code 400}, before the
-   * service layer (and its live-catalog lookup) is ever reached at all.
+   * {@code @Size(max = 25)} on {@code testKeys} is defense-in-depth, independent of {@code
+   * CustomTestSelectionValidator}'s identical cap - proves Bean Validation rejects an oversized
+   * list with {@code 400} before the service layer's live-catalog lookup ever runs.
    */
   @Test
   void createReturns400ForMoreThan25TestKeys() throws Exception {
@@ -174,8 +173,8 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for D3.3: the per-key length cap guards against a single absurdly long string
-   * inflating the request body without tripping the list-size check above.
+   * The per-key length cap guards against a single absurdly long string inflating the request body
+   * without tripping the list-size check above.
    */
   @Test
   void createReturns400ForATestKeyLongerThan200Characters() throws Exception {
@@ -194,10 +193,8 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for D3.3: confirms Jackson's own default behavior (not a code change made here)
-   * already rejects an unknown/extra JSON field with a plain {@code 400} rather than silently
-   * ignoring it - verified directly rather than assumed, per this project's own discipline of
-   * checking a default before adding redundant handling for it.
+   * Confirms Jackson's default behavior already rejects an unknown JSON field with {@code 400},
+   * rather than silently ignoring it - no code change needed here.
    */
   @Test
   void createReturns400ForAnUnknownJsonField() throws Exception {
@@ -217,10 +214,9 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for the review's requirement: an exception the service layer never anticipated
-   * must still surface as 500 with a generic message, never {@code exception.getMessage()} - see
-   * {@link RunExceptionHandlerTest} for the handler-level proof that the original exception is
-   * still logged, not just swallowed.
+   * An unanticipated service-layer exception must surface as 500 with a generic message, never
+   * {@code exception.getMessage()}. See {@link RunExceptionHandlerTest} for the handler-level proof
+   * it's still logged, not swallowed.
    */
   @Test
   void createReturns500WithAGenericMessageForAnUnexpectedException() throws Exception {
@@ -318,10 +314,11 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for the D2.5 review's finding: {@code cancel()} was not gated by {@link
-   * dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService}, so a cancel request
-   * arriving while the runner is still recovering non-terminal runs from a restart could reach a
-   * stale, no-longer-tracked run and surface as a raw {@code 500} instead of a clear {@code 503}.
+   * {@code cancel()} must be gated by {@link
+   * dev.vlaisanem.automation.runner.service.orchestration.RunRecoveryService}: a cancel request
+   * arriving while the runner is still recovering non-terminal runs from a restart could otherwise
+   * reach a stale, no-longer-tracked run and surface as raw {@code 500} instead of a clear {@code
+   * 503}.
    */
   @Test
   void cancelReturns503WhenTheRunnerIsStillRecoveringFromARestart() throws Exception {
@@ -331,13 +328,10 @@ class RunControllerTest {
   }
 
   /**
-   * Regression test for the review's finding: a test that only checks the HTTP status stays green
-   * even if {@code spring.mvc.problemdetails.enabled} were removed, silently regressing the
-   * framework-triggered error shape back to Spring's classic {@code {timestamp,status,error,path}}
-   * body - a completely different shape from our own {@code ProblemDetail} responses that the
-   * frontend would then have to special-case. Locks the actual contract instead: {@code
-   * application/problem+json} content type plus the {@code status}/{@code title}/{@code
-   * detail}/{@code instance} fields.
+   * Locks the actual contract ({@code application/problem+json} content type plus {@code
+   * status}/{@code title}/{@code detail}/{@code instance}), not just HTTP status - a bare status
+   * check would stay green even if {@code spring.mvc.problemdetails.enabled} were removed, silently
+   * reverting to Spring's classic {@code {timestamp,status,error,path}} shape.
    */
   private static ResultActions assertProblemDetailShape(
       ResultActions actions, int status, String title) throws Exception {

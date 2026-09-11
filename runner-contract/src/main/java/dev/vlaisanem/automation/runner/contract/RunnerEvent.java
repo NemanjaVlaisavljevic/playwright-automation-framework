@@ -4,23 +4,19 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * Event envelope shared between the JUnit listener, the {@code Steps} API, and the runner service,
- * schema version 1.1. The runner service owns run-level lifecycle events; the listener owns
- * test-level execution events; the {@code Steps} API (main automation suite) owns step-level
- * events. The contract is deliberately framework-agnostic (no serialization annotations), so each
- * side configures its own JSON mapper.
+ * Event envelope shared between the JUnit listener, the {@code Steps} API, and runner-service,
+ * schema version 1.1. Framework-agnostic (no serialization annotations) - each side configures its
+ * own JSON mapper.
  *
  * @param runOutcome terminal process outcome; required for {@link EventType#RUN_FINISHED} and
  *     absent for every other event type.
  * @param testId JUnit's {@code TestIdentifier.getUniqueId()}; required for test-level and
- *     step-level types, absent for every run-level type ({@link EventType#RUN_QUEUED}, {@link
- *     EventType#RUN_STARTED}, {@link EventType#RUN_FINISHED}).
+ *     step-level types, absent for run-level types.
  * @param testDisplayName {@code TestIdentifier.getDisplayName()}; required for test-level and
  *     step-level types, absent for run-level types.
  * @param stepId opaque identifier for one step within a test, scoped to that test; required for
- *     step-level types, absent for every other event type.
- * @param stepName human-readable step name; required for step-level types, absent for every other
- *     event type.
+ *     step-level types, absent otherwise.
+ * @param stepName human-readable step name; required for step-level types, absent otherwise.
  * @param detail failure message, skip reason, or {@code null} when not applicable.
  */
 public record RunnerEvent(

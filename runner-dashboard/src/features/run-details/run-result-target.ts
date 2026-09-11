@@ -1,24 +1,14 @@
 import type { ConnectionState } from "../event-stream/use-run-event-stream";
 import type { DisplayTest } from "./run-details-view-model";
 
-/**
- * A deep-link target within one run - query parameters, never path segments (see
- * `buildRunResultUrl`'s own doc comment for why). A step is only ever addressed together with its
- * owning test, since `stepId` alone is not unique run-wide (see `RunnerEvent`'s own contract - two
- * different tests may legitimately reuse the same `stepId`).
- */
+/** A deep-link target within one run. A step is always addressed together with its owning test since `stepId` alone isn't unique run-wide. */
 export type RunResultTarget =
   | { readonly kind: "test"; readonly testId: string }
   | { readonly kind: "step"; readonly testId: string; readonly stepId: string };
 
 /**
- * A parsed URL: `"none"` when there was no attempt at a deep link at all (neither `testId` nor
- * `stepId` present) - the ordinary case for a plain `/runs/:id` URL - versus `"invalid"` when a
- * deep link was clearly *attempted* but is malformed (a blank `testId`, a `stepId` with no
- * `testId`, or a blank `stepId`). Collapsing both into a bare `undefined`, as an earlier version of
- * this function did, meant a broken link silently behaved exactly like no link at all - a real
- * review finding, since the viewer then gets no indication anything was wrong with the URL they
- * followed.
+ * `"none"` when no deep link was attempted; `"invalid"` when one was attempted but malformed (kept
+ * distinct from `"none"` so a broken link shows an error rather than silently behaving like no link).
  */
 export type ParsedRunResultTarget =
   | { readonly kind: "none" }
@@ -48,12 +38,9 @@ export function parseRunResultTarget(
 }
 
 /**
- * Builds the absolute, shareable URL for a deep link - always the full origin, per the C4.5 spec's
- * own "kopira se apsolutni URL" requirement (a copied relative path would be meaningless pasted
- * anywhere but this same tab). Query parameters, not path segments: a real JUnit unique id routinely
- * contains `/`, `[`, `]`, `:`, parentheses, and spaces (see `ArtifactController`'s own equivalent
- * reasoning for artifact ids) - `URLSearchParams` handles that encoding correctly where a raw path
- * segment could not.
+ * Builds the absolute, shareable URL for a deep link (always the full origin, since a relative
+ * path would be meaningless pasted elsewhere). Query parameters, not path segments: a JUnit unique
+ * id can contain `/`, `[`, `]`, `:`, and spaces, which `URLSearchParams` encodes correctly.
  */
 export function buildRunResultUrl(
   runId: string,
@@ -66,9 +53,7 @@ export function buildRunResultUrl(
   return `${window.location.origin}/runs/${encodeURIComponent(runId)}?${params.toString()}`;
 }
 
-/** A stable string key for a target - used to recognize "this exact target was already handled"
- * across renders/effects (see `TestResultsSection.tsx` and `RunDetailsPage.tsx`), without relying
- * on object identity (a freshly-parsed `RunResultTarget` is a new object every render). */
+/** A stable string key for a target, since a freshly-parsed `RunResultTarget` is a new object every render. */
 export function runResultTargetKey(target: RunResultTarget): string {
   return target.kind === "test"
     ? `test:${target.testId}`
@@ -85,23 +70,11 @@ export type DeepLinkStatus =
   | { readonly kind: "unavailable" };
 
 /**
- * Resolves a parsed `RunResultTarget` against the current (full, unfiltered) test list - the one
- * place that decides whether a deep link is still loading, has been found, or can no longer be
- * found. Never declares a target missing prematurely:
- * - `RECOVERING` has wiped the reducer's own test list for a fresh replay - a target genuinely
- *   already known before the gap must not flash "not found" while it rebuilds.
- * - `PROTOCOL_ERROR` (including a permanent second gap - see `use-run-event-stream.ts`) means the
- *   live event data itself is unavailable, a distinct case from "the run finished and the target
- *   never existed" - reported as its own `"unavailable"` status, not folded into either not-found
- *   case or a REST-derived 404.
- * - Otherwise, only once the *stream itself* is `CLOSED` (the reducer processed the replayed-or-live
- *   `RUN_FINISHED` event - see `use-run-event-stream.ts`) is a missing test or step ever reported as
- *   not found. Deliberately not gated on a REST-derived "is the run terminal" boolean instead: on a
- *   fresh deep-link load, `GET /runs/:id` routinely resolves *before* the SSE replay has delivered
- *   every event, so an already-terminal REST snapshot (a finished run opened well after the fact)
- *   would otherwise report "not found" for a target that is only a few more replayed events away -
- *   a real review finding. `CLOSED` inherently waits for the full replay, live or historical, since
- *   the reducer only reaches its own terminal state by actually processing `RUN_FINISHED`.
+ * Resolves a target against the current test list without declaring it missing prematurely:
+ * `RECOVERING` has wiped the test list for a fresh replay, so it reports "waiting" not "not found".
+ * `PROTOCOL_ERROR` means live data is unavailable, a distinct case from "never existed", reported
+ * as `"unavailable"`. A target is only "not found" once the stream itself reaches `CLOSED` - not
+ * gated on a REST-derived terminal status, since REST can resolve before SSE replay finishes.
  */
 export function computeDeepLinkStatus(
   target: RunResultTarget | undefined,

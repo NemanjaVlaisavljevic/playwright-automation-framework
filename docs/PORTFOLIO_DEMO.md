@@ -133,17 +133,15 @@ are the actual numbers from that session - illustrative, not guaranteed to repea
   against the local stack, landing on its own `/runs/:runId`.
 - Steps 3-4: `Progress` and "Active now" updated live while `LOCAL`/`JOURNEY` was still running,
   showing real in-flight step names.
-- Step 5, corrected after review: submitted `PUBLIC`/`FIXTURE` (via the real `POST /api/v1/runs`
-  endpoint, matching what the launch form itself calls) while `LOCAL`/`JOURNEY` (runId
-  `83ac354d-...`) was still `RUNNING` - the new run (runId `84d2907f-...`) came back and stayed
-  `QUEUED`, visibly rendered as such in both the run's own detail page and the `/runs` history
-  table (`QUEUED` above `RUNNING` in the same table, screenshot-verified), for as long as
-  `LOCAL`/`JOURNEY` kept running. The instant `LOCAL`/`JOURNEY` reached `SUCCEEDED` (41s), the
-  `FIXTURE` run automatically flipped to `RUNNING` with zero manual intervention, then reached
-  2/2 tests complete (1 passed, 1 failed) about 15s later. An earlier draft of this document
-  incorrectly claimed the two runs progress "concurrently" thanks to an "environment-scoped
-  lock" - there is no such lock; `RunService` uses one single global single-worker executor
-  regardless of environment, and this corrected script/verification reflects that.
+- Step 5: submitted `PUBLIC`/`FIXTURE` (via the real `POST /api/v1/runs` endpoint, matching what the
+  launch form itself calls) while `LOCAL`/`JOURNEY` (runId `83ac354d-...`) was still `RUNNING` - the
+  new run (runId `84d2907f-...`) came back and stayed `QUEUED`, visibly rendered as such in both the
+  run's own detail page and the `/runs` history table (`QUEUED` above `RUNNING` in the same table,
+  screenshot-verified), for as long as `LOCAL`/`JOURNEY` kept running. The instant `LOCAL`/`JOURNEY`
+  reached `SUCCEEDED` (41s), the `FIXTURE` run automatically flipped to `RUNNING` with zero manual
+  intervention, then reached 2/2 tests complete (1 passed, 1 failed) about 15s later - `RunService`
+  uses one single global single-worker executor regardless of environment, so the two runs never
+  progress concurrently.
 - Steps 6-7: the failed test's steps expanded to show the real exception text, a screenshot
   thumbnail, and a working trace download link.
 - Step 8: the failed step's "Copy link" button was clicked for real (its underlying

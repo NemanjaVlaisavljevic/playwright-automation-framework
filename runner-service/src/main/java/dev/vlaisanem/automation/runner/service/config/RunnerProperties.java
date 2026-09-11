@@ -4,26 +4,17 @@ import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * @param repoRoot directory containing the gradlew wrapper this service invokes. Defaults to {@code
- *     .} - the service is expected to be launched with the repository root as its working
- *     directory; that assumption is documented here, not silently assumed elsewhere.
+ * @param repoRoot directory containing the gradlew wrapper this service invokes; defaults to {@code
+ *     .} (the service's own working directory).
  * @param processTimeout hard deadline after which a run's Gradle process is forcibly killed.
  * @param rawEventsDir directory runner-listener writes each run's raw {@code <runId>.tests.jsonl}/
- *     {@code .tests.complete} marker files into - must match what gets passed as {@code
- *     -Drunner.rawEventsDir}. This is the listener's own, unprocessed test-event stream; the runner
- *     service's own canonical, cross-run-lifecycle event timeline lives in Postgres (see {@code
- *     RunLifecycleStore}), not on disk.
+ *     {@code .tests.complete} marker files into - must match {@code -Drunner.rawEventsDir}. The
+ *     canonical, cross-run-lifecycle event timeline lives in Postgres, not on disk.
  * @param logsDir directory containing one bounded combined stdout/stderr log per run.
  * @param testCatalogPath path (relative to {@link #repoRoot}) of the committed, JUnit-discovery-
- *     generated {@code CUSTOM}-suite test catalog - see {@code TestCatalogGenerator} in the main
- *     suite's own {@code tooling} package for how it is produced, and {@code
- *     testCatalogGenerate}/{@code testCatalogCheck} in the root {@code build.gradle} for how drift
- *     from it is caught in CI.
+ *     generated {@code CUSTOM}-suite test catalog.
  * @param artifactsDir root directory under which every run gets its own isolated subdirectory
- *     (named after its runId), passed to the spawned Gradle process as the {@code ARTIFACTS_DIR}
- *     environment variable - the same configuration key {@code TestConfig#artifactsDirectory()}
- *     already reads. Keeps screenshots/traces from two different runs (sequential or, once
- *     supported, concurrent) from ever landing in the same directory.
+ *     (named after its runId), passed to the spawned Gradle process as {@code ARTIFACTS_DIR}.
  * @param processLogMaxBytes maximum number of bytes retained in one process log.
  * @param terminationGracePeriod time allowed for graceful and then forced process-tree shutdown.
  * @param degradedPollInterval how often the background reaper re-checks a known-surviving process
@@ -32,97 +23,65 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param ingestionPollInterval how often {@code ListenerEventIngestor} re-checks the raw event file
  *     for new bytes while a run's process is still active.
  * @param ingestionDrainTimeout upper bound on how long a run's finalization waits for the ingestor
- *     to notice a stop signal and finish - the ingestor's own responsiveness to that signal (at
- *     most one {@link #ingestionPollInterval}) is what actually governs the common case; this is a
- *     safety bound against a stuck ingestion thread, not something normal completion is expected to
- *     hit.
- * @param sseMaxSubscribers maximum number of concurrent SSE event-stream subscribers the hub will
- *     accept at once - each one holds its own dedicated delivery thread for the life of the
- *     connection, so this is the bound on that thread usage, not merely a request-rate limit.
+ *     to notice a stop signal and finish; a safety bound against a stuck ingestion thread, not
+ *     something normal completion is expected to hit.
+ * @param sseMaxSubscribers maximum number of concurrent SSE event-stream subscribers the hub
+ *     accepts at once - each holds its own dedicated delivery thread, so this bounds thread usage.
  * @param sseHeartbeatInterval how often a keep-alive comment is sent on an idle SSE connection, so
- *     intermediary proxies/load balancers do not time it out as inactive.
- * @param sseEmitterTimeout hard upper bound on how long one SSE connection is kept open before the
- *     server itself completes it, independent of client behavior - the expected recovery is a
- *     client reconnect with {@code Last-Event-ID}.
- * @param oauthAuthorizationRateLimit (D3.3) per-client-IP limit on {@code GET
- *     /api/v1/auth/oauth2/authorization/github} - the redirect-starter, nearly free to call, so a
- *     looser limit than the callback below.
- * @param oauthCallbackRateLimit (D3.3) per-client-IP limit on {@code GET
- *     /api/v1/auth/oauth2/callback/github} - the one login-flow request that actually spends a real
- *     GitHub API call (the authorization-code exchange), so this is the login surface that matters
- *     most to protect.
- * @param createRunRateLimitPerMinute (D3.3) per-admin (GitHub numeric id) short-window limit on
- *     {@code POST /api/v1/runs}.
- * @param createRunRateLimitPerHour (D3.3) per-admin longer-window limit on the same endpoint,
- *     enforced independently of and in addition to {@link #createRunRateLimitPerMinute} - both must
- *     pass.
- * @param cancelRunRateLimit (D3.3) per-admin limit on {@code POST /api/v1/runs/*&#47;cancel} -
- *     tracked separately from run creation, never assumed to be equally expensive.
- * @param publicReadRateLimit (D3.3) per-client-IP limit on the anonymous, unauthenticated read-only
- *     GET routes (run list/detail, capabilities, test catalog) - the largest anonymous surface,
- *     needing no login at all.
- * @param downloadRateLimit (D3.3) per-client-IP limit on process-log/artifact download routes,
- *     tracked separately from the cheaper plain-JSON reads above.
- * @param sseMaxConnectionsPerIp (D3.3) maximum number of concurrent SSE subscriptions one client IP
- *     may hold at once - enforced in addition to, never instead of, {@link #sseMaxSubscribers}'s
- *     existing global ceiling; without this, one client alone could occupy every global slot.
- * @param maxRequestBodyBytes (D3.3) hard cap on request body size, enforced before any JSON
- *     deserialization is attempted - a real {@code CreateRunRequest} payload (environment/suite
- *     plus up to 25 short test keys) is well under this.
- * @param retentionRunHistoryMaxAge (D4.1) a terminal run is eligible for full cleanup once its
- *     {@code finished_at} is older than this - enforced together with {@link
- *     #retentionRunHistoryMaxCount} as an either-bound trigger (see {@code RetentionService}),
- *     never both required at once.
- * @param retentionRunHistoryMaxCount (D4.1) a terminal run is eligible for full cleanup once its
- *     rank (newest-first, ties broken by {@code requested_at} then {@code run_id}) among terminal,
+ *     intermediary proxies/load balancers don't time it out as inactive.
+ * @param sseEmitterTimeout hard upper bound on how long one SSE connection stays open before the
+ *     server completes it; expected recovery is a client reconnect with {@code Last-Event-ID}.
+ * @param oauthAuthorizationRateLimit per-client-IP limit on {@code GET
+ *     /api/v1/auth/oauth2/authorization/github}, the nearly-free redirect-starter.
+ * @param oauthCallbackRateLimit per-client-IP limit on {@code GET
+ *     /api/v1/auth/oauth2/callback/github}, the login-flow request that spends a real GitHub API
+ *     call.
+ * @param createRunRateLimitPerMinute per-admin (GitHub numeric id) short-window limit on {@code
+ *     POST /api/v1/runs}.
+ * @param createRunRateLimitPerHour per-admin longer-window limit on the same endpoint, enforced
+ *     independently of and in addition to {@link #createRunRateLimitPerMinute} - both must pass.
+ * @param cancelRunRateLimit per-admin limit on {@code POST /api/v1/runs/*&#47;cancel}, tracked
+ *     separately from run creation.
+ * @param publicReadRateLimit per-client-IP limit on the anonymous, unauthenticated read-only GET
+ *     routes (run list/detail, capabilities, test catalog).
+ * @param downloadRateLimit per-client-IP limit on process-log/artifact download routes, tracked
+ *     separately from the cheaper plain-JSON reads above.
+ * @param sseMaxConnectionsPerIp maximum number of concurrent SSE subscriptions one client IP may
+ *     hold, enforced in addition to {@link #sseMaxSubscribers}'s global ceiling.
+ * @param maxRequestBodyBytes hard cap on request body size, enforced before any JSON
+ *     deserialization is attempted.
+ * @param retentionRunHistoryMaxAge a terminal run is eligible for full cleanup once its {@code
+ *     finished_at} is older than this - an either-bound trigger together with {@link
+ *     #retentionRunHistoryMaxCount}, never both required at once.
+ * @param retentionRunHistoryMaxCount a terminal run is eligible for full cleanup once its rank
+ *     (newest-first, ties broken by {@code requested_at} then {@code run_id}) among terminal,
  *     not-yet-cleaned-up runs exceeds this count.
- * @param retentionArtifactMaxAge (D4.1) a terminal run's own artifact files (screenshots/traces/
- *     videos) are purged once its {@code finished_at} is older than this - measured from the run's
- *     own completion time, never from individual artifact ingestion timestamps, and always no
- *     larger than {@link #retentionRunHistoryMaxAge} (validated below) - otherwise the purge branch
- *     could never fire before full-run cleanup already deleted the run outright.
- * @param retentionCleanupInterval (D4.1) how often the background retention sweep ({@code
- *     RetentionService}) runs.
- * @param retentionRateLimit (D4.1 review round) per-admin (GitHub numeric id) limit on both {@code
- *     GET /api/v1/retention/preview} and {@code POST /api/v1/retention/run} - deliberately
- *     conservative, since a real sweep does real DB/filesystem work; without this, a valid or
- *     stolen admin session could trigger it as often as it likes. Each of the two routes is tracked
- *     as its own independent counter against this same threshold (see {@code
- *     AbuseRateLimitFilter}'s two separate {@code retention-preview}/{@code retention-run}
- *     surfaces), the same way {@code oauthAuthorizationRateLimit}/{@code oauthCallbackRateLimit}
- *     are two related but separately-tracked surfaces.
- * @param diskMinFreeBytes (D4.2) the floor that must remain free even after a newly-starting run
- *     consumes up to {@link #runMaxDiskBytes()} more - {@code DiskUsageService}'s submit/pre-launch
- *     guards reject work once usable space would drop below {@code diskMinFreeBytes +
- *     runMaxDiskBytes()}, not merely below {@code diskMinFreeBytes} itself.
- * @param artifactMaxBytes (D4.2) maximum size of a single artifact file (screenshot/trace/video) -
- *     enforced primarily at the producer (the main automation suite, a true pre-write cap for a
- *     screenshot, a post-finalization delete-and-reject for a trace) and re-checked here as a
- *     second, independent layer by {@code ArtifactManifestWriter}.
- * @param runMaxTotalArtifactBytes (D4.2) maximum total artifact bytes one run may accumulate,
- *     computed from the real artifacts directory's own contents (not an in-memory counter, which
- *     would not hold across the two independent OS processes {@code ArtifactManifestWriter} already
- *     supports) under its existing file lock.
- * @param manifestMaxBytes (D4.2) maximum size of one run's {@code manifest.jsonl} itself - enforced
- *     both at the producer ({@code ArtifactManifestWriter}, before appending a line that would
- *     exceed it) and the consumer ({@code ArtifactManifestReader}'s bounded read, which allocates a
- *     single in-memory buffer no larger than this value - see the additional ceiling validated
- *     below).
- * @param rawEventMaxBytes (D4.2) maximum size of one run's raw {@code <runId>.tests.jsonl} event
- *     stream - {@code RunnerEventJsonlWriter} stops writing on the first breach and records a
- *     distinct {@code .tests.overflow} marker instead of the normal completion marker, so {@code
- *     ListenerEventIngestor} can never mistake a truncated stream for a cleanly complete one.
- * @param managedScratchMaxBytes (D4.2) a disk-budget reservation for Gradle/JUnit report and
- *     temporary output this design does not itself enforce - a budget line, not an enforced quota,
- *     folded into {@link #runMaxDiskBytes()} so the availability guard doesn't undercount a run's
- *     real total footprint.
- * @param diskUsageRateLimit (D4.2) per-admin (GitHub numeric id) limit on {@code GET
- *     /api/v1/disk/usage} - a filesystem-tree walk plus a live Postgres size query is real work,
- *     the same reasoning {@link #retentionRateLimit} already applies to its own admin-only reads.
- * @param metricsSampleInterval (D4.3.2) how often {@code DiskMetricsSampler} recomputes {@code
- *     DiskUsageService#runnerDataBytes()}/{@code #databaseBytes()} in the background and caches the
- *     result - the same "real work, must not run on every Prometheus scrape" reasoning {@link
- *     #diskUsageRateLimit} already applies to the admin-only REST reads of the same two figures.
+ * @param retentionArtifactMaxAge a terminal run's artifact files are purged once its {@code
+ *     finished_at} is older than this; must be no larger than {@link #retentionRunHistoryMaxAge}
+ *     (validated below), otherwise the purge branch could never fire before full-run cleanup.
+ * @param retentionCleanupInterval how often the background retention sweep runs.
+ * @param retentionRateLimit per-admin limit on both {@code GET /api/v1/retention/preview} and
+ *     {@code POST /api/v1/retention/run}, tracked as two independent counters against this
+ *     threshold - deliberately conservative since a real sweep does real DB/filesystem work.
+ * @param diskMinFreeBytes the floor that must remain free even after a newly-starting run consumes
+ *     up to {@link #runMaxDiskBytes()} more.
+ * @param artifactMaxBytes maximum size of a single artifact file, enforced primarily at the
+ *     producer and re-checked here as a second, independent layer.
+ * @param runMaxTotalArtifactBytes maximum total artifact bytes one run may accumulate, computed
+ *     from the real artifacts directory's contents rather than an in-memory counter, since two
+ *     independent OS processes can write to it.
+ * @param manifestMaxBytes maximum size of one run's {@code manifest.jsonl}, enforced both at the
+ *     producer and the consumer's bounded read, which allocates a single buffer this large.
+ * @param rawEventMaxBytes maximum size of one run's raw {@code <runId>.tests.jsonl} event stream -
+ *     writing stops on the first breach with a distinct {@code .tests.overflow} marker, so a
+ *     truncated stream is never mistaken for a cleanly complete one.
+ * @param managedScratchMaxBytes a disk-budget reservation for Gradle/JUnit report and temporary
+ *     output this design does not itself enforce, folded into {@link #runMaxDiskBytes()} so the
+ *     availability guard doesn't undercount a run's real footprint.
+ * @param diskUsageRateLimit per-admin limit on {@code GET /api/v1/disk/usage}, real work (a
+ *     filesystem-tree walk plus a live Postgres size query).
+ * @param metricsSampleInterval how often {@code DiskMetricsSampler} recomputes and caches disk
+ *     usage in the background, so it need not run on every Prometheus scrape.
  */
 @ConfigurationProperties(prefix = "runner")
 public record RunnerProperties(
@@ -168,8 +127,7 @@ public record RunnerProperties(
 
   /**
    * Derived, never independently configured: the worst-case total disk one starting run can still
-   * consume across every writer it touches (artifacts, process log, raw events, manifest, and a
-   * reserve for unmanaged Gradle/JUnit scratch output) - see {@link #diskMinFreeBytes} for how the
+   * consume across every writer it touches - see {@link #diskMinFreeBytes} for how the
    * submit/pre-launch guards use this.
    */
   public long runMaxDiskBytes() {
@@ -337,12 +295,9 @@ public record RunnerProperties(
         || metricsSampleInterval.isNegative()) {
       throw new IllegalArgumentException("runner.metrics-sample-interval must be positive");
     }
-    // D4.3.2 review finding - a merely-positive sub-millisecond value (e.g. Duration.ofNanos(1))
-    // would pass the check above yet truncate to 0 via DiskMetricsSampler's own toMillis() call,
-    // which ScheduledExecutorService#scheduleWithFixedDelay then rejects outright (it requires a
-    // strictly positive delay) - failing here instead gives a clear, immediate, property-named
-    // error rather than a confusing IllegalArgumentException surfacing from deep inside
-    // java.util.concurrent during bean creation.
+    // A merely-positive sub-millisecond value would pass the check above yet truncate to 0 via
+    // toMillis(), which scheduleWithFixedDelay then rejects - fail here with a clear, property-
+    // named error instead.
     if (metricsSampleInterval.toMillis() < 1) {
       throw new IllegalArgumentException(
           "runner.metrics-sample-interval must be at least 1ms once rounded down, was: "

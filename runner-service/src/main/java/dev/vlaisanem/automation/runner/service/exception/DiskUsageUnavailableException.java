@@ -1,10 +1,9 @@
 package dev.vlaisanem.automation.runner.service.exception;
 
 /**
- * Thrown when {@code DiskUsageService} cannot determine current free disk space at all (the
- * underlying {@code FileStore} query itself failed) - deliberately a distinct, fail-closed 503, not
- * silently treated as "space available" and not left to fall through to a generic 500. A disk-space
- * guard that cannot answer its own question must refuse work, not guess.
+ * Thrown when {@code DiskUsageService} cannot determine free disk space at all (the underlying
+ * {@code FileStore} query failed). Fails closed as its own 503 rather than assuming space is
+ * available or falling through to a generic 500.
  */
 public class DiskUsageUnavailableException extends RuntimeException {
 

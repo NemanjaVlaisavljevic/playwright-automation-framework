@@ -13,26 +13,14 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * The portfolio deployment sets {@code runner.deployment-profile=PORTFOLIO} (see {@code
- * deploy/docker-compose.yml}) - proves the wiring end to end through the real HTTP contract, not
- * just {@code RunAvailabilityPolicy}/{@code CapabilitiesResponse} in isolation. A separate class
- * from {@link CapabilitiesControllerTest}, not a second {@code @Test} there, since
- * {@code @TestPropertySource} applies for the whole test class's Spring context.
+ * Proves PORTFOLIO wiring end to end via the real HTTP contract (a real deployment sets {@code
+ * runner.deployment-profile=PORTFOLIO}). Separate from {@link CapabilitiesControllerTest} because
+ * {@code @TestPropertySource} applies to the whole test class's Spring context.
  *
- * <p>Also supplies the three {@code RUNNER_SECURITY_*} properties and the Secure session cookie
- * flag a real {@code PORTFOLIO} deployment always has configured (see {@code
- * deploy/docker-compose.yml}/{@code deploy/runner-service/Dockerfile}) - {@code
- * RunnerSecurityEnvironmentPostProcessor} fails startup outright for {@code PORTFOLIO} without
- * them, in this narrow slice's own bootstrap exactly as it would for the real application. Once
- * those properties are present, Spring Boot's own {@code OAuth2ClientAutoConfiguration}/{@code
- * OAuth2ClientWebSecurityAutoConfiguration} try to build a competing default {@code
- * SecurityFilterChain} - harmless in the real application (this project's own {@code
- * SecurityConfig}/{@code @EnableWebSecurity} already satisfy their {@code HttpSecurity} dependency,
- * so they back off via {@code @ConditionalOnMissingBean}), but this narrow slice never imports that
- * wiring at all, since it tests only {@code CapabilitiesController}'s business logic - excluded
- * here for exactly that reason, the same {@code spring.autoconfigure.exclude} pattern already used
- * by {@code OpenApiContractTest}/{@code ServerBindingTest} for D2.3's DataSource/Flyway
- * autoconfiguration.
+ * <p>Supplies the {@code RUNNER_SECURITY_*} properties and Secure cookie flag a real PORTFOLIO
+ * deployment always has, since {@code RunnerSecurityEnvironmentPostProcessor} fails startup for
+ * PORTFOLIO without them; OAuth2 client autoconfiguration is excluded since this slice never
+ * imports the security wiring it would otherwise compete with.
  */
 @WebMvcTest(controllers = CapabilitiesController.class)
 @Import(RunAvailabilityConfig.class)

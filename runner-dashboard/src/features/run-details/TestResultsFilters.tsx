@@ -5,11 +5,7 @@ import {
 } from "./test-results-filter";
 import styles from "./RunDetailsPage.module.css";
 
-/**
- * Fixed, not derived from whichever statuses happen to be present in the current run - a filter
- * option must never disappear just because, say, the last `RUNNING` test finished, or a viewer
- * could lose their own selection mid-run without ever touching it themselves.
- */
+/** Fixed, not derived from statuses present in the current run, so an option never disappears mid-run. */
 const STATUS_OPTIONS: ReadonlyArray<{
   readonly value: TestStatusFilter;
   readonly label: string;
@@ -102,8 +98,7 @@ export function TestResultsFilters({
       <button type="button" className={styles.copyButton} onClick={onClear}>
         Clear filters
       </button>
-      {/* Visible count, and `aria-live="polite"` on the same element so a screen reader also hears
-          it update on every filter change - one element serving both, not a separate hidden copy. */}
+      {/* aria-live on the same element so a screen reader hears the count update too. */}
       <p className={styles.filterCount} aria-live="polite">
         {`Showing ${visibleCount} of ${totalCount} tests.`}
       </p>

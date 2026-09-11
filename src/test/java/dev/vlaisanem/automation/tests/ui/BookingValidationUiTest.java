@@ -74,20 +74,12 @@ class BookingValidationUiTest {
           "Enter guest details with an empty name",
           () -> reservation.fillGuestDetails("", "", "portfolio.guest@example.com", "07123456789"));
 
-      // Empirically confirmed against the running app (and its source,
-      // assets/src/components/reservation/BookingForm.tsx): the reservation form does not block an
-      // empty guest name client-side - the request always reaches the server and is rejected there
-      // (400, with the same missing-name validation errors BookingWriteProtectionApiTest already
-      // documents at the API level). submitBooking() does not tolerate a missing response - a
-      // genuine interaction failure (e.g. the click not firing a request at all) must fail this
-      // test, not be silently read as "validation worked".
+      // The reservation form does not block an empty name client-side; the request always
+      // reaches the server, which rejects it (400).
       ApiResult response = steps.call("Submit the booking", reservation::submitBooking);
 
-      // Guards against a validation regression that starts accepting this (201): the same
-      // pattern BookingWriteProtectionApiTest already uses for its API-level equivalent. If the
-      // assertion below ever fails because the server actually created a booking, that booking is
-      // still cleaned up rather than left behind - trackIfCreated returns null here for the
-      // expected 400 case, so close() on a null-tracked resource is simply a no-op.
+      // trackIfCreated cleans up if this ever regresses to a 201; it's a no-op for the
+      // expected 400.
       try (ManagedBooking unexpected = ManagedBooking.trackIfCreated(bookings, response)) {
         steps.run(
             "Verify booking rejected",

@@ -39,9 +39,9 @@ class DiskHealthIndicatorTest {
   }
 
   /**
-   * A probe that cannot determine free space at all is a genuine failure (fail-closed, matching
-   * D4.2's own philosophy) - deliberately distinct from the merely-low-disk case above, which
-   * reports the softer, self-resolving {@code OUT_OF_SERVICE} instead.
+   * A probe that cannot determine free space at all is a genuine failure (fail-closed) - distinct
+   * from the merely-low-disk case above, which reports the softer, self-resolving {@code
+   * OUT_OF_SERVICE}.
    */
   @Test
   void reportsDownWhenTheDiskUsageProbeItselfFails() {

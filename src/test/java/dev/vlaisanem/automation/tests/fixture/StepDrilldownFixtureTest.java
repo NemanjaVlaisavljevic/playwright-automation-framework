@@ -13,17 +13,9 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * A deliberately, deterministically failing fixture - not a real Restful Booker Platform feature
- * test. It exists to exercise the runner's step/failure/artifact drill-down end to end (Faza B)
- * without depending on the shared public app ever actually misbehaving: the first two steps do
- * real, harmless read-only work against the app; the third step asserts something that is always
- * false, independent of anything the app does.
- *
- * <p>Tagged {@code fixture} and excluded from every real suite at the Gradle level (see
- * build.gradle's {@code excludeTags 'fixture'}) - {@code regression} is still present because
- * {@code AutomationExtension} requires it unconditionally on every test regardless of suite
- * membership. Run on demand via the {@code fixtureTest} Gradle task or the runner's {@code FIXTURE}
- * suite.
+ * Deliberately, deterministically fails its third step to exercise the runner's step/failure/
+ * artifact drill-down. The first two steps do real read-only work; the third always fails,
+ * independent of the app under test. Run via the {@code fixtureTest} Gradle task.
  */
 @AutomationTest
 @Tag("ui")

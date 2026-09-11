@@ -5,15 +5,11 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Validates a deserialized catalog before {@link TestCatalogService} ever exposes it. The catalog
- * file ships with the repository and {@code testCatalogCheck} (root {@code build.gradle}) plus
- * {@code TestCatalogGenerator} (main test suite) already guard it at generation time - but {@link
- * TestCatalogService} re-reads the file fresh off disk on every call in a deployed process, and
- * must treat it as untrusted input, not an inherently safe artifact: a corrupted or hand-edited
- * file could otherwise silently change what {@link
- * dev.vlaisanem.automation.runner.service.orchestration.CustomTestSelectionValidator} accepts as a
- * legal {@code --tests} filter. Mirrors the same checks the generator enforces, applied again here
- * at load time.
+ * Validates a deserialized catalog before {@link TestCatalogService} ever exposes it. {@link
+ * TestCatalogService} re-reads the file fresh off disk on every call in a deployed process and must
+ * treat it as untrusted input: a corrupted or hand-edited file could otherwise silently change what
+ * {@link dev.vlaisanem.automation.runner.service.orchestration.CustomTestSelectionValidator}
+ * accepts as a legal {@code --tests} filter.
  */
 final class TestCatalogContentValidator {
 

@@ -61,9 +61,7 @@ describe("RunsTable", () => {
       http.get("/api/v1/runs", () =>
         HttpResponse.json([
           run({ runId: "run-queued", status: "QUEUED" }),
-          // STARTING but not yet startedAt: the backend can sit here while waiting out a DEGRADED
-          // runner, before ProcessLauncher.start() has ever run - the log file does not exist yet,
-          // so this must not show a Download log link either, same as QUEUED.
+          // STARTING but not yet startedAt: no Download log link either, same as QUEUED.
           run({ runId: "run-starting", status: "STARTING" }),
           run({
             runId: "run-running",
@@ -76,8 +74,7 @@ describe("RunsTable", () => {
             startedAt: "2026-09-01T10:00:05Z",
             finishedAt: "2026-09-01T10:01:05Z",
           }),
-          // Cancelled while still QUEUED, before any process launch - terminal, but startedAt was
-          // never set (Run's own constructor forbids it outside RUNNING/later).
+          // Cancelled while still QUEUED - terminal, but startedAt was never set.
           run({ runId: "run-cancelled-early", status: "CANCELLED" }),
         ]),
       ),
@@ -208,9 +205,7 @@ describe("RunsTable", () => {
     await user.click(rowA.getByRole("button", { name: "Cancel" }));
     expect(rowA.getByRole("button", { name: "Cancel" })).toBeDisabled();
 
-    // With a single mutation observer shared across the whole table, calling mutate() for B here
-    // would flip the shared `variables` to B and incorrectly re-enable A's button while A's own
-    // cancel request is still in flight - this is exactly the bug a per-row mutation instance fixes.
+    // Proves cancels are independent per row, not sharing one mutation's state.
     await user.click(rowB.getByRole("button", { name: "Cancel" }));
     expect(rowA.getByRole("button", { name: "Cancel" })).toBeDisabled();
 
@@ -231,9 +226,7 @@ describe("RunsTable", () => {
       ),
     ).toBeInTheDocument();
 
-    // The backend recovers - restore the default (empty-list) handler from src/test/msw/handlers.ts.
-    // Nothing re-renders or remounts here; only the next poll (which must not have stopped just
-    // because the very first attempt failed with no data yet) picks this up.
+    // Restores the default handler; only the next poll picks it up, nothing remounts.
     server.resetHandlers();
 
     expect(await screen.findByText("No runs yet.")).toBeInTheDocument();
@@ -343,10 +336,7 @@ describe("RunsTable", () => {
     await user.selectOptions(await screen.findByLabelText("Status"), "RUNNING");
     expect(screen.getByRole("cell", { name: "RUNNING" })).toBeInTheDocument();
 
-    // The run finishes - the next poll's data no longer contains any "RUNNING" run at all. The
-    // filter itself must not silently change (masking it as "All" would let it silently "re-arm"
-    // with no user action the moment a RUNNING run reappears later - see the next test) - it stays
-    // exactly "RUNNING", honestly reported as matching nothing right now.
+    // The filter must not silently change to "All" once no run matches it.
     finished = true;
 
     await waitFor(() => {
@@ -410,9 +400,7 @@ describe("RunsTable", () => {
     await user.selectOptions(await screen.findByLabelText("Status"), "RUNNING");
     expect(screen.getByRole("cell", { name: "RUNNING" })).toBeInTheDocument();
 
-    // Poll 2: run-1 finished - every run is now terminal, so the table's own polling stops on its
-    // own (already covered by another test); nothing left running is exactly what "honestly shows
-    // no matches" needs to be verified against.
+    // Poll 2: run-1 finished - every run is now terminal, so polling stops on its own.
     poll = 2;
     await waitFor(() => {
       expect(
@@ -421,15 +409,11 @@ describe("RunsTable", () => {
     });
     expect(screen.getByLabelText("Status")).toHaveValue("RUNNING");
 
-    // Poll 3: a *new* run starts RUNNING (simulated the same way a real launch would trigger it -
-    // RunLaunchForm invalidates ["runs"] on success - since the table's own interval already
-    // stopped polling once poll 2 looked fully terminal).
+    // Poll 3: a new run starts RUNNING, simulated via the same invalidation a real launch triggers.
     poll = 3;
     await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
 
-    // The filter was never actually cleared, so it applies naturally the moment a matching run
-    // exists again - this is not a "silent reactivation," since `statusFilter` itself never left
-    // "RUNNING" at any point above.
+    // The filter was never cleared, so it applies naturally - not a "silent reactivation".
     expect(
       await screen.findByRole("cell", { name: "RUNNING" }),
     ).toBeInTheDocument();

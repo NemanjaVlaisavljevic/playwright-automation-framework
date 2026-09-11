@@ -12,20 +12,11 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * A controlled fixture proving the dashboard's cancellation reconciliation (a test/step relabeled
- * {@code INTERRUPTED} once the run ends while it was still {@code RUNNING} - see {@code
- * run-details-view-model.ts}): its second step deliberately blocks for a fixed, generous duration
- * so a real E2E test ({@code CancelE2eTest}) can reliably observe {@code STEP_STARTED} already
- * reported with no terminal event yet, before cancelling the run - rather than racing an ordinary
- * suite's own unpredictable timing (the exact review finding this fixture exists to fix).
+ * Deliberately blocks mid-step so {@code CancelE2eTest} can cancel it deterministically, verifying
+ * cancellation/{@code INTERRUPTED} reconciliation. Run via the {@code fixtureTest} Gradle task.
  *
- * <p>The blocking {@code Thread.sleep} below is a deliberate, narrowly-scoped exception to this
- * project's "never {@code Thread.sleep}" rule: this is test <em>infrastructure</em> simulating a
- * long-running step for another test's own timing needs, not a functional assertion standing in for
- * a proper Playwright wait. Never included in any real suite - see the {@code fixture} tag's own
- * handling in {@code build.gradle}, identical to {@link StepDrilldownFixtureTest}. Run on demand
- * via the {@code fixtureTest} Gradle task or the runner's {@code FIXTURE} suite, alongside that
- * other fixture - a viewer of a {@code FIXTURE} run will see both.
+ * <p>The {@code Thread.sleep} below is an intentional exception to this project's no-sleep rule: it
+ * simulates a long-running step for another test's timing needs, not a functional wait.
  */
 @AutomationTest
 @Tag("ui")
@@ -38,10 +29,8 @@ import org.junit.jupiter.api.Test;
 class CancelDuringStepFixtureTest {
 
   /**
-   * Long enough that a real E2E test (a network round trip plus a couple of Playwright actions)
-   * reliably observes this step's own {@code STEP_STARTED} before cancelling; short enough not to
-   * meaningfully slow down the existing {@code StepDrilldownE2eTest}, which also launches {@code
-   * FIXTURE} and therefore waits out this same block on every run.
+   * Long enough for a real E2E test to observe {@code STEP_STARTED} before cancelling; short enough
+   * not to slow down {@code StepDrilldownE2eTest}, which also waits through this block.
    */
   private static final Duration BLOCK_DURATION = Duration.ofSeconds(8);
 

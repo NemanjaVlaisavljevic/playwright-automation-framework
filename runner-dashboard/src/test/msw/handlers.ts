@@ -3,15 +3,12 @@ import { CURRENT_SCHEMA_VERSION } from "../../domain/runner-event";
 
 /**
  * Default happy-path handlers used by every test unless overridden with `server.use(...)` for a
- * specific case (error paths, etc.) - keeps most tests from having to mock every endpoint they
- * incidentally touch (e.g. any test that renders `RunListPage`).
+ * specific case.
  */
 export const handlers = [
   http.get("/actuator/health", () => HttpResponse.json({ status: "UP" })),
-  // Defaults to "can manage runs, logged in as the allowlisted admin" - most existing tests
-  // exercise launch/cancel and were written before D3.2's auth gating existed; overridden with
-  // `server.use(...)` for a specific permissive/anonymous/login-flow test instead of touching
-  // every one of those call sites.
+  // Defaults to "logged in, can manage runs"; override with `server.use(...)` for
+  // anonymous/login-flow tests.
   http.get("/api/v1/auth/me", () =>
     HttpResponse.json({
       authenticationRequired: true,

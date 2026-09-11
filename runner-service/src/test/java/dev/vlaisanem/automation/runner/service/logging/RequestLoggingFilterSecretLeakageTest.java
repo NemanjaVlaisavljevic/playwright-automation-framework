@@ -22,12 +22,10 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * D4.3.3 review finding - a real adversarial proof, not just a source-code grep: sends a real
- * request carrying sentinel values in {@code Authorization}, {@code Cookie}, an OAuth-shaped {@code
- * code}/{@code state} query parameter, and the request body, then confirms none of them ever reach
- * the real captured access-log event - proving {@link RequestLoggingFilter}'s own "only
- * method/route/status/duration, by construction" design holds against a real running application,
- * not merely by inspection of its source.
+ * Sends a real request carrying sentinel secrets in {@code Authorization}, {@code Cookie}, an OAuth
+ * {@code code}/{@code state} query parameter, and the body, then proves none reach the captured
+ * access-log event - verifying {@link RequestLoggingFilter}'s "only method/route/status/duration"
+ * design against a running app, not just by reading its source.
  */
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,

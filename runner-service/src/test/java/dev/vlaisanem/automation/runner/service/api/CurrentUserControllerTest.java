@@ -11,13 +11,12 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.core.user.DefaultOAuth2User;
 
 /**
- * Plain unit tests, no Spring context - {@link CurrentUserController#currentUser} is a pure
- * function of {@link RunnerSecurityProperties} and the current {@code Authentication}, and
- * exercising all three real-world outcomes this way is far simpler than wiring a full
- * {@code @WebMvcTest} slice for each. Regression tests for the review finding that conflating
- * "authenticated" with "can manage runs" made a permissive-chain deployment (no GitHub OAuth2
- * configured - default local {@code bootRun}, {@code dashboardE2eTest}) silently read-only: {@code
- * canManageRuns} must stay {@code true} there even though nobody is ever "authenticated" as anyone.
+ * Plain unit tests: {@link CurrentUserController#currentUser} is a pure function of {@link
+ * RunnerSecurityProperties} and the current {@code Authentication}, simpler than wiring a full
+ * {@code @WebMvcTest} slice per case. In a permissive-chain deployment (no GitHub OAuth2 configured
+ * - default local {@code bootRun}, {@code dashboardE2eTest}), {@code canManageRuns} must stay
+ * {@code true} even though nobody is ever "authenticated" - conflating the two concepts would
+ * silently make that deployment read-only.
  */
 class CurrentUserControllerTest {
 
@@ -46,12 +45,11 @@ class CurrentUserControllerTest {
   }
 
   /**
-   * Regression test for the review finding: {@code canManageRuns} must come from the real {@code
-   * ROLE_ADMIN} authority, not merely from the principal being an {@link
-   * org.springframework.security.oauth2.core.user.OAuth2User} - a logged-in GitHub identity with no
-   * {@code ROLE_ADMIN} authority (never actually produced by {@code GithubOAuth2UserService} today,
-   * but exactly the kind of drift this explicit check guards against) must be reported as
-   * authenticated without permission, not silently treated as the admin.
+   * {@code canManageRuns} must come from the real {@code ROLE_ADMIN} authority, not merely from the
+   * principal being an {@link org.springframework.security.oauth2.core.user.OAuth2User}: a
+   * logged-in identity with no {@code ROLE_ADMIN} authority must report as authenticated without
+   * permission, never as admin. {@code GithubOAuth2UserService} never produces this today, but this
+   * guards against future drift.
    */
   @Test
   void oauth2EnabledAuthenticatedNonAdminCannotManageRuns() {
@@ -65,11 +63,8 @@ class CurrentUserControllerTest {
                 "login", "someone-else",
                 "avatar_url", "https://example.invalid/other-avatar.png"),
             "id");
-    // The 3-arg (principal, credentials, authorities) constructor is required, not the 2-arg
-    // form: TestingAuthenticationToken's 2-arg constructor discards the principal's own
-    // authorities entirely (authorities become an empty collection) and defaults isAuthenticated
-    // to false, unlike a real post-OAuth2-login SecurityContext where both the ROLE_USER/
-    // ROLE_ADMIN authority and isAuthenticated=true come from the completed login itself.
+    // The 3-arg constructor is required: the 2-arg form discards the principal's authorities and
+    // defaults isAuthenticated to false, unlike a real post-OAuth2-login SecurityContext.
     var authentication =
         new TestingAuthenticationToken(oauth2User, null, oauth2User.getAuthorities());
 

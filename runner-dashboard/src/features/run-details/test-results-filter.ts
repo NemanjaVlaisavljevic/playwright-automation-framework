@@ -1,10 +1,6 @@
 import type { DisplayTest, DisplayTestStatus } from "./run-details-view-model";
 
-/**
- * `"ALL"`/`"PROBLEMS"` are display-only groupings with no counterpart in `DisplayTestStatus` -
- * every other value is exactly a `DisplayTestStatus`, so a future status added there flows into
- * this union automatically rather than needing its own separate literal kept in sync by hand.
- */
+/** `"ALL"`/`"PROBLEMS"` are display-only groupings; every other value is a real `DisplayTestStatus`. */
 export type TestStatusFilter = "ALL" | "PROBLEMS" | DisplayTestStatus;
 
 export type EvidenceFilter = "ALL" | "HAS_ARTIFACTS" | "NO_ARTIFACTS";
@@ -23,34 +19,20 @@ export const DEFAULT_TEST_RESULTS_FILTER: TestResultsFilter = {
 
 export interface FilteredTestResult {
   readonly test: DisplayTest;
-  /** Step-name search matches within this test, by `stepId` - informational (no highlighting is
-   * rendered from this yet), kept as its own field so the matching logic stays independently
-   * testable from whatever the UI eventually does with it. */
+  /** Step-name search matches within this test, by `stepId`; no highlighting rendered from this yet. */
   readonly matchedStepIds: ReadonlySet<string>;
-  /** `true` when a step matched the current search - the caller (`TestResultsSection`) uses this
-   * to temporarily show the test's full step list for context, without touching the user's own
-   * manual expand/collapse choice underneath it. */
+  /** True when a step matched, so `TestResultsSection` can temporarily show the step list for context. */
   readonly forceExpandedForSearch: boolean;
 }
 
-/**
- * `FAILED`/`ABORTED` are real terminal outcomes; `INTERRUPTED` is the view model's own display-only
- * relabeling (see `run-details-view-model.ts`) for a test that never got to report one because the
- * run ended first - all three read as "something went wrong here" to a viewer, so "Problems" groups
- * them rather than making a viewer pick each one individually.
- */
+/** Statuses that read as "something went wrong" to a viewer - grouped under "Problems". */
 const PROBLEM_STATUSES: ReadonlySet<DisplayTestStatus> = new Set([
   "FAILED",
   "ABORTED",
   "INTERRUPTED",
 ]);
 
-/**
- * Filters (and, for a step-name match, flags for temporary expansion) `tests` for the C4.4 Tests
- * section - a pure function over already-computed `DisplayTest`s, never touching the SSE reducer or
- * event/wire state. Preserves `tests`' own order (already `firstSequence`-sorted upstream) - this
- * never re-sorts, since that order is the run's real execution timeline.
- */
+/** Pure filter over already-computed `DisplayTest`s. Preserves `tests`' order; never re-sorts. */
 export function filterTestResults(
   tests: readonly DisplayTest[],
   filter: TestResultsFilter,
@@ -103,8 +85,7 @@ function matchesEvidence(test: DisplayTest, evidence: EvidenceFilter): boolean {
   }
 }
 
-/** Never searches failure detail/stack trace text - deliberately out of scope for this phase, see
- * the C4.4 spec's own reasoning (noise, and expensive over a large result set). */
+/** Never searches failure detail/stack trace text - too noisy and expensive over a large result set. */
 function testNameMatches(test: DisplayTest, search: string): boolean {
   return (
     test.testDisplayName.toLowerCase().includes(search) ||

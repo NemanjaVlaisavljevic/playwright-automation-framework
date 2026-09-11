@@ -6,18 +6,13 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.1 - the periodic background trigger for {@link RetentionService#sweep}. {@code initialDelay =
- * 0} so a run left tombstoned/claimed by a crash mid-cleanup is resumed promptly on the very next
- * startup, not only after waiting out a full {@code runner.retention-cleanup-interval} - the same
- * "don't leave a known-bad state sitting" reasoning {@code RunRecoveryService} already applies at
- * startup, just for a periodic job instead of a one-time gate.
+ * The periodic background trigger for {@link RetentionService#sweep}. {@code initialDelay = 0} so a
+ * run left tombstoned/claimed by a crash mid-cleanup is resumed promptly on the next startup,
+ * rather than waiting out a full {@code runner.retention-cleanup-interval}.
  *
- * <p>{@link RetentionService#sweep} already isolates and logs every individual run/artifact-purge
- * failure internally (see its own Javadoc) - this class only needs to log the resulting {@link
- * RetentionReport} itself, and to catch a failure in {@code sweep} as a whole (e.g. the database
- * being briefly unreachable), which must never propagate out of a {@code @Scheduled} method: Spring
- * silently stops scheduling further invocations of a method that throws, which would otherwise turn
- * one transient failure into "retention never runs again for the life of this process."
+ * <p>{@link RetentionService#sweep} already isolates and logs every per-item failure; this class
+ * only needs to log the resulting {@link RetentionReport} and catch a whole-sweep failure so it
+ * can't propagate out of {@code @Scheduled} - Spring stops rescheduling a method that throws.
  */
 @Component
 public class RetentionScheduler {
@@ -35,8 +30,7 @@ public class RetentionScheduler {
     try {
       RetentionReport report = retentionService.sweep(false);
       if (report.skipped()) {
-        // Expected, not an error: a manual POST /api/v1/retention/run was already mid-sweep when
-        // this tick fired - see RetentionService's own in-process concurrency guard.
+        // Expected, not an error: a manual POST /api/v1/retention/run was already mid-sweep.
         log.info("Retention sweep skipped this tick - another real sweep was already in progress");
       } else {
         log.info("Retention sweep completed: {}", report);

@@ -56,9 +56,7 @@ export function RunDetailsPage({
   }
   return (
     <RunDetails
-      // `key={runId}` forces a full remount (and thus fresh `useRunEventStream` state) when
-      // navigating from one run's details page directly to another's without an intervening
-      // unmount - see `use-run-event-stream.ts`'s doc comment on why it doesn't reset itself.
+      // Forces a full remount (fresh useRunEventStream state) when navigating between runs.
       key={runId}
       runId={runId}
       {...(eventStreamClient !== undefined ? { eventStreamClient } : {})}
@@ -81,19 +79,15 @@ function RunDetails({
     eventStreamClient,
   );
   const testResultsRef = useRef<TestResultsSectionHandle>(null);
-  // `?testId=&stepId=` (see run-result-target.ts) - the URL is only ever the *initial* target,
-  // never a continuously-synced UI state: re-parsed once from whatever the URL happened to be on
-  // this render, but a target already revealed is never re-revealed just because a later render
-  // still carries the same query string (see `deepLinkHandledKeyRef` below).
+  // The URL (`?testId=&stepId=`) is only ever the initial target, not continuously-synced state:
+  // parsed once per render, and an already-revealed target is never re-revealed for the same query string.
   const [searchParams] = useSearchParams();
   const parsedDeepLink = parseRunResultTarget(searchParams);
   const deepLinkTarget =
     parsedDeepLink.kind === "valid" ? parsedDeepLink.target : undefined;
   const deepLinkHandledKeyRef = useRef<string | undefined>(undefined);
-  // A target that disappears from the URL (or becomes malformed) must be treated as genuinely gone,
-  // not "already handled forever" - otherwise navigating away and then back to the very same target
-  // (e.g. browser Back/Forward) would silently stay stuck refusing to reveal/focus it again, since
-  // the key it left behind never gets cleared on its own - a real review finding.
+  // A target that disappears from the URL must be treated as gone, not "handled forever" - otherwise
+  // Back/Forward to the same target would stay stuck refusing to reveal it again.
   useEffect(() => {
     if (deepLinkTarget === undefined) {
       deepLinkHandledKeyRef.current = undefined;
@@ -103,13 +97,9 @@ function RunDetails({
   const run = useQuery({
     queryKey: queryKeys.run(runId),
     queryFn: () => getRun(runId),
-    // `useRunEventStream` invalidates `run` exactly once when the stream freezes for any reason
-    // (see that hook's own doc comment), including a permanent `PROTOCOL_ERROR` - but if the run
-    // hasn't reached a terminal status by that one refetch, nothing else was left to ever refetch
-    // it again: a review caught that this stranded both the header's status and the Artifacts
-    // section (see below) once a run's SSE stream broke before `RUN_FINISHED`. Falling back to
-    // plain REST polling here - only while the stream can no longer be trusted, and only until the
-    // status this same fallback reads back is itself terminal - recovers both.
+    // `useRunEventStream` invalidates `run` once when the stream freezes, but if the run isn't
+    // terminal by that refetch, nothing refetches it again. Falls back to REST polling only while
+    // the stream is untrusted (PROTOCOL_ERROR) and until the polled status is itself terminal.
     refetchInterval: (query) => {
       if (connectionState !== "PROTOCOL_ERROR") {
         return false;
@@ -118,12 +108,9 @@ function RunDetails({
       if (status !== undefined && isTerminalRunStatus(status)) {
         return false;
       }
-      // A definitive 404 (not a transient network/5xx blip) means the run is gone for good - the
-      // runner service only keeps run history in memory (see docs/SSE_CONTRACT_V1.md), so a
-      // restart between polls is a real, permanent case, not something retrying will ever fix.
-      // `query.state.data` would otherwise keep whatever the last *successful* response was (still
-      // RUNNING, say) forever, since a failed refetch doesn't clear it - polling a run that will
-      // never come back again is exactly the bug a review caught here.
+      // A definitive 404 means the run is gone for good (in-memory run history, see
+      // docs/SSE_CONTRACT_V1.md) - retrying would poll forever since a failed refetch doesn't
+      // clear the last successful data.
       const error = query.state.error;
       if (
         error instanceof RunnerApiError &&
@@ -147,20 +134,14 @@ function RunDetails({
   const artifacts = useQuery({
     queryKey: queryKeys.runArtifacts(runId),
     queryFn: () => listRunArtifacts(runId),
-    // Gated on the run lookup itself succeeding: the backend 404s this endpoint too when the run
-    // doesn't exist, and firing it anyway would show a second, redundant "not available" error
-    // alongside the run's own - a real duplicate-text failure an E2E test caught (both errors
-    // share `describeApiError`'s 404 message, which made `getByText(...)` match twice).
+    // Gated on the run lookup succeeding - the backend 404s this endpoint too, so firing it
+    // anyway would duplicate the run's own "not available" error.
     enabled: run.isSuccess,
   });
   const runIsTerminal = run.isSuccess && isTerminalRunStatus(run.data.status);
 
-  // The SSE stream itself already knows a run is over, and exactly when, the instant it processes
-  // RUN_FINISHED - preferred over the REST `RunResponse` here so reconciliation (a test/step still
-  // RUNNING once the run is terminal - see `run-details-view-model.ts`) does not depend on a REST
-  // refetch succeeding or being fresh. `run.data` is the fallback for when the stream itself never
-  // reached RUN_FINISHED (e.g. it broke into a permanent PROTOCOL_ERROR beforehand), which is
-  // exactly the situation the REST-polling `refetchInterval` above exists to recover from anyway.
+  // Prefers the SSE stream's own RUN_FINISHED signal over REST so reconciliation doesn't depend
+  // on a fresh refetch; `run.data` is the fallback if the stream never reached RUN_FINISHED.
   const viewModel = buildRunDetailsViewModel({
     testsById: streamState.testsById,
     artifacts: artifacts.isSuccess ? artifacts.data : [],
@@ -169,11 +150,8 @@ function RunDetails({
   });
   const tests = viewModel.tests;
 
-  // The same "prefer the SSE stream's own signal, fall back to REST" preference
-  // `buildRunDetailsViewModel` itself uses (see its own doc comment) - `LiveFocusPanel` must not
-  // keep showing itself once the run is over just because the *live connection* alone hasn't
-  // reached `CLOSED` yet (e.g. it dropped mid-flight and the REST fallback already confirmed the
-  // run finished) - see that component's own `runStatus` prop.
+  // Same SSE-first, REST-fallback preference as above, so LiveFocusPanel doesn't keep showing
+  // itself just because the live connection alone hasn't reached CLOSED yet.
   const overallRunStatus = streamState.runOutcome ?? run.data?.status;
   const deepLinkStatus = useMemo(
     () =>
@@ -182,9 +160,8 @@ function RunDetails({
         : computeDeepLinkStatus(deepLinkTarget, tests, connectionState),
     [parsedDeepLink.kind, deepLinkTarget, tests, connectionState],
   );
-  // Fires at most once per distinct target (see `runResultTargetKey`) - a later SSE-driven
-  // re-render with the same still-"found" target must not call `reveal` again, which is exactly
-  // why this doesn't just gate on `deepLinkTarget !== undefined` alone.
+  // Fires at most once per distinct target - a later re-render with the same "found" target
+  // must not call reveal() again.
   useEffect(() => {
     if (deepLinkTarget === undefined || deepLinkStatus.kind !== "found") {
       return;
@@ -197,21 +174,11 @@ function RunDetails({
     deepLinkHandledKeyRef.current = key;
   }, [deepLinkTarget, deepLinkStatus]);
 
-  // There is still no live ARTIFACT_CREATED event (that remains a real future-phase concern - a
-  // manifest write racing an in-flight listRunArtifacts response, precise per-artifact timing -
-  // deliberately not solved here) - so this can't push a fresh capture the instant it's written.
-  // But `AutomationExtension`'s `captureFailure` already runs (and finishes writing the manifest)
-  // before the JUnit listener emits that same test's own terminal `TEST_*` event, so a `TEST_FAILED`
-  // or `TEST_ABORTED` arriving over SSE is itself a reliable "this test's own artifacts, if any, are
-  // now on disk" signal - good enough to stop making a viewer wait for the whole run to finish
-  // before seeing a screenshot/trace for a test that already failed. Three distinct, non-exclusive
-  // signals now trigger a refetch: the normal path (`RUN_FINISHED` arrived over SSE, `connectionState`
-  // reaches `"CLOSED"`), the REST fallback path (a stream that broke before ever reaching
-  // `RUN_FINISHED`, `runIsTerminal` instead), and this early per-test-failure path. Kept as separate
-  // effects, each gated on its own path being the one actually responsible - `connectionState`
-  // trivially implies `runIsTerminal` will *also* eventually become true once the resulting
-  // invalidate's refetch resolves, and a single combined effect would then fire the same
-  // invalidation twice (once from each signal) for the one normal-path finish, wasting a request.
+  // No live ARTIFACT_CREATED event exists yet, but captureFailure finishes writing a test's
+  // manifest before its terminal TEST_* event fires - so a TEST_FAILED/ABORTED over SSE reliably
+  // means that test's artifacts are already on disk, and refetching early avoids waiting for the
+  // whole run to finish. Three separate effects (each own signal: SSE close, REST-fallback
+  // terminal, early failure) avoid double-firing the same invalidation for one normal finish.
   const failedOrAbortedTestCount = tests.filter(
     (test) => test.status === "FAILED" || test.status === "ABORTED",
   ).length;
@@ -241,9 +208,7 @@ function RunDetails({
   const runDuration = run.isSuccess ? runDurationMs(run.data) : undefined;
   const canCancel =
     run.isSuccess && !isTerminalRunStatus(run.data.status) && canManageRuns;
-  // Scoped to each failing test's own failure panel (see `FailureDetail.tsx`), not just the generic
-  // banner below - a broken artifacts fetch is otherwise easy to miss as belonging to any specific
-  // test result.
+  // Scoped to each failing test's failure panel, not just the generic banner below.
   const artifactsErrorMessage = artifacts.isError
     ? describeApiError(artifacts.error)
     : undefined;
@@ -361,10 +326,7 @@ function RunDetails({
           <ArtifactsSection runId={runId} artifacts={artifacts.data} />
         </div>
       )}
-      {/* D4.1 - distinguishes "no artifacts were ever ingested" (both `artifacts.data` empty and
-          `artifactsPurged` false - the section simply stays absent, unchanged from before) from
-          "artifacts existed and were purged by retention" - an explicit message instead of the
-          section silently vanishing with no explanation. */}
+      {/* Distinguishes "no artifacts ever ingested" from "purged by retention" with an explicit message. */}
       {artifacts.isSuccess &&
         artifacts.data.length === 0 &&
         run.data?.artifactsPurged === true && (
@@ -417,12 +379,7 @@ function describeConnectionState(
   }
 }
 
-/**
- * `PROTOCOL_ERROR` covers three distinct reducer statuses (see `use-run-event-stream.ts`'s own
- * gap-retry logic) - a gap that couldn't recover even after one fresh-replay attempt reads
- * differently to a user than a genuine contract violation, so this branches on the reducer's own
- * `status.kind` rather than showing one generic message for all three.
- */
+/** `PROTOCOL_ERROR` covers three reducer statuses; branches so a recoverable gap reads differently than a contract violation. */
 function describeProtocolError(status: RunEventStreamStatus): string {
   switch (status.kind) {
     case "compatibility-error":

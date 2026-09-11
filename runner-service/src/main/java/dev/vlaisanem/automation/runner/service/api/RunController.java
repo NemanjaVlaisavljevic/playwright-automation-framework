@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.List;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -157,10 +158,11 @@ public class RunController {
   public ResponseEntity<Resource> processLog(@PathVariable String runId) {
     Path logFile = runService.processLog(runId);
     Resource resource = new FileSystemResource(logFile);
+    ContentDisposition disposition =
+        ContentDisposition.attachment().filename(runId + "-process.log").build();
     return ResponseEntity.ok()
         .contentType(MediaType.TEXT_PLAIN)
-        .header(
-            HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + runId + "-process.log\"")
+        .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
         .body(resource);
   }
 

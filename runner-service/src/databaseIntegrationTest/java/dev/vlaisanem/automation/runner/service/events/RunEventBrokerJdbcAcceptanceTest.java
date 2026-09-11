@@ -48,13 +48,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * D2.3 - the acceptance matrix the live-wiring gap explicitly called for, run against a real {@link
- * RunEventBroker} wrapping the real {@link JdbcRunStore} (not {@code FakeRunLifecycleStore}) and a
- * real Testcontainers Postgres: concurrent appends under real subscriber traffic, a
- * replay/subscribe race with no gap or duplicate, and crash-between-events recovery via
- * reconnect-replay. Each mirrors an existing {@code FakeRunLifecycleStore}-backed test in {@code
- * RunEventBrokerTest} - proving the exact same guarantee holds against the real store and a real
- * database, not only against the fake that stands in for it everywhere else.
+ * Verifies {@link RunEventBroker} against the real {@link JdbcRunStore} and Postgres (not {@code
+ * FakeRunLifecycleStore}): concurrent appends under subscriber traffic, a replay/subscribe race
+ * with no gap or duplicate, and crash-between-events recovery via reconnect-replay.
  */
 @Testcontainers
 class RunEventBrokerJdbcAcceptanceTest {
@@ -91,23 +87,9 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   /**
-   * Mirrors {@code
-   * RunEventBrokerTest#replayAndSubscribeNeverMissesOrDuplicatesAnEventRacingConcurrently} against
-   * the real store: a subscriber that registers via {@code replayAndSubscribe} while a separate
-   * thread continuously appends {@code TEST_STARTED} events must receive every one exactly once, in
-   * order, with no gap and no duplicate - then cross-checked against what {@link
-   * JdbcRunStore#readEventsAfter} itself reads back from Postgres, proving live delivery and
-   * durable storage agree completely, not just that the subscriber "received a plausible number" of
-   * events.
-   *
-   * <p>[P2] fix - a plain {@code Thread.sleep(10)} before subscribing does not guarantee the
-   * publisher is still mid-flight when {@code replayAndSubscribe} registers: on a slow/loaded CI
-   * runner all 200 appends could already be done, and the test would then pass purely through the
-   * replay path even though its name claims to exercise live delivery. Fixed with two latches: the
-   * publisher writes a fixed prefix, signals it has, then blocks until released - the test only
-   * subscribes (and only then releases the rest) once that prefix is provably already written,
-   * guaranteeing the remaining writes are genuinely concurrent with, not merely coincidentally
-   * overlapping, the subscription.
+   * A subscriber registered mid-stream must receive every event exactly once, in order, matching
+   * what Postgres itself persisted. Two latches guarantee the subscription genuinely overlaps
+   * in-flight appends, rather than relying on timing a loaded CI runner could race past.
    */
   @Test
   void concurrentAppendsWithALiveSubscriberDeliverEveryEventExactlyOnceInOrder() throws Exception {
@@ -167,10 +149,9 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   /**
-   * The deterministic companion to the stress test above: a concurrent {@code append} is held open
-   * (via {@link BlockingReplayStore}) until a {@code replayAndSubscribe} call has provably entered
-   * and is blocked waiting for the same per-run lock, proving the two really do serialize against
-   * each other on the real store's lock path too - not just under timing that happens to favor it.
+   * Deterministic companion to the stress test above: a concurrent append is held open via {@link
+   * BlockingReplayStore} until {@code replayAndSubscribe} has provably entered and is blocked on
+   * the same per-run lock, proving they genuinely serialize rather than just favorable timing.
    */
   @Test
   void replayAndSubscribeBlocksAConcurrentAppendUntilTheSubscriberIsRegistered() throws Exception {
@@ -203,17 +184,9 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   /**
-   * The "cold start" crash-recovery variant: a run's complete lifecycle (queue, start, several test
-   * events, finish) commits with <em>no subscriber ever attached</em> - simulating a subscriber
-   * process that crashed, or simply never connected, for the run's entire execution. A brand-new
-   * {@link RunEventBroker} instance (its own fresh {@code RunEventHub}, with no in-memory state
-   * carried over - modeling a real process restart) wrapping the very same {@link JdbcRunStore}
-   * must still recover the run's complete history via {@code replayAndSubscribe} alone, purely from
-   * what Postgres persisted, and see it as already-terminal (the subscription closes itself
-   * immediately after replaying the trailing {@code RUN_FINISHED}, per {@link
-   * RunEventBroker#replayAndSubscribe}'s own contract). See {@link
-   * #aCrashBetweenCommitAndPublishIsFullyRecoveredViaReconnectReplay} for the "warm" variant this
-   * one does not cover: a subscriber that already saw events 1..N, then a genuine gap at N+1.
+   * "Cold start" recovery: a run's full lifecycle commits with no subscriber ever attached. A
+   * brand-new {@link RunEventBroker} must recover it all via {@code replayAndSubscribe} alone,
+   * purely from Postgres (contrast the "warm" variant below).
    */
   @Test
   void aRunsCompleteHistorySurvivesWithNoLiveSubscriberAndIsFullyRecoveredViaReplay()
@@ -251,18 +224,9 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   /**
-   * [P1] fix - the actual crash window the D2 design calls for, which {@link
-   * #aRunsCompleteHistorySurvivesWithNoLiveSubscriberAndIsFullyRecoveredViaReplay} does not
-   * simulate: a subscriber has already seen events {@code 1..N}, sequence {@code N+1} then commits
-   * to Postgres, and the process dies <em>between that commit and the broker's own {@code
-   * hub.publish}</em> - the original subscriber never receives {@code N+1} at all. Modeled here by
-   * committing {@code N+1} directly through the real {@link JdbcRunStore}, bypassing {@code
-   * RunEventBroker} entirely (the broker is what would have called {@code hub.publish} - skipping
-   * it is exactly what "the process died right there" means). A brand-new {@link RunEventBroker}
-   * instance (a fresh in-memory {@code RunEventHub} - modeling the actual process restart) then
-   * reconnects with {@code afterSequence = N} and must recover <em>exactly</em> {@code N+1} - not a
-   * duplicate of anything the original subscriber already saw, not a gap - and, since {@code N+1}
-   * here is the run's own {@code RUN_FINISHED}, close the subscription immediately.
+   * "Warm" variant: a subscriber has seen events 1..N when N+1 commits to Postgres but the process
+   * dies before {@code hub.publish} fires - modeled by committing N+1 directly through {@link
+   * JdbcRunStore}, bypassing the broker. A new broker reconnecting at N must recover exactly N+1.
    */
   @Test
   void aCrashBetweenCommitAndPublishIsFullyRecoveredViaReconnectReplay() throws Exception {
@@ -279,19 +243,16 @@ class RunEventBrokerJdbcAcceptanceTest {
         .extracting(RunnerEvent::sequence)
         .containsExactly(1L, 2L);
 
-    // The simulated crash: sequence 3 (RUN_FINISHED) commits directly through the real store,
-    // never going through firstBroker.transitionIfNonTerminal - so hub.publish is never called for
-    // it. This is deliberately not "a slow subscriber" or "a broker bug"; it is what actually
-    // modeling "the process died right after the commit" looks like from the store's perspective.
+    // Simulated crash: sequence 3 commits directly through the store, bypassing the broker, so
+    // hub.publish is never called for it.
     Instant finishedAt = NOW.plusSeconds(3);
     store.transitionIfNonTerminal(
         runId,
         run -> run.transitionTo(RunStatus.SUCCEEDED, finishedAt, 0, null),
         seq -> RunnerEvent.runFinished(runId, seq, finishedAt, RunOutcome.SUCCEEDED, null));
 
-    // Proves the "crash" half actually happened, not just asserted: the original subscriber - still
-    // live, still subscribed - must never have received sequence 3, since nothing ever published
-    // it.
+    // Confirms the crash actually happened: the still-live original subscriber must never receive
+    // sequence 3.
     Thread.sleep(50);
     assertThat(originalSubscriber.received)
         .as("the original subscriber must never see the event nothing ever published to it")
@@ -342,11 +303,9 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   /**
-   * None of this class's acceptance scenarios ever append a {@code TEST_FAILED}/{@code
-   * TEST_ABORTED} event (only {@code TEST_STARTED}, via {@link #appendTestEvent}), so {@link
-   * RunEventBroker}'s own D2.4 artifact-ingestion hook never actually fires here - a real {@link
-   * ArtifactIngestionService} wired to an in-memory {@link FakeArtifactRepository} satisfies the
-   * constructor without needing a real manifest file.
+   * Only {@code TEST_STARTED} events are appended here, so the broker's artifact-ingestion hook
+   * never fires; a {@link FakeArtifactRepository} satisfies the constructor without a real
+   * manifest.
    */
   private ArtifactIngestionService noopArtifactIngestionService() {
     return new ArtifactIngestionService(
@@ -446,11 +405,9 @@ class RunEventBrokerJdbcAcceptanceTest {
   }
 
   /**
-   * Wraps the real {@link JdbcRunStore}, blocking inside {@code latestEvent} - the first call
-   * {@link RunEventBroker#replayAndSubscribe} makes, to validate the resume point against the
-   * store's current high-water mark - until released, so a test can deterministically prove the
-   * per-run lock is genuinely held for the whole "read replay snapshot" step against the real
-   * store's own lock path, not just usually working out under favorable timing.
+   * Wraps {@link JdbcRunStore}, blocking inside {@code latestEvent} (the first call {@code
+   * replayAndSubscribe} makes) until released, so a test can deterministically prove the per-run
+   * lock is held for the whole replay snapshot step.
    */
   private static final class BlockingReplayStore implements RunLifecycleStore {
     private final RunLifecycleStore delegate;

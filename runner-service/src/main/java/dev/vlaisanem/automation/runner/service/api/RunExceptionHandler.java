@@ -27,18 +27,13 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
- * Centralizes HTTP status mapping for the service layer's exceptions here, so domain/service code
- * never needs a Spring MVC annotation (e.g. no {@code @ResponseStatus} on a service exception).
+ * Centralizes HTTP status mapping for the service layer's exceptions, so domain/service code never
+ * needs a Spring MVC annotation.
  *
- * <p>{@link #handleUnexpected} is the last-resort catch-all: Spring dispatches to the most specific
- * matching {@code @ExceptionHandler}, so it can never intercept anything the handlers above already
- * cover - it only ever sees a genuinely unmapped failure (a bug, or a dependency throwing something
- * this service has never seen before). Its response is deliberately generic and never echoes {@link
- * Throwable#getMessage()}: an internal exception message can carry paths, stack internals, or other
- * detail that was never meant to reach a client, whereas every other handler here re-exposes {@code
- * getMessage()} deliberately, because those exceptions' messages are authored specifically to be
- * client-safe (see each one's own Javadoc). The original exception is still logged in full server
- * side, so nothing is lost for diagnosis.
+ * <p>{@link #handleUnexpected} is the last-resort catch-all and never echoes {@link
+ * Throwable#getMessage()} to the client - an internal exception message can carry paths or stack
+ * internals. Every other handler here re-exposes {@code getMessage()} deliberately, because those
+ * messages are authored to be client-safe.
  */
 @RestControllerAdvice
 public class RunExceptionHandler {
@@ -86,9 +81,9 @@ public class RunExceptionHandler {
   }
 
   /**
-   * The disk-usage probe itself failing (not merely reporting low space) is its own distinct 503 -
-   * see {@link DiskUsageUnavailableException}'s own Javadoc: a fail-closed guard that cannot answer
-   * its own question must refuse work, never silently fall through to a generic 500.
+   * The disk-usage probe itself failing (not merely reporting low space) is its own distinct 503: a
+   * fail-closed guard that can't answer its own question must refuse work, not fall through to a
+   * generic 500.
    */
   @ExceptionHandler(DiskUsageUnavailableException.class)
   public ProblemDetail handleDiskUsageUnavailable(DiskUsageUnavailableException exception) {
@@ -102,10 +97,9 @@ public class RunExceptionHandler {
   }
 
   /**
-   * {@code 429}, not {@code 503} - see {@link SseConnectionLimitExceededException}'s own Javadoc
-   * for why this is a distinct case from {@link #handleSubscriptionRejected}. A concurrent-
-   * connection cap has no fixed reopening time (unlike a time-windowed rate limit), so {@code
-   * Retry-After} here is a suggested backoff, not a guaranteed one.
+   * {@code 429}, not {@code 503}, distinct from {@link #handleSubscriptionRejected}. A
+   * concurrent-connection cap has no fixed reopening time, so {@code Retry-After} here is a
+   * suggested backoff, not a guaranteed one.
    */
   @ExceptionHandler(SseConnectionLimitExceededException.class)
   public ResponseEntity<ProblemDetail> handleSseConnectionLimitExceeded(
@@ -139,13 +133,10 @@ public class RunExceptionHandler {
   }
 
   /**
-   * A missing/unreadable/invalid catalog file is a deployment problem, not a client error - 503
-   * (not 400) is the honest status: retrying the exact same request later, once the file is fixed,
-   * would succeed. Like {@link ArtifactManifestCorruptException}, {@link
-   * TestCatalogUnavailableException#getMessage()} is client-safe by construction, never by
-   * coincidence - the real cause ({@link TestCatalogUnavailableException#diagnosticReason()}, which
-   * can legitimately contain a resolved absolute filesystem path) is logged here and never sent to
-   * the client.
+   * A missing/unreadable/invalid catalog file is a deployment problem, not a client error - 503,
+   * not 400: retrying later, once the file is fixed, would succeed. {@link
+   * TestCatalogUnavailableException#diagnosticReason()} can contain an absolute filesystem path and
+   * is logged here, never sent to the client.
    */
   @ExceptionHandler(TestCatalogUnavailableException.class)
   public ProblemDetail handleTestCatalogUnavailable(TestCatalogUnavailableException exception) {
@@ -154,15 +145,10 @@ public class RunExceptionHandler {
   }
 
   /**
-   * Deliberately its own handler, not left to fall through to {@link #handleUnexpected} - a corrupt
-   * manifest is a real, distinguishable data-integrity problem, so the client gets a specific
-   * (though still generic) detail message identifying which run, rather than the catch-all's fully
-   * generic one. Unlike every other handler above, {@link
-   * ArtifactManifestCorruptException#getMessage()} is <em>not</em> re-exposed because it happens to
-   * be client-safe by coincidence - it is client-safe by construction (see the exception's own
-   * Javadoc); the real cause ({@link ArtifactManifestCorruptException#diagnosticReason()}, which
-   * can legitimately contain an absolute filesystem path or a raw Jackson error) is logged here and
-   * never sent to the client.
+   * Its own handler rather than falling through to {@link #handleUnexpected}, so the client gets a
+   * specific detail message identifying which run. {@link
+   * ArtifactManifestCorruptException#diagnosticReason()} can contain an absolute filesystem path or
+   * a raw Jackson error and is logged here, never sent to the client.
    */
   @ExceptionHandler(ArtifactManifestCorruptException.class)
   public ProblemDetail handleArtifactManifestCorrupt(ArtifactManifestCorruptException exception) {

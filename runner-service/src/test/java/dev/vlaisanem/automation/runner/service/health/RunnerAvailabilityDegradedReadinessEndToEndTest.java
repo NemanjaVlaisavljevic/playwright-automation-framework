@@ -23,23 +23,11 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 /**
- * D4.3.4 - closes a gap D4.3.1's own live-verification round explicitly flagged and deliberately
- * deferred: {@link RunnerAvailabilityHealthIndicator}'s exact status mapping was proven at the unit
- * level ({@code RunnerAvailabilityHealthIndicatorTest}, a mocked {@link RunService}) and its
- * registered group membership was proven separately ({@code HealthEndpointGroupMembershipTest}),
- * but nothing before this test drove a real {@code DEGRADED} {@link RunService} state through to a
- * real, live {@code /actuator/health/readiness} HTTP response - forcing an actual process-kill
- * failure live was judged "hard to safely reproduce" in D4.3.1 and waived at the time. Mocking
- * {@link RunService#isDegraded()} directly (the same established pattern {@code
- * HealthEndpointGroupMembershipTest} already uses for {@code DiskUsageService}) reaches the
- * identical real HTTP round trip without needing an actual process tree to fail termination.
- *
- * <p>Asserts the {@code runnerAvailability} <em>component's own</em> status within the readiness
- * response (via {@code show-components=always}, the same mechanism {@code
- * HealthEndpointGroupMembershipTest} uses), never the top-level aggregate - this context has no
- * real reachable Postgres, so the real (unmocked) {@code db} contributor genuinely reports {@code
- * DOWN} and would dominate the aggregate regardless of {@code runnerAvailability}'s own status,
- * which is not what this test is about.
+ * Drives a real {@code DEGRADED} {@link RunService} state through an actual {@code
+ * /actuator/health/readiness} HTTP response, by mocking {@link RunService#isDegraded()} rather than
+ * needing a real process-kill failure. Asserts the {@code runnerAvailability} component's own
+ * status, never the top-level aggregate - {@code db} genuinely reports {@code DOWN} here (no
+ * reachable Postgres) and would dominate the aggregate regardless.
  */
 @SpringBootTest(
     webEnvironment = WebEnvironment.RANDOM_PORT,

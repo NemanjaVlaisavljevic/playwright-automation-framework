@@ -44,15 +44,12 @@ describe("ScenarioSection", () => {
 
     render(<ScenarioSection scenario={scenario} />);
 
-    // The scenario-level badge alone can only say "something regressed" - the Result column is
-    // what tells a viewer *which* row, in both tables, even the signals table (which has no
-    // numeric limit to compare against at all).
     const runsListRow = screen.getByText("Runs list").closest("tr");
     expect(runsListRow).not.toBeNull();
     expect(
       within(runsListRow as HTMLElement).getByText("REGRESSION"),
     ).toBeInTheDocument();
-    // 900/750 rounds to 120% - a regression genuinely can exceed 100% utilization.
+    // 900/750 rounds to 120% - utilization can exceed 100%.
     expect(
       within(runsListRow as HTMLElement).getByText("120%"),
     ).toBeInTheDocument();
@@ -100,7 +97,6 @@ describe("ScenarioSection", () => {
     expect(
       within(row as HTMLElement).getByText("OBSERVED ONLY"),
     ).toBeInTheDocument();
-    // Both the Limit and Utilization columns render "—" for a genuinely un-gated metric.
     expect(within(row as HTMLElement).getAllByText("—")).toHaveLength(2);
   });
 

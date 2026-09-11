@@ -9,9 +9,8 @@ export const queryKeys = {
   runs: ["runs"] as const,
   run: (runId: string) => ["runs", runId] as const,
   runArtifacts: (runId: string) => ["runs", runId, "artifacts"] as const,
-  // Extends, rather than replaces, `runArtifacts`'s own key array - invalidating the base
-  // `runArtifacts(runId)` key still matches every per-test filter too (TanStack Query's own
-  // prefix-matching), so a per-test drill-down query never has to be invalidated separately.
+  // Extends `runArtifacts`'s key array so invalidating the base key also matches this one
+  // (TanStack Query prefix-matching).
   runArtifactsForTest: (runId: string, testId: string) =>
     [...queryKeys.runArtifacts(runId), { testId }] as const,
 };

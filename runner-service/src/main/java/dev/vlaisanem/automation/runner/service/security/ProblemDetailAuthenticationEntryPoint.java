@@ -13,15 +13,11 @@ import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.stereotype.Component;
 
 /**
- * Spring Security's default {@code AuthenticationEntryPoint} redirects an unauthenticated caller to
- * an HTML login page - it fires inside the security filter chain, before {@code DispatcherServlet}
- * dispatch, so it never goes through {@code RunExceptionHandler}'s controller advice. This backend
- * serves no browser-rendered pages of its own (the SPA is served separately by Caddy), so an HTML
- * redirect is never correct here - this writes the same {@link ProblemDetail} shape every other
- * error in this API already uses, {@code instance} included (matching `RunExceptionHandler`'s own
- * contract - see {@code OpenApiConfig}'s {@code problemDetailContractCustomizer}), using the
- * application's own managed {@link ObjectMapper} so this response serializes identically to every
- * other one in the API.
+ * Spring Security's default {@code AuthenticationEntryPoint} redirects to an HTML login page - it
+ * fires inside the security filter chain, before dispatch, so it never goes through {@code
+ * RunExceptionHandler}. This backend serves no browser-rendered pages of its own (the SPA is served
+ * separately by Caddy), so this instead writes the same {@link ProblemDetail} shape every other
+ * error in this API uses, via the application's own managed {@link ObjectMapper}.
  */
 @Component
 public class ProblemDetailAuthenticationEntryPoint implements AuthenticationEntryPoint {

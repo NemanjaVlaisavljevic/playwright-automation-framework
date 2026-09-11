@@ -692,8 +692,6 @@ describe("applyRunnerEventMessage", () => {
   });
 
   it("treats replay and live delivery through the identical code path", () => {
-    // A client reconnecting mid-run replays 1..2, then continues live from 3 - same function,
-    // same rules, no special-casing needed by the caller.
     let replayed = createInitialRunEventStreamState();
     replayed = apply(replayed, event({ sequence: 1, type: "RUN_QUEUED" }));
     replayed = apply(replayed, event({ sequence: 2, type: "RUN_STARTED" }));
@@ -720,9 +718,7 @@ describe("applyRunnerEventMessage", () => {
     let state = createInitialRunEventStreamState();
     state = apply(state, event({ sequence: 1, type: "RUN_QUEUED" }));
 
-    // Same runId, same sequence, but a different event type - the canonical journal's own
-    // gapless-sequence guarantee means this can never legitimately happen; it must be surfaced as
-    // corruption, not smoothed over as a duplicate.
+    // Same sequence, different event type - can never legitimately happen, so it's corruption.
     state = apply(state, event({ sequence: 1, type: "RUN_STARTED" }));
 
     expect(state.status).toEqual({
@@ -730,7 +726,6 @@ describe("applyRunnerEventMessage", () => {
       reason: "event at sequence 1 conflicts with a previously seen event",
     });
 
-    // Frozen from here too, same as any other protocol-error.
     const afterConflict = state;
     state = apply(state, event({ sequence: 2, type: "RUN_STARTED" }));
     expect(state).toBe(afterConflict);
@@ -811,8 +806,7 @@ describe("applyRunnerEventMessage", () => {
   });
 
   it("flags a protocol error - not a compatibility error - for a blank schemaVersion", () => {
-    // A blank schemaVersion is malformed, not a legitimate (if unsupported) future version - it
-    // must fail at the envelope stage, before ever reaching the version comparison.
+    // A blank schemaVersion is malformed, so it fails at the envelope stage.
     let state = createInitialRunEventStreamState();
     state = apply(
       state,
@@ -823,9 +817,7 @@ describe("applyRunnerEventMessage", () => {
   });
 
   it("flags a compatibility error - not a protocol error - for an unsupported version carrying an unrecognized V2 event type", () => {
-    // The realistic future case this ordering exists for: a V2 event with a brand-new `type` this
-    // build has never heard of must still be recognized as a version problem, not misclassified as
-    // "malformed" just because the strict V1 union has no member for that type.
+    // A V2 event with an unrecognized `type` must be a version problem, not "malformed".
     let state = createInitialRunEventStreamState();
     state = apply(
       state,

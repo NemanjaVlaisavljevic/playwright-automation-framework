@@ -31,10 +31,8 @@ class RunnerEventTestExecutionListenerTest {
   void emitsOneJsonlLinePerTestLifecycleSignal(@TempDir Path tempDir) throws IOException {
     String runId = "test-run";
 
-    // Auto-registration is disabled deliberately: this module's own META-INF/services file would
-    // otherwise ALSO auto-register a second listener instance from the classpath, double-writing
-    // every event under a clashing sequence. Real consumers (the main test suite) want the default
-    // auto-registration on - see the services file next to the listener class.
+    // Auto-registration disabled: this module's own META-INF/services file would otherwise
+    // double-register a listener, double-writing every event under a clashing sequence.
     Launcher launcher =
         LauncherFactory.create(
             LauncherConfig.builder().enableTestExecutionListenerAutoRegistration(false).build());
@@ -66,8 +64,7 @@ class RunnerEventTestExecutionListenerTest {
     assertThat(failing)
         .extracting(RunnerEvent::type)
         .containsExactly(EventType.TEST_STARTED, EventType.TEST_FAILED);
-    // FailureDetailFormatter's shape - exception class + redacted message + application stack
-    // frames - not the bare message alone; see FailureDetailFormatterTest for the format itself.
+    // FailureDetailFormatter's shape (class + redacted message + stack frames), not bare message.
     assertThat(failing.get(1).detail()).contains("AssertionFailedError").contains("boom");
 
     List<RunnerEvent> skipped = byDisplayName.get("skipped()");
@@ -91,9 +88,8 @@ class RunnerEventTestExecutionListenerTest {
 
     List<RunnerEvent> events = readEvents(tempDir.resolve(runId + ".tests.jsonl"));
 
-    // JUnit Platform never calls executionStarted/executionSkipped for the descendants of a
-    // skipped container (a class-level @Disabled skips the whole class in one callback) - the
-    // listener has to walk TestPlan.getDescendants() itself, or these methods are invisible.
+    // JUnit Platform never calls executionStarted/Skipped for a skipped container's descendants -
+    // the listener has to walk TestPlan.getDescendants() itself, or these methods are invisible.
     assertThat(events).extracting(RunnerEvent::type).containsOnly(EventType.TEST_SKIPPED);
     assertThat(events).extracting(RunnerEvent::detail).containsOnly("suite paused");
     assertThat(events)
@@ -102,10 +98,8 @@ class RunnerEventTestExecutionListenerTest {
   }
 
   /**
-   * Redirects {@link RunnerEventWriterRegistry}'s raw-events directory to {@code tempDir} for the
-   * duration of {@code action}, restoring the previous system property value afterward - the
-   * registry, not the listener itself, now owns this resolution (see {@link
-   * RunnerEventWriterRegistry}), so a test isolates it the same way any other consumer would.
+   * Redirects {@link RunnerEventWriterRegistry}'s raw-events directory to {@code tempDir} for
+   * {@code action}, restoring the previous value afterward.
    */
   private void withRawEventsDir(Path tempDir, Runnable action) {
     String property = RunnerEventWriterRegistry.RAW_EVENTS_DIR_PROPERTY;

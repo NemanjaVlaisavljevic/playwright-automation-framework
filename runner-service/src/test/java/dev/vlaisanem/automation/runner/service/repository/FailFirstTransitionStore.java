@@ -13,12 +13,10 @@ import java.util.function.UnaryOperator;
 
 /**
  * Test double that fails exactly the <em>first</em> {@link #transitionIfNonTerminal} call, then
- * delegates normally forever after - simulating one transient store failure followed by recovery,
- * as opposed to {@link FailingRunLifecycleStore}'s "this class of write is permanently broken."
- * Proves a caller's own top-level fallback (e.g. {@code RunService.executeRun}'s {@code catch
- * (RuntimeException unexpected)} block, which itself calls {@code
- * RunLifecycleCoordinator#finishIfLive} to best-effort record {@code ERROR}) can still succeed on
- * its own retry, since only the one specific attempt this simulates ever fails.
+ * delegates normally - simulating one transient failure followed by recovery, as opposed to {@link
+ * FailingRunLifecycleStore}'s "this class of write is permanently broken." Proves a caller's own
+ * top-level fallback (e.g. {@code RunService.executeRun}'s best-effort {@code ERROR} write) can
+ * still succeed on retry.
  */
 public final class FailFirstTransitionStore implements RunLifecycleStore {
 

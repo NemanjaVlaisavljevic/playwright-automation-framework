@@ -49,8 +49,8 @@ class RunEventHubTest {
   }
 
   /**
-   * D4.3.2 review finding - {@code runner.sse.connections.active} must reflect the real
-   * subscribe/close lifecycle, not just be registered at {@code 0} and never asserted again.
+   * {@code runner.sse.connections.active} must reflect the real subscribe/close lifecycle, not just
+   * be registered at {@code 0} and never asserted again.
    */
   @Test
   void activeConnectionsGaugeTracksSubscribeAndClose() throws Exception {
@@ -68,10 +68,9 @@ class RunEventHubTest {
   }
 
   /**
-   * Regression test for the review's finding: seeding the mailbox with the replay batch before
-   * registering for live publish means a live event arriving immediately after subscribe() still
-   * cannot overtake the replay - both are drained by the same single delivery thread, in queue
-   * order.
+   * Seeding the mailbox with the replay batch before registering for live publish means a live
+   * event arriving immediately after subscribe() cannot overtake the replay - both drain via the
+   * same single delivery thread, in queue order.
    */
   @Test
   void deliversReplayBeforeAnyLiveEvent() throws Exception {
@@ -118,8 +117,8 @@ class RunEventHubTest {
   }
 
   /**
-   * Regression test for the review's finding (mirrored from the plan): a slow subscriber must be
-   * disconnected outright rather than blocking the publisher or growing its mailbox without bound.
+   * A slow subscriber must be disconnected outright rather than blocking the publisher or growing
+   * its mailbox without bound.
    */
   @Test
   void aFullMailboxDisconnectsTheSlowSubscriberInsteadOfGrowingForever() throws Exception {
@@ -136,15 +135,15 @@ class RunEventHubTest {
   }
 
   /**
-   * Regression test for the review's finding: replay is unbounded and must never count against the
-   * live capacity - a subscriber seeded with a replay backlog far larger than the live capacity
-   * must not be disconnected by a single live event that arrives right after it subscribes.
+   * Replay is unbounded and never counts against the live capacity - a subscriber seeded with a
+   * replay backlog far larger than the live capacity must not be disconnected by a live event
+   * arriving right after it subscribes.
    */
   @Test
   void replayBacklogDoesNotCountTowardTheLiveMailboxLimit() throws Exception {
     RecordingSubscriber subscriber = new RecordingSubscriber();
-    subscriber.blockOnEvent = true; // delivery blocks forever on the first item, so the mailbox
-    // never drains - isolating the live-count check from actual delivery timing.
+    subscriber.blockOnEvent = true; // delivery blocks forever on the first item, isolating the
+    // live-count check from actual delivery timing.
     List<RunnerEvent> replay = new ArrayList<>();
     for (long seq = 1; seq <= 300; seq++) { // comfortably exceeds the live capacity (256)
       replay.add(RunnerEvent.runQueued("run-1", seq, NOW));
@@ -199,10 +198,9 @@ class RunEventHubTest {
   }
 
   /**
-   * Definition-of-done item for the SSE layer: shutting down the hub must close every active
-   * subscription (each still gets its normal onComplete callback) and refuse any new one afterward,
-   * so an application shutdown does not leave dangling subscriber threads or half-open SSE
-   * responses behind.
+   * Shutting down the hub must close every active subscription (each still gets its normal
+   * onComplete callback) and refuse new ones afterward, so shutdown never leaves dangling
+   * subscriber threads or half-open SSE responses.
    */
   @Test
   void shutdownClosesEveryActiveSubscriptionAndRejectsFurtherOnes() throws Exception {
@@ -221,12 +219,11 @@ class RunEventHubTest {
   }
 
   /**
-   * Regression test for the review's P1 finding: {@code subscribe()} racing {@code shutdown()} used
-   * to be able to register a subscription after shutdown had already taken its close-everything
-   * snapshot, leaking it forever. The {@code beforeSubscribeRegistration} test seam pauses a
-   * subscribe call while it still holds the lifecycle read lock, mid-registration - {@code
-   * shutdown()}'s write-lock acquisition must therefore block until that subscribe finishes and
-   * releases it, proving the two can never interleave the way the finding described.
+   * {@code subscribe()} racing {@code shutdown()} could register a subscription after shutdown's
+   * close-everything snapshot, leaking it forever. The {@code beforeSubscribeRegistration} test
+   * seam pauses a subscribe call mid-registration while it holds the lifecycle read lock, so {@code
+   * shutdown()}'s write-lock acquisition must block until it releases - proving the two cannot
+   * interleave.
    */
   @Test
   void shutdownCannotMissASubscriptionThatIsMidRegistration() throws Exception {
@@ -266,14 +263,12 @@ class RunEventHubTest {
   }
 
   /**
-   * Regression test for the review's P1 finding: {@code close()} racing {@code shutdown()} used to
-   * be able to have its "submit to the terminal-notifier executor" step land after {@code
-   * shutdown()} had already torn that executor down, throwing {@code RejectedExecutionException}
-   * out through whatever thread called {@code close()} (e.g. a publisher thread mid-append). The
-   * {@code beforeCloseNotify} test seam pauses a close call after it has already left the
-   * bookkeeping maps but before it submits the terminal callback, still holding the lifecycle read
-   * lock - {@code shutdown()}'s write-lock acquisition (needed before it can shut the executor
-   * down) must therefore block until that close finishes.
+   * {@code close()} racing {@code shutdown()} could submit to the terminal-notifier executor after
+   * {@code shutdown()} had already torn it down, throwing {@code RejectedExecutionException} out
+   * through whatever thread called {@code close()} (e.g. a publisher mid-append). The {@code
+   * beforeCloseNotify} test seam pauses close after it leaves the bookkeeping maps but before
+   * submitting the terminal callback, so {@code shutdown()}'s write lock must block until it
+   * finishes.
    */
   @Test
   void shutdownCannotTearDownTheExecutorWhileACloseIsMidNotify() throws Exception {
@@ -303,8 +298,8 @@ class RunEventHubTest {
       closing.get(5, TimeUnit.SECONDS);
       shuttingDown.get(5, TimeUnit.SECONDS);
 
-      // close's own notifyTerminal submit must have gone through before the executor was torn
-      // down - no RejectedExecutionException should have escaped, and the callback still ran.
+      // close's notifyTerminal submit must land before the executor is torn down - no
+      // RejectedExecutionException escapes, and the callback still runs.
       assertThat(subscriber.completedLatch.await(5, TimeUnit.SECONDS)).isTrue();
     } finally {
       executor.shutdownNow();
@@ -312,10 +307,9 @@ class RunEventHubTest {
   }
 
   /**
-   * Regression test for the review's P2 finding: a subscription must not outlive the run's
-   * canonical timeline - once it has delivered a live {@code RUN_FINISHED}, nothing more will ever
-   * be published for that runId, so it should close itself immediately rather than sit open until a
-   * client disconnect or the emitter's own timeout.
+   * A subscription must not outlive the run's canonical timeline: once it delivers a live {@code
+   * RUN_FINISHED}, nothing more will ever be published for that runId, so it closes itself
+   * immediately rather than waiting for a disconnect or the emitter's own timeout.
    */
   @Test
   void subscriptionClosesAutomaticallyAfterDeliveringALiveRunFinished() throws Exception {

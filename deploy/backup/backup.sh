@@ -1,38 +1,22 @@
 #!/usr/bin/env bash
 #
-# D4.5 - one backup cycle: any previously-uploaded-but-unverified local archive is retried FIRST,
-# then a fresh pg_dump streams directly into recipient-based age encryption (no plaintext database
-# dump is ever persisted to disk - see the pipe below), the encrypted file is uploaded off-site via
-# rclone, the upload is verified by an explicit checksum comparison, and the local copy is deleted
-# only after that verification succeeds - never on age alone (a review finding: an earlier version of
-# this script called a leftover local file a "retry candidate" but never actually retried it, then
-# deleted it purely for being old, directly contradicting its own "delete only after verified"
-# guarantee). If local disk pressure becomes critical while unverified backups are still sitting
-# around, this script fails closed and refuses to start a new dump rather than silently discarding
-# unconfirmed data - see check_local_disk_budget() below. The whole cycle runs under a non-blocking
-# flock, so two concurrent invocations (a cron/systemd overlap, or a manual run racing a scheduled
-# one) can never share a filename, race an in-flight partial, or double-upload.
+# Runs one backup cycle: any previously-uploaded-but-unverified local archive is retried first, then
+# a fresh pg_dump streams directly into age encryption (no plaintext dump ever touches disk), the
+# encrypted file is uploaded off-site via rclone, the upload is verified by an explicit checksum
+# comparison, and the local copy is deleted only after that verification succeeds. Fails closed
+# (refuses to start a new dump) if local disk is too tight rather than discarding unconfirmed data -
+# see check_local_disk_budget() below. Runs under a non-blocking flock so concurrent invocations
+# never share a filename, race an in-flight partial, or double-upload.
 #
-# Remote retention is primarily a bucket lifecycle policy (configured on the bucket itself, not here
-# - see docs/DEPLOYMENT_ARCHITECTURE.md section 7); BACKUP_RETENTION_DAYS below is a second,
-# independent bound this script also enforces, defense in depth against a lifecycle policy that was
-# never configured or was misconfigured.
+# Remote retention is primarily a bucket lifecycle policy (configured on the bucket itself - see
+# docs/DEPLOYMENT_ARCHITECTURE.md section 7); BACKUP_RETENTION_DAYS below is a second, independent
+# bound this script also enforces.
 #
 # Required env vars (never logged - see log() below):
 #   PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD   standard libpq connection variables identifying
 #                             the source database to dump - psql/pg_dump pick these up automatically,
-#                             with no connection-string argument ever passed on any command line
-#                             (ps/argv-safe) and no URL-encoding ambiguity for special characters in
-#                             the password. A review finding: an earlier version of this script instead
-#                             accepted a single postgresql://user:password@host:port/dbname DATABASE_URL
-#                             and parsed it with a hand-rolled regex - a raw `@`/`:`/`/`/`%` character
-#                             in a real, strong production password broke that parser outright (e.g.
-#                             `p@ssword` was misparsed as password `p` and host `ssword@postgres`, and
-#                             percent-encoded forms like `p%40ssword` were never decoded at all).
-#                             Passing the five values directly, as separate environment variables with
-#                             no URL syntax to disambiguate, removes the parsing step - and the whole
-#                             class of bug - entirely. See docker-compose.backup.yml's own service
-#                             config for where these are actually set.
+#                             so the password never appears on any command line (ps-safe). See
+#                             docker-compose.backup.yml's own service config for where these are set.
 #   BACKUP_AGE_RECIPIENT     a public age1... recipient string. NOT a secret - the matching private
 #                             identity key never resides permanently in the standing deployment (see
 #                             restore.sh's own header - it is mounted only transiently, for the
@@ -42,23 +26,16 @@
 # Optional:
 #   BACKUP_PREFIX               path prefix within the bucket. Default: "runner-backups".
 #   BACKUP_RETENTION_DAYS       remote objects older than this are deleted after a successful upload.
-#                                Default: unset (no script-side remote deletion - rely on the bucket's
-#                                own lifecycle policy alone).
+#                                Default: unset (rely on the bucket's own lifecycle policy alone).
 #   BACKUP_LOCAL_DIR             local working directory. Default: /backups (see
 #                                docker-compose.backup.yml's own bind mount for this service).
-#   BACKUP_MIN_FREE_BYTES        a flat floor check_local_disk_budget() always requires, on top of the
-#                                actual database size below - covers the encrypted archive's own
-#                                bookkeeping/metadata and leaves headroom for whatever else shares this
-#                                filesystem. Default: 104857600 (100 MiB).
-#   BACKUP_DUMP_RESERVE_BYTES    an additional flat safety margin added on top of the source
-#                                database's own real, live-measured size (a review finding: a flat
-#                                100 MiB floor alone says nothing about how big the dump about to be
-#                                attempted actually is - 101 MiB free with a several-hundred-MiB
-#                                database would have passed the old check and then exhausted the
-#                                filesystem mid-dump). Default: 104857600 (100 MiB).
+#   BACKUP_MIN_FREE_BYTES        flat floor check_local_disk_budget() always requires, on top of the
+#                                actual database size below. Default: 104857600 (100 MiB).
+#   BACKUP_DUMP_RESERVE_BYTES    additional flat safety margin added on top of the source database's
+#                                own real, live-measured size. Default: 104857600 (100 MiB).
 #   RCLONE_CONFIG                path to the rclone config file holding BACKUP_REMOTE's own real
-#                                credentials. Never baked into this image - mount it read-only. rclone
-#                                itself reads this exact env var name; not a name invented here.
+#                                credentials. Never baked into this image - mount it read-only. Real
+#                                rclone env var name, not invented here.
 
 set -euo pipefail
 
@@ -75,11 +52,9 @@ BACKUP_LOCAL_DIR="${BACKUP_LOCAL_DIR:-/backups}"
 BACKUP_MIN_FREE_BYTES="${BACKUP_MIN_FREE_BYTES:-104857600}"
 BACKUP_DUMP_RESERVE_BYTES="${BACKUP_DUMP_RESERVE_BYTES:-104857600}"
 
-# Never echo PGPASSWORD, RCLONE_CONFIG's own contents, or BACKUP_AGE_RECIPIENT in a context that
-# could be confused with the private identity - only filenames, sizes, timestamps, and the remote
-# *path* (never remote credentials) are safe to log. pg_dump/psql below take no connection-string
-# argument at all - PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD are picked up automatically by libpq,
-# so the password never appears in this container's own process list (`ps`) either.
+# Never echo PGPASSWORD, RCLONE_CONFIG contents, or BACKUP_AGE_RECIPIENT anywhere that could be
+# confused with the private identity - only filenames, sizes, timestamps, and the remote path are
+# safe to log.
 log() {
   printf '[backup] %s\n' "$1"
 }
@@ -87,21 +62,18 @@ log() {
 remote_dir="${BACKUP_REMOTE}:${BACKUP_BUCKET}/${BACKUP_PREFIX}"
 mkdir -p "$BACKUP_LOCAL_DIR"
 
-# Single-flight: held for this whole script's duration (the fd stays open until the process exits,
-# which releases the lock automatically - no explicit unlock needed). Non-blocking - a second,
-# genuinely concurrent invocation (an overlapping cron/systemd run, or a manual run racing a
-# scheduled one) must fail loudly and immediately, never queue up and silently share a filename or
-# race an in-flight *.partial with the first invocation.
+# Single-flight: held for the script's duration, released automatically on exit. Non-blocking - a
+# genuinely concurrent invocation must fail immediately, never queue up and race a filename or an
+# in-flight *.partial.
 exec 9>"${BACKUP_LOCAL_DIR}/.backup.lock"
 if ! flock -n 9; then
   log "another backup run already holds the lock - exiting rather than racing it"
   exit 1
 fi
 
-# Streams pg_dump's stdout directly into age; the pipe never touches disk unencrypted at any point.
-# On failure at either stage, `set -o pipefail` (via `set -euo pipefail` above) fails the whole
-# pipeline, and the partial is removed rather than ever being renamed into a final, upload-candidate
-# path.
+# Streams pg_dump's stdout directly into age; the pipe never touches disk unencrypted. `set -o
+# pipefail` fails the whole pipeline on either stage's failure, and the partial is removed rather
+# than promoted to a final path.
 dump_and_encrypt() {
   local_path="$1"
   partial_path="${local_path}.partial"
@@ -116,8 +88,8 @@ dump_and_encrypt() {
   return 0
 }
 
-# Shared by both the retry-existing-files pass and the fresh-dump pass below, so neither path can
-# silently diverge on what "uploaded and verified" actually means.
+# Shared by both the retry-existing-files pass and the fresh-dump pass, so neither path can diverge
+# on what "uploaded and verified" means.
 upload_and_verify() {
   local_path="$1"
   name="$(basename "$local_path")"
@@ -126,8 +98,8 @@ upload_and_verify() {
     log "upload failed for ${name} - keeping local copy for the next run to retry"
     return 1
   fi
-  # Explicit post-upload verification, not just trusting copyto's own internal retry/checksum
-  # behavior - `rclone check` independently re-reads both sides and compares hashes/sizes.
+  # Explicit post-upload verification, not just copyto's own retry/checksum behavior - `rclone
+  # check` independently re-reads both sides and compares hashes/sizes.
   log "verifying upload (checksum): ${name}"
   if ! rclone check "$local_path" "${remote_dir}/" --one-way; then
     log "upload verification FAILED for ${name} - keeping local copy for the next run to retry"
@@ -138,43 +110,33 @@ upload_and_verify() {
   return 0
 }
 
-# A *.partial left over here can only be from a crashed prior run, never a genuinely concurrent one
-# - the flock above already excludes that. Always safe to remove unconditionally, no age check
-# needed.
+# A *.partial here can only be from a crashed prior run - the flock above excludes a genuinely
+# concurrent one. Always safe to remove unconditionally.
 for stale in "$BACKUP_LOCAL_DIR"/*.dump.age.partial; do
   [ -e "$stale" ] || continue
   log "removed a partial left over from a crashed previous run: $(basename "$stale")"
   rm -f "$stale"
 done
 
-# Retry every existing, still-unverified final archive FIRST, before attempting a new dump - a
-# review finding: an earlier version of this script only ever called these "retry candidates" in a
-# comment and then deleted them by age, which directly contradicted the "delete only after verified"
-# guarantee. A file only leaves this loop once upload_and_verify() has actually confirmed it is
-# safely off-site; a repeatedly-failing one is left in place indefinitely (see
-# check_local_disk_budget() below for what happens if that starts to threaten local disk space).
+# Retry every existing, unverified archive first, before attempting a new dump. A file leaves this
+# loop only once upload_and_verify() confirms it is safely off-site; a repeatedly-failing one is
+# left in place indefinitely (see check_local_disk_budget() below for what happens if that starts to
+# threaten local disk space).
 for existing in "$BACKUP_LOCAL_DIR"/*.dump.age; do
   [ -e "$existing" ] || continue
   log "retrying a previously-unverified local backup: $(basename "$existing")"
   upload_and_verify "$existing" || true
 done
 
-# A fail-closed guard, not a cleanup: refuses to start a new dump unless local disk has room not just
-# for a flat floor, but for the dump actually about to be attempted - a review finding: a flat-floor-
-# only check (the original version of this function) would have happily started a several-hundred-MiB
-# dump with only 101 MiB free, exhausting the filesystem mid-dump instead of ever catching the problem
-# up front. `pg_database_size()` is Postgres's own real, live-measured size of the database about to
-# be dumped - a conservative estimate (pg_dump's own compressed custom-format output is typically
-# *smaller* than the raw on-disk size this reports, so requiring room for the larger, uncompressed
-# figure is the safe direction to round). Required = the flat floor (headroom for everything else that
-# might share this filesystem) + the real database size + an additional flat safety margin. If that
-# fails - most plausibly because uploads have been failing repeatedly (a broken network path,
-# revoked/expired credentials, a misconfigured bucket) and unverified archives have been piling up
-# above, though it could just as well mean the database itself has genuinely outgrown its old
-# defaults - this script refuses to start the dump at all, rather than risk either failing mid-dump
-# from real disk exhaustion or (the far worse alternative an earlier version of this script actually
-# did) silently deleting a real, unconfirmed backup just to make room. A human needs to see this and
-# investigate; this is deliberately loud, not a quiet skip.
+# Fail-closed guard, not a cleanup: refuses to start a new dump unless local disk has room for more
+# than a flat floor - also for the dump actually about to be attempted. `pg_database_size()` is
+# Postgres's own real, live-measured size of the database - a conservative estimate (pg_dump's
+# compressed output is typically smaller than this raw on-disk figure). Required = flat floor
+# (headroom for whatever else shares this filesystem) + real database size + an additional flat
+# safety margin. A failure here most likely means uploads have been failing repeatedly and unverified
+# archives are piling up, or the database has outgrown its old defaults; either way this refuses to
+# start the dump rather than risk disk exhaustion mid-dump or silently deleting an unconfirmed
+# backup to make room. Deliberately loud - a human needs to investigate.
 check_local_disk_budget() {
   available="$(df -k "$BACKUP_LOCAL_DIR" | tail -n1 | awk '{print $4}')"
   available_bytes=$((available * 1024))
@@ -205,11 +167,9 @@ fi
 
 if [ -n "${BACKUP_RETENTION_DAYS:-}" ]; then
   log "enforcing secondary remote retention: deleting objects under ${remote_dir}/ older than ${BACKUP_RETENTION_DAYS} day(s)"
-  # Deliberately non-fatal: today's dump is already safely uploaded and verified by this point - a
-  # transient failure in this purely secondary, defense-in-depth cleanup (the bucket's own lifecycle
-  # policy is the primary retention mechanism) must never make a genuinely successful backup report
-  # as failed, which could otherwise trigger a false alert or an unnecessary re-run of an
-  # already-successful dump.
+  # Deliberately non-fatal: the dump is already safely uploaded and verified by this point - a
+  # transient failure in this secondary cleanup (the bucket's own lifecycle policy is the primary
+  # retention mechanism) must never make a successful backup report as failed.
   if ! rclone delete "${remote_dir}/" --min-age "${BACKUP_RETENTION_DAYS}d"; then
     log "WARNING: secondary remote retention cleanup failed - today's backup is still safely uploaded and verified; relying on the bucket's own lifecycle policy this cycle"
   fi

@@ -17,10 +17,8 @@ export interface AlertProps {
 }
 
 /**
- * `role="alert"` on every tone, not just `danger` - a screen reader announcing an informational or
- * success message immediately (rather than waiting to be discovered) is exactly what the existing
- * call sites already relied on before this component existed. The icon is `aria-hidden` and purely
- * reinforces the tone alongside color/text - it is never the only signal.
+ * `role="alert"` on every tone, not just `danger`, so screen readers announce info/success
+ * messages immediately too. The icon is `aria-hidden` and purely reinforces tone/text.
  */
 export function Alert({ tone = "danger", children }: AlertProps) {
   return (

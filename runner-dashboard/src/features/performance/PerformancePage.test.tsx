@@ -70,8 +70,7 @@ describe("PerformancePage", () => {
 
     const disclaimer = screen.getByText(/not live monitoring, no SLA/);
     expect(disclaimer).toBeInTheDocument();
-    // A review finding: a permanent, present-from-first-render callout must never be `role="alert"`
-    // (an assertive live region meant for errors/urgent changes) - it's a plain, static aside.
+    // Static callout, not an assertive role="alert" live region.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -89,9 +88,7 @@ describe("PerformancePage", () => {
     });
     expect(heading).toBeInTheDocument();
 
-    // The nearest wrapping div is the scenario's own header row (title + StatusBadge), not the
-    // whole card - scoping the query here, not to the full card, is what actually avoids matching
-    // a later "PASSED" Result badge inside the latency table below it.
+    // Scoped to the header row, not the full card, to avoid matching a later "PASSED" table badge.
     const scenarioHeader = heading.closest("div");
     expect(scenarioHeader).not.toBeNull();
     expect(
@@ -116,12 +113,8 @@ describe("PerformancePage", () => {
       within(signalRow as HTMLElement).getByText("OBSERVED ONLY"),
     ).toBeInTheDocument();
 
-    // Aggregate card renamed for precision, per review - "Regressions" alone doesn't say *what*
-    // regressed (a scenario? a metric?).
     expect(screen.getByText("Regressed scenarios")).toBeInTheDocument();
 
-    // Source provenance: short SHA, published timestamp, repetitions, and a real link to the exact
-    // Actions run.
     expect(screen.getByText("abc123d")).toBeInTheDocument();
     expect(screen.getByText("Published")).toBeInTheDocument();
     expect(screen.getByText("Repetitions")).toBeInTheDocument();

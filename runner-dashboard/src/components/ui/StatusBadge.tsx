@@ -14,15 +14,12 @@ export type BadgeStatus =
   | "ABORTED"
   | "TIMED_OUT"
   | "SKIPPED"
-  // Display-only - a test/step relabeled by `run-details-view-model.ts` because it was still
-  // RUNNING when the run itself already reached a terminal status. Never a real wire-level status.
+  // Display-only relabel by `run-details-view-model.ts` for a test/step still RUNNING when the
+  // run itself already reached a terminal status - never a real wire-level status.
   | "INTERRUPTED"
-  // D4.4.3c - a `PerformanceBaseline` scenario's own status (domain/performance-baseline.ts) - never
-  // a wire-level run/test status either.
+  // A `PerformanceBaseline` scenario status (domain/performance-baseline.ts), not a run/test status.
   | "REGRESSION"
-  // D4.4.3c - a `PerformanceBaseline` metric with no locked threshold at all (`passed: null` -
-  // `LatencyMetric.p95LimitMs`/`SignalMetric` genuinely un-gated, see scenario-configs.mjs's own
-  // `thresholdRequired: false`) - reported, never judged pass/fail.
+  // A `PerformanceBaseline` metric with no locked threshold (`passed: null`) - reported, not judged.
   | "OBSERVED ONLY";
 
 type Tone = "neutral" | "info" | "success" | "danger" | "warning";

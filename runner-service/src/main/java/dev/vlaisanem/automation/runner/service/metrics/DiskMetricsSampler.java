@@ -18,42 +18,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * D4.3.2 - {@link DiskUsageService#runnerDataBytes()} (a filesystem-tree walk) and {@link
- * DiskUsageService#databaseBytes()} (a live {@code pg_database_size} query) are both real work -
- * too expensive to recompute on every Prometheus scrape, which could come as often as every few
- * seconds. This sampler recomputes both on a fixed background delay instead and caches the result;
- * the two gauges below only ever read that cache, never recompute live.
+ * Periodically samples {@link DiskUsageService#runnerDataBytes()} (a filesystem-tree walk) and
+ * {@link DiskUsageService#databaseBytes()} (a live {@code pg_database_size} query) and caches the
+ * result, since both are too expensive to recompute on every Prometheus scrape. Runs on its own
+ * single-thread scheduler so a slow sample never delays retention or other scheduled work.
  *
- * <p>Runs on its own dedicated single-thread {@link ScheduledExecutorService} - never the one
- * {@code RetentionScheduler} or anything else uses - so a slow filesystem walk can never delay
- * retention sweeps or any other scheduled work. Uses {@code scheduleWithFixedDelay}, not a fixed
- * rate, so one slow sample can never overlap the next. The first sample runs immediately ({@code
- * initialDelay = 0}), so the gauges never show a misleadingly-fresh {@code 0} for the first {@link
- * RunnerProperties#metricsSampleInterval()} after startup.
- *
- * <p>The two sources are sampled independently, each in its own try/catch - a Postgres hiccup must
- * never prevent the disk-side figure from refreshing, and vice versa. A failed sample leaves the
- * previous cached value in place (stale-but-available, never wiped to {@code 0}) and increments
- * {@link RunnerMetrics#recordSampleFailure}; the paired {@code *_age_seconds} gauge is what makes
- * that staleness visible, since the value itself would otherwise look permanently fresh. The outer
- * scheduled task's own catch is deliberately scoped to {@link RuntimeException}, not {@link
- * Throwable} (a review finding): {@code sampleRunnerData}/{@code sampleDatabase} already handle
- * every {@code RuntimeException} internally, so nothing should ever reach this outer catch in
- * practice - it exists only as a defensive backstop against a future refactor accidentally dropping
- * one of those inner catches. A genuine {@code Error} (an {@code OutOfMemoryError}, a {@code
- * StackOverflowError}, a {@code LinkageError}) is a real JVM-level failure this sampler has no
- * business hiding - swallowing it here would leave the process looking alive while some other part
- * of the JVM may already be in a corrupted state, exactly the kind of silent, misleading survival
- * this project's other fail-loud paths (e.g. {@code RunRecoveryService}'s own startup gate) are
- * built to avoid. Letting it propagate out of this scheduled task is correct: {@link
- * ScheduledExecutorService} stops scheduling further executions of a task that threw, which for a
- * genuine {@code Error} is the right outcome, not a bug to work around.
- *
- * <p>The two disk-size gauges themselves report {@code NaN} until each source's own first sample
- * has actually completed (gated on the same {@code lastSuccess} reference the age gauge already
- * tracks), never a misleadingly-real-looking {@code 0} for whatever window exists between this
- * constructor scheduling that first sample and it actually finishing on the background thread - the
- * two events are not atomic with each other, and a scrape can land in between.
+ * <p>The two sources are sampled independently so a failure in one never blocks the other; a failed
+ * sample keeps the stale cached value (never zeroed) and the paired {@code *_age_seconds} gauge
+ * makes that staleness visible. Each gauge reports {@code NaN} until its source's first sample
+ * completes.
  */
 @Component
 public class DiskMetricsSampler {
@@ -100,10 +73,8 @@ public class DiskMetricsSampler {
             DiskMetricsSampler::ageSeconds)
         .register(registry);
 
-    // RunnerProperties's own compact constructor already rejects a sub-millisecond interval (a
-    // D4.3.2 review finding: a merely-positive Duration can still truncate to 0 via toMillis(),
-    // which scheduleWithFixedDelay itself would otherwise reject) - trusted here unchecked, the
-    // same way every other RunnerProperties-derived value already is throughout this codebase.
+    // RunnerProperties already rejects a sub-millisecond interval (toMillis() would truncate it
+    // to 0, which scheduleWithFixedDelay rejects), so it's trusted here unchecked.
     long intervalMillis = properties.metricsSampleInterval().toMillis();
     scheduler.scheduleWithFixedDelay(this::sampleBoth, 0, intervalMillis, TimeUnit.MILLISECONDS);
   }
@@ -123,10 +94,9 @@ public class DiskMetricsSampler {
   }
 
   /**
-   * The single scheduled tick. {@code sampleRunnerData}/{@code sampleDatabase} already handle every
-   * {@code RuntimeException} internally, so this catch is a defensive backstop only - see this
-   * class's own Javadoc for why it is deliberately scoped to {@code RuntimeException}, not {@code
-   * Throwable}: a genuine {@code Error} must propagate, not be swallowed here.
+   * The single scheduled tick. The inner catches below already handle every {@code
+   * RuntimeException}; this one is a defensive backstop only. Scoped to {@code RuntimeException},
+   * not {@code Throwable}, so a genuine {@code Error} still propagates and stops rescheduling.
    */
   private void sampleBoth() {
     try {

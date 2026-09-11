@@ -94,35 +94,21 @@ coverage `localTest` already provides.
 
 ### Other gaps found while preparing this matrix
 
-1. ~~`quality-gate.yml`'s evidence-upload artifact name was missing `run_attempt`~~ **Fixed** -
-   changed to `automation-evidence-${{ github.run_id }}-${{ github.run_attempt }}`, matching
-   `dashboard-e2e.yml` and `local-sut.yml`. Required before the C5.3 CI run.
-2. **Accessibility's keyboard half had zero automated coverage** - addressed with a new
-   `KeyboardNavigationE2eTest` (see below), not left as a documented gap.
+1. `quality-gate.yml`'s evidence-upload artifact name was missing `run_attempt` - fixed to
+   `automation-evidence-${{ github.run_id }}-${{ github.run_attempt }}`, matching `dashboard-e2e.yml`
+   and `local-sut.yml`.
+2. Accessibility's keyboard half had zero automated coverage - addressed with a new
+   `KeyboardNavigationE2eTest` (see below).
 
-**Review round on this matrix itself (2026-09-04) - 1 P1 + 2 P2, all fixed:**
-
-1. ~~[P1] The Live Focus wait in `AccessibilityE2eTest` used Playwright's 30s default timeout, and a
-   real run hit it~~ **Fixed.** Added `RunDetailsPage.waitForLiveFocusStep(name, Duration)` and used
-   an explicit 75s budget in both `AccessibilityE2eTest` and `KeyboardNavigationE2eTest` - a cold
-   Gradle/JUnit start (or a prior test's queued backend cleanup) can burn a meaningful chunk of the
-   fixed 8s active window before it even begins, and the reported first failure was real proof this
-   isn't just theoretical. Confirmed afterward with a fresh full 21-scenario suite run.
-2. ~~[P2] The focus-indicator assertion didn't cover every element the doc claimed~~ **Resolved by
-   narrowing the documentation**, not by forcing every element through a style check: attempting to
-   verify a real focus-indicator on the Live Focus button, the test disclosure toggle, and the
-   failure-detail `<summary>` surfaced a genuine constraint - Chromium's `:focus-visible` heuristic
-   does not fire for a script-driven `Locator#focus()` call, only a real `Tab` keypress (or a click
-   on a text input), so a style assertion on those three would either be meaningless or require
-   exactly the fragile full-page Tab chain this test was designed to avoid. See "Keyboard navigation
-   regression gate" below for exactly which elements are style-checked and why the rest are
-   functionally-checked only.
-3. ~~[P3] `docs/RELEASE_CANDIDATE.md` described `localJourneyTest` as a "superset-free duplicate...
-   same tags" of `localTest`~~ **Reworded for technical accuracy** - `localTest` selects
-   `includeTags 'regression'` (all 32 tests), `localJourneyTest` selects `includeTags 'journey'`
-   (six classes); the six pass `localTest`'s filter only because every journey test also carries the
-   mandatory `regression` tag, not because `localTest` targets `journey`. The decision (don't add a
-   second CI step) is unchanged - only the reasoning is now precise.
+Two hardening notes from reviewing this matrix: `AccessibilityE2eTest`/`KeyboardNavigationE2eTest`'s
+Live Focus wait uses an explicit 75s budget (`RunDetailsPage.waitForLiveFocusStep`), not Playwright's
+30s default - a cold Gradle/JUnit start can burn a meaningful chunk of the fixed 8s active window
+before the wait even begins. The focus-indicator style assertion only covers a representative subset
+of elements, not every interactive one: Chromium's `:focus-visible` heuristic doesn't fire for a
+script-driven `Locator#focus()` call, only a real `Tab` keypress or a click on a text input, so a
+style check on the rest would either be meaningless or require the fragile full-page Tab chain this
+test deliberately avoids - see "Keyboard navigation regression gate" below for exactly which elements
+are style-checked and why the rest are functionally-checked only.
 
 Every other row has real, currently-passing, correctly-scoped test evidence, and the one remaining
 honest caveat (Recovery's synthetic-transport scope) was already accurately described in the tests'
@@ -243,26 +229,17 @@ Then run the checklist below from inside `$DEST`.
   something is already listening, proven multiple times earlier this project, guarantees this isn't
   accidentally reusing an existing instance).
 
-No fixes were needed - every step passed on the first attempt. **C5.2 is now closed.**
+No fixes were needed - every step passed on the first attempt.
 
-### Review round on this section (2026-09-04) - 1 P1 + 2 P2 + 1 P3, all fixed
+### Review round on this section
 
-1. ~~[P1] Claimed both "every `git ls-files` file was copied" and "`.idea/` never existed" - these
-   contradict each other, since `.idea/.gitignore`/`gradle.xml`/`misc.xml`/`vcs.xml` are genuinely
-   tracked~~ **Fixed.** The copy itself was correct (verified: those four files really were
-   present in the clean copy) - only the doc's own claim about `.idea/` was wrong, caused by
-   checking with plain `ls` (which hides dotfiles) instead of `ls -a`. Corrected to describe what
-   was actually verified: IntelliJ was never launched, and nothing in the build reads `.idea/`.
-2. ~~[P2] The exact reproduction commands weren't recorded, only the result~~ **Fixed** - added the
-   "Reproducing this proof" section above with the literal commands used for the file-list copy,
-   the `.git` restore, the build-output-absence check, and the free-port check.
-3. ~~[P2] "Clean-environment" implied a cold host, but Gradle/npm/Playwright caches were never
-   wiped~~ **Fixed** - retitled to "Clean-workspace reproducibility" and added the explicit "Scope,
-   precisely" paragraph above naming which caches were retained and pointing at C5.3's real CI
-   runners as the actual cold-host proof.
-4. ~~[P3] One paragraph said "22-scenario suite run" while the table says 21/21~~ **Fixed** - the
-   real count is 21 (confirmed against both the source `@Test` methods and the JUnit XML results);
-   changed to "21-scenario."
+A review of this section's own wording fixed four small documentation-accuracy issues (no code or
+proof changes): clarified that `.idea/` files are genuinely tracked in git and were part of the copy
+(the independence proof is that IntelliJ itself was never launched, not their absence); added the
+"Reproducing this proof" section's literal commands above instead of just stating the result;
+retitled this section from "clean-environment" to "clean-workspace" and added the "Scope, precisely"
+paragraph above naming which host caches were retained; and corrected a scenario count to 21,
+matching the table. **C5.2 is now closed.**
 
 ## C5.3 — Three CI proofs on one commit (2026-09-04)
 
@@ -328,30 +305,20 @@ completing successfully in parallel with no interference.
   nothing failed).
 - **Artifact names contain `run_id` + `run_attempt`**: every artifact listed above follows
   `<name>-<run_id>-<run_attempt>` - including `automation-evidence-33913557307-1`, the first real
-  CI confirmation that the C5.1 review round's `quality-gate.yml` naming fix actually works, not
-  just that it reads correctly.
+  CI confirmation that the C5.1 `quality-gate.yml` naming fix actually works.
 
 No fixes were needed - all four workflows passed on their first run against this commit.
-**C5.3 is now closed.**
 
-### Review round on this section (2026-09-04) - 4 P2/P3, all fixed
+### Review round on this section
 
-1. ~~[P2] Left out the fourth green gate on this same commit~~ **Fixed** - added
-   `dashboard-quality.yml` (`run 33913557312`) as a fourth row; no new run was needed since it had
-   already gone green on the same `push`.
-2. ~~[P2] Described `dashboard-e2e.yml`/`local-sut.yml` as "workflow_dispatch-only"~~ **Fixed** -
-   both also carry a weekly `schedule` trigger; reworded to say these *specific runs* were manually
-   dispatched, not that the workflows are dispatch-only.
-3. ~~[P2] "No leftover processes" overclaimed what the cleanup step's own success actually proves~~
-   **Fixed** - reworded to "cleanup safety-net step ran successfully" (verified its commands really
-   are `pkill ... || true` under `continue-on-error: true`, so a green result doesn't by itself
-   prove termination succeeded) and added the real proof instead: `DashboardProcess.stop()`
-   verified to throw on any survivor, making the E2E suite's own green result the actual evidence.
-   Noted a stricter `pgrep`-verifier step as a possible future addition, not implemented now.
-4. ~~[P3] `dashboard-e2e.yml`'s own header comment still said "7 scenarios"~~ **Fixed** - reworded
-   to "the complete dashboard E2E suite" (no fixed number) so it can't go stale again as tests are
-   added; the historical "7 scenarios" mentions in `docs/RELEASE_EVIDENCE.md` were left as-is since
-   that file is an explicitly point-in-time record of a specific past release, not a living claim.
+A review of this section's own wording fixed four documentation-accuracy issues (no new CI runs
+needed): added the already-green `dashboard-quality.yml` as a fourth row; reworded
+`dashboard-e2e.yml`/`local-sut.yml` to say these *specific runs* were manually dispatched rather than
+implying the workflows are dispatch-only (both also carry a weekly `schedule` trigger); reworded the
+cleanup-step claim to "ran successfully" rather than "no leftover processes," with the real proof
+being `DashboardProcess.stop()` throwing on any survivor (so the E2E suite's own green result is what
+actually proves it); and updated a stale "7 scenarios" comment in `dashboard-e2e.yml`'s header to
+"the complete dashboard E2E suite" so it can't go stale again. **C5.3 is now closed.**
 
 ## C5.4 — Portfolio README (2026-09-04)
 
@@ -370,8 +337,8 @@ assumed:
 - **"Run locally in 5 minutes"** - the exact `:runner-service:bootRun` + `npm run dev` two-terminal
   flow, with a table naming both the `PUBLIC`/`SMOKE` and `LOCAL`/`JOURNEY` scenarios and the
   `FIXTURE` suite as the fastest path to seeing the failure/artifact drill-down on demand.
-- **Test strategy and CI**: names and briefly describes all four workflows (adding
-  `dashboard-quality.yml`, the fourth gate the C5.3 review round added), and links to this document's
+- **Test strategy and CI**: names and briefly describes all four workflows (including
+  `dashboard-quality.yml`, the fourth gate C5.3 confirmed green), and links to this document's
   own acceptance matrix rather than re-deriving it.
 - **Requirements**: JDK 21, Node 24, Docker (LOCAL scenario only) - stated once, up front.
 - **Current limitations**: all five items the user named, each verified against real source
@@ -394,51 +361,24 @@ anchor checked against the doc's own real heading text (`#quick-start-suite-only
 this file's own relocated section, `#architecture-current` for `runner-dashboard/README.md`'s
 existing heading) rather than assumed.
 
-### Review round on this section (2026-09-04) - 2 P1 + 3 P2 + 1 P3, all fixed and reverified
+### Review round on this section
 
-1. **[P1] Claimed reconnect replay comes from a durable on-disk journal that survives a service
-   restart** - read `FileBackedRunEventJournal` directly: `readAfter`/`latest` serve purely from
-   `RunJournal.history`, an in-memory `ArrayList` populated only by `append()`; `journals` is a
-   fresh empty map on construction with no code path anywhere that re-hydrates it from the
-   `.events.jsonl` files already on disk. Disk writes are real (synchronous, flushed before
-   `append` returns) but exist for durability of the record, not for serving replay or surviving a
-   restart - confirmed accurate to what the "Current limitations" section already said, which the
-   feature list had contradicted. Reworded to: "Events are synchronously persisted to disk, while
-   reconnect replay uses the canonical in-memory history for the lifetime of the current service
-   instance... Restart recovery and journal re-indexing are planned for Phase D."
-2. **[P1] Quick start never mentioned installing the Chromium browser** - a fresh checkout's first
-   `PUBLIC`/`FIXTURE`/`SMOKE` run would fail without `./gradlew.bat playwrightInstall` run at least
-   once first. Added as an explicit one-time step before the two-terminal walkthrough. Also added
-   Git/Docker Compose as `LOCAL`-specific prerequisites, and reworded "5 minutes" to explicitly
-   scope to the `PUBLIC`/`FIXTURE` fast path - confirmed via `infra/rbp/README.md`'s own words
-   ("slow (several minutes) the first time") that a first local stack build realistically exceeds
-   that budget.
-3. **[P2] Architecture diagram collapsed a real two-hop flow into one arrow** - read
-   `ListenerEventIngestor`'s own Javadoc to confirm the actual path: a JUnit Platform listener and
-   the `Steps` API write raw JSONL + an artifact manifest; the runner's ingestor tails that raw
-   stream and forwards each validated event into its own separate canonical, sequence-numbered
-   journal (the one `FileBackedRunEventJournal` serves replay from). Added a raw-storage node and a
-   tail-back edge to the diagram, and replaced "via a JUnit extension" with the more precise "a
-   JUnit Platform listener and the `Steps` API."
-4. **[P2] "The largest single test class in this repository"** - `dashboardE2eTest` is a Gradle
-   source set/test suite, not one class. Independently recounted (17 files via `grep -rl`, 21
-   `@Test` methods via `grep -rc`, matching the reviewer's own numbers) before fixing to "the
-   largest dedicated test suite in the repository (17 test classes, 21 test methods)."
-5. **[P2] `localTest` cited as 27/27** - that number is the automation-foundation-era count from
-   `docs/RELEASE_EVIDENCE.md` (2026-08-25), not current. Re-ran `localTest` fresh against the still-up
-   local Docker stack rather than trusting old XML on disk: **32/32 passed, 0 failures/errors**,
-   matching both the existing on-disk JUnit XML and the C5.1 acceptance matrix's own count. Split
-   the claim into a current sentence (32/32) and a historical one (the 27-test suite, 10 consecutive
-   `stabilityTest` runs), linking the latter to `RELEASE_EVIDENCE.md`.
-6. **[P3] This file's own C5.4 write-up claimed prior suite content was "preserved in full"** - the
-   diff shows the old fixed-count E2E paragraphs were genuinely replaced (correctly, since they were
-   stale), not preserved verbatim. Reworded to "preserved and reorganized... outdated fixed-count E2E
-   descriptions were replaced with links to the current acceptance matrix," matching what actually
-   happened.
+A review of this section corrected several README claims against real source: reconnect replay is
+served from `FileBackedRunEventJournal`'s in-memory `RunJournal.history`, not from the on-disk
+`.events.jsonl` files - disk writes are synchronous and durable as a record, but nothing re-hydrates
+them into memory on restart, so the README now says "reconnect replay uses the canonical in-memory
+history for the lifetime of the current service instance... restart recovery and journal
+re-indexing are planned for Phase D." The quick-start now explicitly includes the one-time
+`playwrightInstall` step and names Git/Docker Compose as `LOCAL`-only prerequisites, since a fresh
+checkout's first run would otherwise fail. The architecture diagram now shows the real two-hop flow
+(a JUnit Platform listener and the `Steps` API write raw JSONL, which the runner's ingestor tails and
+forwards into the canonical journal), not one collapsed arrow. `dashboardE2eTest` is described as a
+17-class/21-method test suite, not "the largest single test class." `localTest`'s cited count is the
+current 32/32, with the historical 27-test/10-run figure linked to `RELEASE_EVIDENCE.md` instead of
+conflated with it.
 
-Verified after all six: `./gradlew.bat spotlessCheck` clean, `git diff --check` clean. No suite
-re-run needed beyond the fresh `localTest` confirmation above - every other fix was a documentation
-correction against already-verified real source. **C5.4 is now closed.**
+Verified after all fixes: `./gradlew.bat spotlessCheck` clean, `git diff --check` clean. **C5.4 is
+now closed.**
 
 ## C5.5 — Portfolio demo script (2026-09-05)
 
@@ -453,82 +393,50 @@ and `Has artifacts` option labels, per-row and per-step `Copy link` buttons) was
 the real `runner-dashboard` source (`RunLaunchForm.tsx`, `router.tsx`, `TestResultsFilters.tsx`,
 `RunDetailsPage.tsx`) before being written into the script, not assumed from memory.
 
-**Live-verified end to end, not just written from source-reading**, against a real
-`runner-service` + `npm run dev` dashboard + the already-running local Docker RBP stack (Docker
-Desktop was off at the start of this session; started fresh, then `localSutHealth` confirmed all
-seven services healthy before proceeding):
+**Live-verified end to end**, against a real `runner-service` + `npm run dev` dashboard + the
+already-running local Docker RBP stack (`localSutHealth` confirmed all seven services healthy first):
 
 - Launched a real `LOCAL`/`JOURNEY` run from the dashboard's own launch form (selecting `LOCAL`
   correctly narrowed Suite to `JOURNEY` alone) and watched `Progress`/"Active now" update live
   while the six journey classes ran against the local stack.
-- Launched `PUBLIC`/`FIXTURE` *while the LOCAL run was still active* - **this session's own
-  original writeup here was wrong, see the review round below**: the two runs do not progress
-  concurrently. `FIXTURE` correctly stayed `QUEUED` until `LOCAL`/`JOURNEY` reached a terminal
-  status, then flipped to `RUNNING` on its own. `FIXTURE` reached 2/2 complete (1 passed, 1 failed)
-  unattended shortly after that - `CancelDuringStepFixtureTest`'s "blocks mid-step" resolves on its
-  own if nothing cancels it, so no manual cancellation step was needed for this script.
+- Launched `PUBLIC`/`FIXTURE` while that run was still active: `RunService` holds one single global
+  `ThreadPoolExecutor(1, 1, ...)` - exactly one worker thread, shared by every environment and
+  suite, with no per-environment lock. `FIXTURE` correctly stayed `QUEUED` until `LOCAL`/`JOURNEY`
+  reached a terminal status, then flipped to `RUNNING` on its own, reaching 2/2 complete (1 passed,
+  1 failed) unattended shortly after - `CancelDuringStepFixtureTest`'s "blocks mid-step" resolves on
+  its own if nothing cancels it, so no manual cancellation was needed. `docs/PORTFOLIO_DEMO.md`'s
+  step 5 shows this real `QUEUED` -> `RUNNING` transition, re-verified via two runs submitted
+  back-to-back through the real `POST /api/v1/runs` endpoint and screenshotted in the `/runs`
+  history table.
 - Expanded the failed `StepDrilldownFixtureTest`'s steps, confirmed the real exception text,
   screenshot thumbnail, and working trace download link on its failed step.
-- Copied the failed step's deep link and confirmed it in a genuinely separate tab - **found and
-  worked around a real tooling gap while doing this**: Chrome does not treat a CDP-dispatched
-  click as a trusted user gesture for the Clipboard API, so `navigator.clipboard.writeText` was
-  silently rejected on the first attempt (the same reason `DeepLinkE2eTest` itself calls
-  `context.grantPermissions(["clipboard-read","clipboard-write"])` before clicking) - worked
-  around by capturing the write call's argument directly in-page rather than reading the OS
-  clipboard back, then confirming the captured URL genuinely contained `testId=`/`stepId=` and,
-  opened in a new tab, auto-revealed and focused the exact failed step. This is a browser-
-  automation environment limitation, not a defect in the dashboard's own copy-link feature.
+- Copied the failed step's deep link and confirmed it in a genuinely separate tab. Chrome does not
+  treat a CDP-dispatched click as a trusted user gesture for the Clipboard API, so
+  `navigator.clipboard.writeText` needs `context.grantPermissions([...])` granted first (the same
+  reason `DeepLinkE2eTest` does) - a browser-automation environment quirk, not a defect in the
+  dashboard's own copy-link feature. The captured URL contained real `testId=`/`stepId=` query
+  parameters and, opened in a new tab, auto-revealed and focused the exact failed step.
 - Applied the `Problems` status filter alone (narrowed 2 tests to 1), cleared it, then applied the
-  `Has artifacts` evidence filter alone (also narrowed 2 to 1, the same test) - confirmed
-  independently, not just that one filter combination happened to work.
+  `Has artifacts` evidence filter alone (also narrowed 2 to 1, the same test).
 
 No code was written or modified to make any of this work - the whole script runs on UI and backend
-behavior that already existed from prior phases.
+behavior that already existed from prior phases. `docs/PORTFOLIO_DEMO.md` also gained a "One-time
+setup" section (`npm ci`, `playwrightInstall`, JDK 21/Node 24, Git/Docker Compose for `LOCAL` only)
+so a fresh machine doesn't fail partway through, and is scoped as "reproducible when the documented
+prerequisites are met" rather than an unconditional guarantee - run IDs, timestamps, and exact
+durations vary run to run even though the UI states and behavior don't.
 
-### Review round on this section (2026-09-05) - 2 P1 + 2 P2, all fixed and reverified
+Verified: `./gradlew.bat spotlessApply` clean, `git diff --check` clean.
 
-1. **[P1] Claimed `LOCAL`/`JOURNEY` and `PUBLIC`/`FIXTURE` run concurrently thanks to an
-   "environment-scoped lock"** - read `RunService` directly: there is no per-environment lock
-   anywhere in it. It holds one single global `ThreadPoolExecutor(1, 1, ..., new
-   ArrayBlockingQueue<>(queueCapacity))` - exactly one worker thread, shared by every environment
-   and suite. A second run submitted while one is active is queued behind it (`RunStatus.QUEUED`
-   is a first-class, fully-modeled state - see `RunStatus.java` and the dashboard's own
-   `StatusBadge.tsx`), regardless of environment. The original live session had actually witnessed
-   this correctly (`FIXTURE` only appeared to start once `LOCAL`/`JOURNEY` had in fact already
-   finished, purely because enough real wall-clock time passed while working around browser-
-   automation flakiness) - the "concurrent, environment-scoped lock" explanation was an incorrect
-   inference layered on top of an otherwise-real observation, not a fabricated result. **Turned
-   into a better, more accurate demo per the reviewer's own suggestion**: re-verified live by
-   submitting both runs back-to-back through the real `POST /api/v1/runs` endpoint (`LOCAL`/
-   `JOURNEY` runId `83ac354d-...`, then immediately `PUBLIC`/`FIXTURE` runId `84d2907f-...`) -
-   confirmed via `GET /api/v1/runs/{id}` polling and screenshotted in the dashboard's own `/runs`
-   history table that the second run rendered `QUEUED` (not `RUNNING`) for the entire time the
-   first was still `RUNNING`, then automatically flipped to `RUNNING` the instant the first reached
-   `SUCCEEDED` - with zero manual intervention. `docs/PORTFOLIO_DEMO.md`'s step 5 now describes and
-   asks the presenter to actually show this `QUEUED` -> `RUNNING` transition as the real, correct
-   behavior it is, rather than a mistaken concurrency claim.
-2. **[P1] This document's own C5.5 writeup repeated the same incorrect "concurrent, no conflict"
-   result** - corrected in place above (see the "this session's own original writeup here was
-   wrong" note) rather than deleting the history of the mistake, so the record stays honest about
-   what was actually claimed first and why it was wrong.
-3. **[P2] The demo script skipped one-time setup** (`npm ci`, `playwrightInstall`, JDK 21/Node 24
-   prerequisites) and would fail on a fresh machine that hadn't already run the suite before.
-   `docs/PORTFOLIO_DEMO.md` gained a "One-time setup" section (linking to the README's own "Run it
-   locally in 5 minutes" for full detail) plus a macOS/Linux `./gradlew` note on every command, and
-   named Git/Docker Compose as `LOCAL`-only prerequisites.
-4. **[P3] "Reproduces the same nine observations every time" overclaimed what a clean `git status`
-   alone guarantees** - a healthy local stack, network reachability to the public target, and both
-   processes actually running all matter too, and the script itself allows skipping the `LOCAL`
-   scenario. Reworded to "reproducible when the documented prerequisites are met," and separated
-   deterministic application behavior (which UI states appear, how filters narrow the table, what
-   the deep link reveals) from run-to-run-variable values (run IDs, timestamps, exact durations) -
-   the latter are now explicitly framed as illustrative examples from one real session, not
-   guaranteed numbers.
+### Review round on this section
 
-Verified after all four: re-ran the corrected step 5 live (two real runs via the real REST API,
-`QUEUED` -> `RUNNING` transition screenshotted in both the run's own detail page and the `/runs`
-history table), `./gradlew.bat spotlessApply` clean, `git diff --check` clean. **C5.5 is now
-closed.**
+A review of this section corrected an inaccurate claim that the two runs above progress
+concurrently thanks to an "environment-scoped lock" - there is no such lock; `RunService` uses one
+single global single-worker executor regardless of environment, and the "Live-verified" bullets
+above now describe the real `QUEUED` -> `RUNNING` behavior instead. Also added the demo script's
+"One-time setup" section (also reflected above) so a fresh machine doesn't fail partway through, and
+narrowed the reproducibility claim to "when the documented prerequisites are met" rather than
+unconditional. **C5.5 is now closed.**
 
 ## C5.6 — RC sign-off (2026-09-05)
 
@@ -551,18 +459,14 @@ one commit earlier).
 | `git status`/`git diff --check` | ✅ clean, no stray `build/`/log/artifact files tracked (checked via `git ls-files` against `.log`/`build/`/`node_modules/`/`dist/`/`coverage/`/`allure-results`/`test-results` patterns - the only two hits were legitimately-named source files, `test-results-filter.ts`/`.test.ts`) |
 | README/`docs/RELEASE_CANDIDATE.md` render correctly on GitHub | ✅ checked the real rendered pages (not just local preview) - hero image loads, all anchor links and relative doc links (`PORTFOLIO_DEMO.md` included) resolve, no broken-image placeholders or unrendered markdown |
 
-**A real, fixed defect found along the way, not just a clean pass**: `npm run check`'s
-`format:check` and both `api:check:snapshot`/`api:check:contract` initially reported ~102 files and
-the regenerated OpenAPI client as "dirty," but every one was verified via `git hash-object` (worktree)
-vs. `git rev-parse HEAD:<path>` (committed blob) to be **byte-identical to `HEAD`** - a real false
-positive, not a real drift. Root cause: this machine's `core.autocrlf=true` checks tracked text files
-out as CRLF, which Prettier's default `endOfLine:"lf"` then flags, while `git status` itself also
-misreports these files as modified due to the same CRLF/LF mismatch (confirmed via
-`git add --renormalize`, which cleared the false "M" flags without changing a single byte of tracked
-content). Fixed at the root, not by reformatting-and-hoping: added `.gitattributes`
-(`* text=auto eol=lf`, plus explicit `binary` for `jpg`/`jpeg`/`png`/`ico`/`jar`) so every future
-checkout on any contributor's machine gets LF regardless of their local `core.autocrlf` - this is the
-one code change C5.6 itself introduced, and it is the commit this sign-off targets.
+`npm run check`'s `format:check` and both `api:check:snapshot`/`api:check:contract` initially
+reported ~102 files and the regenerated OpenAPI client as "dirty," but every one was byte-identical
+to `HEAD` - a false positive caused by this machine's `core.autocrlf=true` checking tracked text
+files out as CRLF, which Prettier's default `endOfLine:"lf"` then flags (and which also makes `git
+status` misreport them as modified). Fixed at the root: added `.gitattributes` (`* text=auto
+eol=lf`, plus explicit `binary` for `jpg`/`jpeg`/`png`/`ico`/`jar`) so every future checkout gets LF
+regardless of local `core.autocrlf` - this is the one code change C5.6 itself introduced, and it is
+the commit this sign-off targets.
 
 ### CI proof - all four workflows green on commit `a43c880`
 
@@ -577,28 +481,24 @@ upload/diagnostic steps, correctly `skipped` since nothing failed) came back `su
 | `dashboard-e2e.yml` | [33960912594](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33960912594) | ✅ success |
 | `local-sut.yml` | [33961215952](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/runs/33961215952) | ✅ success |
 
-**Not a clean first try, and that's part of the real evidence, not swept under the rug**:
 `quality-gate.yml` failed twice in a row on the prior commit (`2272ef7`) before this one - once on
 `RoomApiContractTest` (the shared `PUBLIC` target briefly had rooms 4-6 missing `image`/
 `description`), once on `BookingAuthorizationApiTest` (the shared target briefly returned `500`
 instead of `403` for an anonymous booking read). Both were root-caused against the real, live public
-target (not guessed): `git blame`/log confirmed our own suite never creates rooms in a `read-only`
-run, and a direct `curl` against `https://automationintesting.online/api/room` and `/api/booking/1`
-at investigation time showed clean, schema-valid data and the correct `403` - proving both failures
-were transient third-party state on the shared sandbox, not a regression in this repository. Per the
-user's own explicit choice, no code was changed to chase these - the job was simply re-run, and it
-passed. This is exactly the accepted, documented nature of the `PUBLIC` canary (see the root
-README's "Current limitations" and this project's own long-standing classification discipline:
-public-target failures are `application`/`infrastructure` noise, not proof the framework itself
-regressed) - not a gap C5.6 needed to paper over.
+target: a direct `curl` against `https://automationintesting.online/api/room` and `/api/booking/1`
+at investigation time showed clean, schema-valid data and the correct `403`, confirming both
+failures were transient third-party state on the shared sandbox, not a regression in this
+repository. Per the user's own explicit choice, no code was changed to chase these - the job was
+simply re-run, and it passed. This matches the accepted, documented nature of the `PUBLIC` canary
+(see the root README's "Current limitations": public-target failures are `application`/
+`infrastructure` noise, not proof the framework itself regressed).
 
 ### Portfolio demo
 
-Already proven live end-to-end this same day, in C5.5's own review round (see above) - all nine
-script steps walked through for real against a real `runner-service` + dashboard + local Docker RBP
-stack, including the corrected `QUEUED` -> `RUNNING` step 5. Not independently re-run a third time
-for C5.6 itself; re-verifying the exact same script a second time in the same session would have
-added nothing beyond what C5.5's own review round already proved.
+Already proven live end-to-end this same day (see C5.5 above) - all nine script steps walked through
+for real against a real `runner-service` + dashboard + local Docker RBP stack, including the correct
+`QUEUED` -> `RUNNING` step 5. Not independently re-run a third time for C5.6 itself; re-verifying the
+exact same script a second time in the same session would have added nothing new.
 
 ### Known limitations (carried into the RC, not hidden)
 
@@ -659,57 +559,35 @@ server-side catalog the server itself generates and re-validates.
 - Dashboard: `CustomTestPicker` (search, Layer dropdown, separate Smoke-only checkbox, select-all-
   visible, clear-selection), wired into `RunLaunchForm` behind the existing `Suite` dropdown.
 
-### Review round on this increment - 4 P1 + 3 P2 + 1 P3 fixed, 1 P3 deliberately deferred
+### Hardening applied to this increment
 
-1. **[P1] `testCatalogCheck` wasn't wired into any CI workflow** - fixed: added as a step in
-   `quality-gate.yml` immediately after the existing read-only test gate.
-2. **[P1] `testKey` uniqueness/canonical-form/exactly-one-layer/tag-sorting not enforced by the
-   generator** - fixed in `TestCatalogGenerator` (see above); re-generated the real catalog and
-   confirmed byte-identical content to the pre-fix version, now provably validated rather than
-   incidentally correct.
-3. **[P1] `TestCatalogService` performed no content validation at runtime-load time** - fixed: added
-   `TestCatalogContentValidator`, applying the same checks the generator enforces, invoked on every
-   `current()` call; also fixed `CustomTestSelectionValidator`'s catalog-to-map step, which
-   previously overwrote a duplicate `testKey` silently (last one wins) - it now fails fast instead.
-4. **[P1] No permanent, committed E2E scenario for `Suite.CUSTOM`** (only a manual, in-session
-   browser check existed) - fixed: added `CustomRunE2eTest` to the `dashboardE2eTest` source set -
-   selects exactly two stable `PUBLIC` tests through the real `CustomTestPicker`, launches `CUSTOM`,
-   confirms `SUCCEEDED`/`Total=2`/`Passed=2`, confirms both selected tests' rows are present and a
-   third, unselected catalog test's row is absent, and confirms the REST response's own
-   `selectedTests` snapshot matches the selection exactly via a direct same-origin `GET`. **Run live
-   against the real backend + dashboard + Chromium and passed** (not just written from source-
-   reading) before being considered done.
-5. **[P2] `CustomTestPicker`'s catalog query had no retry/recovery pattern** - fixed: mirrors the
-   existing capabilities/health-query pattern (poll while erroring + `refetchIntervalInBackground:
-   true`, with a testable interval prop). Two new tests prove recovery without remounting, including
-   a backgrounded-tab scenario - the latter was verified to actually fail without
-   `refetchIntervalInBackground: true` before being trusted as a meaningful regression test, not
-   just written and assumed correct.
-6. **[P2] `TestCatalogUnavailableException`'s client-facing message embedded a resolved absolute
-   filesystem path**, leaked verbatim by `RunExceptionHandler` in a 503 `ProblemDetail.detail` -
-   fixed to match the existing `ArtifactManifestCorruptException` pattern: a generic client-facing
-   message, with the real path carried only in a `diagnosticReason()` logged server-side. A logback
-   `ListAppender` test proves the path reaches the log but never the client-facing response.
-7. **[P2] No full-chain `RunServiceTest` for `CUSTOM`** - fixed: added a test exercising catalog load
-   -> validation -> immutable selection snapshot -> the actual launched `customTest --tests ...`
-   command (with a second, unselected catalog entry proving the command carries exactly the selected
-   filter and nothing else), plus a negative-path test proving an invalid selection never saves a
-   `Run`, never emits any event, and never launches a process. A `RunControllerTest` addition proves
-   the request body's `testKeys` reach `RunService.submit` and the response's `selectedTests`
-   reflects what the service returned.
-8. **[P3] `RunResponse` exposed the domain `SelectedTestSnapshot` record directly** - fixed: added a
-   dedicated `SelectedTestResponse` DTO with explicit mapping, mirroring `RunResponse`'s own existing
-   separation from the `Run` domain record. Re-exported the OpenAPI spec from a real running backend
-   and regenerated the TypeScript client (the schema component name changed from
-   `SelectedTestSnapshot` to `SelectedTestResponse`, field shape unchanged) - full frontend `npm run
-   check` and the backend test suite both re-verified green afterward.
-9. **[P3, deliberately deferred] `maxSelectableTests` (currently 25, enforced server-side) is not
-   exposed to the frontend** - `CustomTestPicker`'s "Select all visible" could exceed the limit once
-   the catalog grows past 25 entries. Left deferred, per the explicit condition it was accepted
-   under: the real catalog has 10 entries today, well under the cap, and server-side validation
-   (`CustomTestSelectionValidator`) remains the final authority regardless - an over-limit request is
-   still rejected with a 400, never silently truncated or accepted. Must be revisited before the
-   catalog is allowed to grow past 25, and preferably before D2.
+A review pass added several protections beyond the initial build: `testCatalogCheck` is wired into
+`quality-gate.yml` right after the read-only test gate, so a stale committed catalog fails CI, not
+just local generation. `TestCatalogService` re-validates the catalog's content (uniqueness,
+canonical form, exactly-one-layer, tag set) on every `current()` call via
+`TestCatalogContentValidator` - the same checks `TestCatalogGenerator` enforces at generation time,
+applied again at runtime since a deployed catalog file is untrusted input; `CustomTestSelectionValidator`'s
+catalog-to-map step now fails fast on a duplicate `testKey` instead of silently overwriting it.
+`CustomRunE2eTest` (`dashboardE2eTest`) is a permanent, committed end-to-end scenario for
+`Suite.CUSTOM`: selects two stable `PUBLIC` tests through the real `CustomTestPicker`, launches
+`CUSTOM`, confirms the run succeeds with exactly those two tests present and a third catalog test
+absent, and confirms the REST response's `selectedTests` snapshot matches the selection exactly.
+`CustomTestPicker`'s catalog query has the same poll-while-erroring +
+`refetchIntervalInBackground: true` retry pattern already used for capabilities/health queries.
+`TestCatalogUnavailableException`'s client-facing message no longer leaks a resolved filesystem
+path - it carries a generic message, with the real path only in a server-side-logged
+`diagnosticReason()`. `RunServiceTest`/`RunControllerTest` cover the full `CUSTOM` chain (catalog
+load -> validation -> immutable selection snapshot -> the launched `customTest --tests ...` command)
+and the negative path (an invalid selection never saves a `Run`, emits an event, or launches a
+process). `RunResponse` exposes a dedicated `SelectedTestResponse` DTO rather than the domain
+`SelectedTestSnapshot` record directly, mirroring `RunResponse`'s existing separation from `Run`.
+
+**Deliberately deferred**: `maxSelectableTests` (currently 25, enforced server-side) is not exposed
+to the frontend, so `CustomTestPicker`'s "Select all visible" could exceed it once the catalog grows
+past 25 entries - accepted because the real catalog has 10 entries today and
+`CustomTestSelectionValidator` remains the final authority regardless (an over-limit request is
+rejected with `400`, never silently truncated). Must be revisited before the catalog grows past 25,
+preferably before D2.
 
 ### Known limitations (D0.5-specific, in addition to the RC's own)
 

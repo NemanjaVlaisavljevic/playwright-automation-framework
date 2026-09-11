@@ -8,13 +8,9 @@ import dev.vlaisanem.automation.api.ApiResult;
 import java.net.URI;
 
 /**
- * The admin report/booking calendar at {@code /admin/report}, built on react-big-calendar. Its
- * month view lays out event boxes and day-number cells as separate, position-matched DOM trees
- * (confirmed live: an event's {@code .rbc-row-segment} is not a descendant of its day's {@code
- * .rbc-date-cell}) - there is no reliable containment-based locator to prove an event renders on a
- * specific day. {@link #openAndCaptureReport()} instead captures the exact {@code /api/report} data
- * the calendar itself fetched and rendered from, so date correctness is verified against that data
- * rather than guessed from calendar-grid pixel/column position.
+ * The report calendar (react-big-calendar) renders events and day cells as separate, non-nested DOM
+ * trees, so no locator can prove an event renders on a specific day. {@link
+ * #openAndCaptureReport()} instead captures the {@code /api/report} response the calendar fetched.
  */
 public final class AdminReportPage {
   private final Page page;

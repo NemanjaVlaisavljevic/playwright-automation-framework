@@ -1,7 +1,6 @@
 /**
- * Reads the `XSRF-TOKEN` cookie Spring Security's `CookieCsrfTokenRepository` writes (see
- * `GET /api/v1/auth/csrf`, primed on app bootstrap and again after logout) - the value is echoed
- * back via the `X-XSRF-TOKEN` header on every mutating request, Spring Security's own convention.
+ * Reads the `XSRF-TOKEN` cookie Spring Security's `CookieCsrfTokenRepository` writes. The value is
+ * echoed back via the `X-XSRF-TOKEN` header on every mutating request.
  */
 export function getCsrfTokenFromCookie(): string | undefined {
   const match = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);

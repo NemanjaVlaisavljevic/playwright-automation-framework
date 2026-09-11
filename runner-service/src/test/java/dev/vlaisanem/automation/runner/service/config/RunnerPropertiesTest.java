@@ -10,14 +10,10 @@ import org.springframework.boot.test.context.ConfigDataApplicationContextInitial
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
- * Real {@code @ConfigurationProperties} binding against the actual {@code application.yml} on the
- * classpath - not merely constructing the record directly - proves the D3.3 rate-limit keys
- * (including the nested {@link RateLimitRule} values) and the D4.1 retention keys bind the way the
- * rest of this codebase assumes, the same "verify the binding actually works" discipline {@code
- * RunnerSecurityEnvironmentPostProcessor}'s {@code Binder}-based fix already established. Also
- * covers the compact constructor's own validation boundaries for the newly-added D3.3/D4.1 fields
- * specifically - every pre-existing field's validation is already exercised indirectly by every
- * other test in this module constructing a valid {@link RunnerProperties}.
+ * Binds against the real {@code application.yml} (not just constructing the record directly) to
+ * prove the rate-limit and retention keys, including nested {@link RateLimitRule} values, bind as
+ * the rest of the codebase assumes. Also covers the compact constructor's validation boundaries for
+ * these fields; other fields are already exercised indirectly by the rest of this module.
  */
 class RunnerPropertiesTest {
 
@@ -683,12 +679,10 @@ class RunnerPropertiesTest {
   }
 
   /**
-   * D4.3.2 review finding - a merely-positive sub-millisecond {@code Duration} used to pass this
-   * class's own validation yet truncate to {@code 0} via {@code DiskMetricsSampler}'s own {@code
-   * toMillis()} call, which {@code ScheduledExecutorService#scheduleWithFixedDelay} then rejected
-   * outright (it requires a strictly positive delay) - a confusing failure deep inside {@code
-   * java.util.concurrent} during bean creation, not a clear, property-named error at config
-   * validation time.
+   * A sub-millisecond {@code Duration} truncates to 0ms via {@code DiskMetricsSampler#toMillis()},
+   * which {@code scheduleWithFixedDelay} rejects outright - validation must catch this with a clear
+   * property-named error, not a confusing failure deep inside {@code java.util.concurrent} during
+   * bean creation.
    */
   @Test
   void rejectsASubMillisecondMetricsSampleInterval() {

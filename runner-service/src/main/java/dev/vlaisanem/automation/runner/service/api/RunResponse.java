@@ -9,20 +9,15 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * Wire representation of a {@link Run}. Kept separate from the domain record (rather than
- * serializing {@link Run} directly) so an internal refactor of {@code Run} does not silently change
- * the REST contract. Null fields are omitted (see {@code spring.jackson.default-property-
- * inclusion} in application.yml), so {@code startedAt}/{@code finishedAt}/{@code exitCode}/{@code
- * detail} are absent - not present-with-null - for a non-terminal (or not-yet-started) run.
+ * Wire representation of a {@link Run}, kept separate so an internal refactor of {@code Run}
+ * doesn't silently change the REST contract. Null fields are omitted, so {@code startedAt}/{@code
+ * finishedAt}/{@code exitCode}/{@code detail} are absent - not present-with-null - for a
+ * non-terminal run.
  *
- * <p>Every component here is annotated with an explicit {@code requiredMode}, deliberately, rather
- * than relying on springdoc's default inference: verified live against a real {@code /v3/api-docs}
- * response that, absent any Bean Validation annotation on a plain (non-validated) response record,
- * springdoc infers <em>no</em> {@code required} array at all - not even for {@code runId}, which is
- * always present. Leaving that to inference would have produced a generated TypeScript client where
- * every field, including ones that can never actually be absent, is optional. {@link
- * #processLogUrl()} is present from the moment the run is accepted, although the endpoint returns
- * {@code 404} until the process creates its log.
+ * <p>Every component carries an explicit {@code requiredMode}: springdoc infers no {@code required}
+ * array at all for a plain (non-validated) response record, which would otherwise make every field
+ * optional in the generated TypeScript client. {@link #processLogUrl()} is present as soon as the
+ * run is accepted, though the endpoint 404s until the process creates its log.
  */
 public record RunResponse(
     @Schema(requiredMode = Schema.RequiredMode.REQUIRED) String runId,
@@ -39,10 +34,9 @@ public record RunResponse(
     @Schema(requiredMode = Schema.RequiredMode.REQUIRED) boolean artifactsPurged) {
 
   /**
-   * {@code artifactsPurged} defaults to {@code false} - correct for every caller except {@code
-   * RunController#get}, which separately queries the real value: a run this record is built for
-   * immediately after create/cancel cannot possibly have already had its artifacts purged (D4.1's
-   * retention window can only ever elapse well after this exact moment).
+   * {@code artifactsPurged} defaults to {@code false}, correct for every caller except {@code
+   * RunController#get}: a run built immediately after create/cancel can't already have had its
+   * artifacts purged.
    */
   public static RunResponse from(Run run) {
     return from(run, false);

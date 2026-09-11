@@ -7,12 +7,8 @@ export interface UseCanManageRunsOptions {
 }
 
 /**
- * The one thing every admin-gated control (`RunLaunchForm`, `RunsTable`, `RunDetailsPage`) must
- * check - never `useCurrentUser().data.canManageRuns` alone. A logged-in admin whose CSRF token
- * hasn't primed yet (or failed to, and hasn't recovered) would still send a launch/cancel request
- * without a valid `X-XSRF-TOKEN` header, which the backend rejects with 403 regardless of the
- * caller's real permission - so "can manage runs" from the frontend's own perspective means both
- * "the backend says so" and "a CSRF token is actually ready to send."
+ * True only when the backend grants manage-runs permission AND a CSRF token is ready to send -
+ * an admin without a primed token would still get a 403 on mutating requests.
  */
 export function useCanManageRuns({
   csrfRetryIntervalMs,

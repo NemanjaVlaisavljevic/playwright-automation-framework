@@ -21,8 +21,7 @@ public record AdminGithubAllowlist(Set<Long> ids) {
 
   /**
    * @throws IllegalArgumentException if {@code raw} is blank, or contains any entry that is blank
-   *     or not a valid {@code long} - a malformed admin-id configuration is always a startup-time
-   *     failure, never silently ignored or partially applied.
+   *     or not a valid {@code long}.
    */
   public static AdminGithubAllowlist parse(String raw) {
     if (raw == null || raw.isBlank()) {
