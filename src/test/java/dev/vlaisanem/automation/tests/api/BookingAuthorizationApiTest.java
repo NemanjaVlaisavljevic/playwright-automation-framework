@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.microsoft.playwright.APIRequestContext;
 import dev.vlaisanem.automation.api.ApiResult;
 import dev.vlaisanem.automation.api.BookingClient;
+import dev.vlaisanem.automation.api.TransientApiRetry;
+import dev.vlaisanem.automation.config.TestConfig;
 import dev.vlaisanem.automation.core.AutomationTest;
 import dev.vlaisanem.automation.core.Steps;
 import io.qameta.allure.Epic;
@@ -24,9 +26,14 @@ class BookingAuthorizationApiTest {
 
   @Test
   @DisplayName("Anonymous guest cannot read a booking by id")
-  void anonymousCannotReadBooking(APIRequestContext request, Steps steps) {
+  void anonymousCannotReadBooking(APIRequestContext request, TestConfig config, Steps steps) {
+    BookingClient bookings = new BookingClient(request);
     ApiResult response =
-        steps.call("Read a booking anonymously", () -> new BookingClient(request).getBooking(1));
+        steps.call(
+            "Read a booking anonymously",
+            () ->
+                TransientApiRetry.executeSharedTargetGet(
+                    () -> bookings.getBooking(1), config.targetsSharedEnvironment()));
 
     steps.run(
         "Verify anonymous read is rejected", () -> assertThat(response.status()).isEqualTo(403));
