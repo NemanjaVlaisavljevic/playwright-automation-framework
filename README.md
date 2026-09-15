@@ -1,73 +1,89 @@
-# Playwright Test Runner & Live Dashboard
+# Playwright Automation Platform
 
+[![Live demo](https://img.shields.io/badge/live-demo-1f883d?logo=cloudflare&logoColor=white)](https://automation.vlaisavljevic.dev)
+[![Quality Gate](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/workflows/quality-gate.yml/badge.svg?branch=master)](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/workflows/quality-gate.yml)
+[![Dashboard Quality](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/workflows/dashboard-quality.yml/badge.svg?branch=master)](https://github.com/NemanjaVlaisavljevic/playwright-automation-framework/actions/workflows/dashboard-quality.yml)
 [![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk)](https://openjdk.org/projects/jdk/21/)
 [![Playwright](https://img.shields.io/badge/Playwright-1.62-2EAD33?logo=playwright)](https://playwright.dev/java/)
-[![JUnit](https://img.shields.io/badge/JUnit-6.0-25A162?logo=junit5)](https://junit.org/)
 [![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.1-6DB33F?logo=springboot)](https://spring.io/projects/spring-boot)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev/)
-[![Node](https://img.shields.io/badge/Node-24_LTS-339933?logo=node.js)](https://nodejs.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+
+**A production-deployed test execution platform built around Java, Playwright, Spring Boot,
+React, and PostgreSQL.** Launch an allowlisted suite from the browser and follow every test and
+step in real time, with durable event replay and failure evidence attached to the exact step that
+produced it.
+
+> **Live dashboard:** [automation.vlaisavljevic.dev](https://automation.vlaisavljevic.dev)
+>
+> Run history, results, progress, logs, and artifacts are public to inspect. Launching or cancelling
+> a run is deliberately restricted to the repository owner's allowlisted GitHub account.
+
+[Local demo script](docs/PORTFOLIO_DEMO.md) ·
+[System architecture](docs/ARCHITECTURE.md) ·
+[Deployment architecture](docs/DEPLOYMENT_ARCHITECTURE.md) ·
+[Operations runbook](docs/RUNBOOK.md) ·
+[Release evidence](docs/RELEASE_EVIDENCE.md)
 
 ![Real-time step and failure drill-down in the runner dashboard](docs/screenshots/dashboard-step-failure-artifact-drilldown.jpg)
 
-A test suite is only as useful as the feedback loop around it. This project starts from a
-portfolio-grade Java/Playwright automation suite and builds a real, self-hosted **runner service
-and live dashboard** on top of it - so instead of reading a Gradle console or a static HTML report
-after the fact, you launch a suite from a web UI and watch it execute test by test, step by step, in
-real time, with failures, screenshots, and traces surfacing the moment they happen.
+## Why this project
 
-## What it does
+This is more than a browser test repository with a generated report. It treats test execution as a
+small production system and makes the engineering around the tests visible:
 
-- **REST-triggered runs** - pick an environment and suite from an allowlist, launch a real Gradle
-  test process through a small Spring Boot service, no SSH/CI-console round trip required.
-- **Live progress over Server-Sent Events** - every `RUN_*`/`TEST_*`/`STEP_*` event streams to the
-  browser as it happens, synchronously persisted to PostgreSQL as it's emitted (Faza D2) - a
-  dropped connection reconnects and replays cleanly from that same durable history, and a run still
-  `QUEUED`/`STARTING`/`RUNNING` when the service itself restarts is reconciled to a terminal status
-  on the next startup, never left silently stuck (Faza D2.5).
-- **GitHub OAuth2 admin login and abuse protection (Faza D3)** - reading run history, results, live
-  progress, and artifacts stays public and anonymous by design, but launching or cancelling a run
-  requires signing in with one specific, allowlisted GitHub account (numeric account ID, never a
-  username) via a real server-side OAuth2 Login flow - the access token never reaches the browser.
-  Every surface, authenticated or anonymous, is additionally rate-limited (per client IP or per
-  admin account, depending on the surface), with a verified reverse-proxy IP-trust boundary, a
-  pre-deserialization request-size cap, and CSP/Permissions-Policy headers with no cross-origin API
-  access. See `docs/DEPLOYMENT_ARCHITECTURE.md` §4 for the full access matrix.
-- **Automatic retention (Faza D4.1)** - a terminal run is fully cleaned up (row + every on-disk
-  file) once it exceeds a bounded age or count window, whichever comes first; its artifact files
-  alone get their own shorter, independent window, so a run's history can outlive its
-  screenshots/traces. Crash-safe and idempotent (a background sweep safely resumes after a
-  restart), never touches a still-running run, and both a dry-run preview and an on-demand trigger
-  are available to an admin. See `docs/DEPLOYMENT_ARCHITECTURE.md` §6 for the full mechanism.
-- **Step-level reporting** - a `Steps` API instrumented directly in the test code reports
-  step-by-step progress inside each test, not just a pass/fail at the end - see it live in the
-  dashboard's "Live Focus" panel and, after the fact, as a per-test drill-down.
-- **Artifacts wired to the exact failure** - a failing step's screenshot and Playwright trace are
-  attributed to that step specifically (not just "the test failed somewhere"), downloadable straight
-  from the failure it belongs to.
-- **Cancellation** - stop a run mid-flight; the active test and step are reconciled to `INTERRUPTED`
-  rather than left in a misleading `RUNNING` state forever.
-- **Transport recovery** - a dropped SSE connection reconnects and replays cleanly from the last
-  acknowledged event; a genuinely gapped stream triggers a full fresh replay instead of silently
-  desyncing.
+| Concern | Implementation |
+|---|---|
+| Automation | Java 21, Playwright, JUnit 6, API/UI/journey coverage, enforced risk and effect tags |
+| Control plane | Spring Boot REST API, allowlisted suites, bounded queue, cancellation, process-tree cleanup |
+| Live reporting | Server-Sent Events with sequence numbers, replay, reconnect recovery, test- and step-level progress |
+| Diagnostics | Screenshots, Playwright traces, logs, and artifacts linked to the precise failing test step |
+| Persistence | PostgreSQL 17, Flyway migrations, transactional event history, startup recovery, automatic retention |
+| Security | GitHub OAuth2 numeric-ID allowlist, CSRF protection, rate limits, request-size bounds, strict security headers |
+| Frontend | React 19, TypeScript, Vite, generated OpenAPI client, responsive and accessibility-tested UI |
+| Operations | Docker Compose, Caddy-managed TLS, Cloudflare proxy, health checks, isolated networks, restart-safe services |
 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    A["React dashboard"] -->|"REST + SSE"| B["Spring Boot runner"]
-    B -->|"ProcessBuilder"| C["Gradle / JUnit / Playwright"]
-    C -->|"raw JSONL events + artifact manifest"| S["Raw journal + artifacts on disk"]
-    S -->|"tailed by the runner"| B
+flowchart LR
+    V["Visitor"] --> CF["Cloudflare"]
+    CF --> C["Caddy / origin TLS"]
+    C -->|"static assets"| UI["React dashboard"]
+    C -->|"REST + SSE"| R["Spring Boot runner"]
+    R -->|"ProcessBuilder"| T["Gradle / JUnit / Playwright"]
+    T -->|"JSONL events + artifacts"| R
+    R --> P[("PostgreSQL")]
 ```
 
-The dashboard never talks to Gradle/JUnit directly - it only ever sees the runner's REST/SSE
-surface. Two steps sit between the test process and the dashboard: a JUnit Platform listener and
-the `Steps` API write raw test/step JSONL events and an artifact manifest as the suite runs; the
-runner tails that raw stream (not log-scraping) and appends each validated event into its own
-canonical, sequence-numbered journal, which is what SSE replay is actually served from. See
-[Architecture](docs/ARCHITECTURE.md) for the automation suite's own internal lifecycle, and
-[`runner-dashboard/README.md`](runner-dashboard/README.md#architecture-current) for the frontend's
-state model in more depth.
+Only Caddy publishes host ports (`80`/`443`). The runner and PostgreSQL stay on private Compose
+networks; PostgreSQL is additionally isolated on an internal data network that the web container
+cannot join. The live deployment uses a valid origin certificate with Cloudflare **Full (strict)**
+TLS, while Caddy applies the application routing and security headers.
+
+The dashboard never talks to Gradle or JUnit directly. A JUnit Platform listener and the `Steps`
+API write structured test/step events and an artifact manifest as the suite runs. The runner tails
+that stream (not console-log scraping), validates it, persists a canonical sequence-numbered event
+history, and serves both the live SSE feed and reconnect replay from that same history.
+
+## Core capabilities
+
+- **Browser-launched runs** - select a safe environment and suite and launch the real Gradle test
+  process through the REST control plane, with no SSH or CI-console round trip.
+- **Durable live progress** - `RUN_*`, `TEST_*`, and `STEP_*` events stream to the browser as they
+  happen and are committed to PostgreSQL before delivery. Reconnects replay from the last event;
+  a sequence gap triggers a clean full replay instead of silently desynchronizing.
+- **Restart recovery** - a run left `QUEUED`, `STARTING`, or `RUNNING` during a service restart is
+  reconciled to a terminal `ERROR` state before new work is accepted.
+- **Step-level diagnostics** - failure screenshots and Playwright traces belong to the specific
+  step that failed, and are directly downloadable from that step's result.
+- **Safe cancellation** - cancelling a live process reconciles the active test and step to
+  `INTERRUPTED` instead of leaving misleading in-progress state behind.
+- **Public evidence, protected mutations** - anonymous visitors can inspect the portfolio; only a
+  GitHub numeric-ID allowlisted administrator can launch or cancel runs. OAuth tokens remain on the
+  server and never reach browser JavaScript.
+- **Bounded operation** - per-surface rate limits, queue limits, artifact/process-log limits, health
+  checks, and crash-safe age/count retention keep a single-node portfolio deployment predictable.
 
 ## Run it locally in 5 minutes
 
@@ -115,9 +131,9 @@ see the full step/failure/screenshot/trace path immediately. More screenshots of
 The automation suite itself follows a strict, JUnit-extension-enforced tag taxonomy (exactly one
 layer, one feature, one effect tag per test - see [Test Strategy](docs/TEST_STRATEGY.md) for the
 risk-based reasoning) so a runner or CI pipeline can filter safely without guessing intent from a
-test's name. Four GitHub Actions workflows gate this repository, each proven green together on the
-same commit as part of this project's own release-candidate process (full detail, run links, and
-every acceptance criterion checked in [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md)):
+test's name. Five GitHub Actions workflows cover fast pull-request gates, real-browser integration,
+the writable local target, and load testing. Full run links and acceptance evidence live in
+[`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md):
 
 | Workflow | Gate |
 |---|---|
@@ -125,6 +141,7 @@ every acceptance criterion checked in [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE
 | `dashboard-quality.yml` | Frontend quality (lint, types, coverage, build) + OpenAPI contract drift, on every push/PR. |
 | `dashboard-e2e.yml` | The complete real-browser dashboard E2E suite (Playwright, real backend + real dashboard build), weekly + on demand. |
 | `local-sut.yml` | Full read-only + mutation regression against the local Docker stack, weekly + on demand. |
+| `performance-test.yml` | Blocking k6 correctness and latency thresholds against the production-policy topology, on demand. |
 
 The dashboard E2E suite (`dashboardE2eTest`) is the largest dedicated test suite in the repository
 (17 test classes, 21 test methods) - real-browser coverage of accessibility (axe-core + a dedicated
@@ -134,29 +151,22 @@ run-lifecycle/cancel/recovery/deep-link scenarios. See
 [`docs/RELEASE_CANDIDATE.md`](docs/RELEASE_CANDIDATE.md)'s acceptance matrix for exactly which test
 proves which scenario.
 
-## Current limitations
+## Scope and trade-offs
 
-This is a working release candidate, not a production deployment - the boundaries below are
-deliberate scope decisions for this stage, not hidden defects, and Faza D (packaging, persistence,
-security, deployment) is where each of them gets addressed:
-
-- **A run stuck `RUNNING` at the moment of a crash/restart is now reconciled to `ERROR` on the next
-  startup (Faza D2.5)** - run/event history is persisted to PostgreSQL (Faza D2) and survives a
-  `runner-service` restart intact, and any run still `QUEUED`/`STARTING`/`RUNNING` when the process
-  comes back up is recovered to `ERROR` (with a same-transaction `RUN_FINISHED(ERROR)` event) before
-  the service accepts any new run submissions or SSE subscriptions - no manual reconciliation needed.
-- **Artifact metadata is now in PostgreSQL (Faza D2.4), but the files themselves stay local-disk-only** -
-  `build/runner-artifacts/<runId>/` (screenshots/traces/logs) is never inlined into the database,
-  by design; only the artifact list is served from Postgres now.
-- **Single-instance only** - one `runner-service` process, one in-process run queue. There is no
-  clustering, leader election, or horizontal scaling.
-- **Authentication, authorization, and abuse protection are done (Faza D3)** - see "What it does"
-  above and `docs/DEPLOYMENT_ARCHITECTURE.md` §4 for the full access matrix; not re-described here
-  since it is no longer an open gap.
-- **Retention policy is done (Faza D4.1)** - a bounded run-history window (age or count, whichever
-  is hit first) plus a shorter, independent artifact-purge window prune old runs/screenshots/
-  traces/logs automatically; see "What it does" above and `docs/DEPLOYMENT_ARCHITECTURE.md` §6 for
-  the full mechanism.
+- **Single-instance by design** - one runner process and one bounded in-process queue; no clustering,
+  leader election, or horizontal scaling is claimed for this portfolio workload.
+- **Production runs are read-only** - the live `PORTFOLIO` profile exposes only the shared public
+  target and refuses local/mutation execution. Writable journey coverage runs against the isolated
+  seven-container local target in CI.
+- **Artifacts are local and disposable** - metadata is durable in PostgreSQL, while screenshots,
+  traces, and logs stay on the runner volume and expire after 14 days. Run history expires after
+  30 days or 500 terminal runs, whichever bound is reached first.
+- **No off-site backup for the live demo** - its run history is reproducible evidence rather than
+  business or user data. The repository includes and tests an encrypted PostgreSQL backup/restore
+  path, but the portfolio deployment intentionally accepts rebuilding its small history after a
+  host loss.
+- **External sandbox dependency** - public suites exercise the shared Restful Booker Platform demo,
+  so an upstream outage or behavior change can affect a run even when this platform is healthy.
 
 ## Automation suite
 
@@ -254,7 +264,7 @@ Every test gets a Playwright trace and video running the whole time, but only a 
 
 ### Database integration tests
 
-`databaseIntegrationTest` proves `runner-service`'s Flyway-managed PostgreSQL schema (Faza D2, see [`docs/DEPLOYMENT_ARCHITECTURE.md`](docs/DEPLOYMENT_ARCHITECTURE.md)) against a real database, not a compatible-looking stand-in — every test runs against a real `postgres` Docker image via [Testcontainers](https://testcontainers.com/), never H2 (H2 can't faithfully emulate `jsonb` or PostgreSQL's own row-locking semantics, both load-bearing for this schema's replay-atomicity protocol).
+`databaseIntegrationTest` proves `runner-service`'s Flyway-managed PostgreSQL schema (see [`docs/DEPLOYMENT_ARCHITECTURE.md`](docs/DEPLOYMENT_ARCHITECTURE.md)) against a real database, not a compatible-looking stand-in — every test runs against a real `postgres` Docker image via [Testcontainers](https://testcontainers.com/), never H2 (H2 can't faithfully emulate `jsonb` or PostgreSQL's own row-locking semantics, both load-bearing for this schema's replay-atomicity protocol).
 
 ```bash
 ./gradlew.bat :runner-service:databaseIntegrationTest
@@ -264,7 +274,7 @@ Requires Docker — the same requirement `dashboardE2eTest`'s underlying tooling
 
 Where results land: JUnit HTML report at `runner-service/build/reports/tests/databaseIntegrationTest/`, JUnit XML at `runner-service/build/test-results/databaseIntegrationTest/`.
 
-`RunnerServiceApplication` itself (Faza D2.3) now depends on a real Postgres too — every `bootRun`/`dashboardE2eTest` invocation, not just `databaseIntegrationTest`. `./gradlew.bat :runner-service:localPostgresUp`/`localPostgresDown` manage a throwaway `postgres:17-alpine` container on `localhost:5433` for local `bootRun` (see that task's own comment in `runner-service/build.gradle` for why 5433, not 5432); `dashboardE2eTest` provisions its own Testcontainers Postgres automatically, nothing to start by hand. The real `deploy/docker-compose.yml` deployment points `runner-service` at its sibling `postgres` service instead of either of these.
+`RunnerServiceApplication` itself depends on a real Postgres too — every `bootRun`/`dashboardE2eTest` invocation, not just `databaseIntegrationTest`. `./gradlew.bat :runner-service:localPostgresUp`/`localPostgresDown` manage a throwaway `postgres:17-alpine` container on `localhost:5433` for local `bootRun` (see that task's own comment in `runner-service/build.gradle` for why 5433, not 5432); `dashboardE2eTest` provisions its own Testcontainers Postgres automatically, nothing to start by hand. The real `deploy/docker-compose.yml` deployment points `runner-service` at its sibling `postgres` service instead of either of these.
 
 ### Configuration
 
