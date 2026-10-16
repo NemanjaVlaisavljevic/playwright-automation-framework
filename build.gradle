@@ -60,7 +60,7 @@ dependencies {
     // artifact needed) is also what makes mocking the static io.qameta.allure.Allure.addAttachment
     // possible there.
     testImplementation 'org.mockito:mockito-core:5.23.0'
-    testRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+    testRuntimeOnly 'ch.qos.logback:logback-classic:1.6.3'
 }
 
 // D4.2 - a dashboard-launched run passes -Drunner.allureResultsDir=<run-scoped path> (see
@@ -747,7 +747,7 @@ configurations {
 // needs to execute JUnit Platform tests at all.
 dependencies {
     dashboardE2eTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.5.22'
+    dashboardE2eTestRuntimeOnly 'ch.qos.logback:logback-classic:1.6.3'
     // D3.4 - OAuthFlowE2eTest stubs GitHub's own authorize/token/user-info endpoints so the real
     // login->launch->cancel->logout flow can be proven through a real browser + a real Spring
     // Security OAuth2 Login round trip, without ever depending on a real GitHub account, network
